@@ -1,0 +1,96 @@
+###############################################################################
+# EDAPT v2 — docker-compose.yml  (DEVELOPMENT)
+#
+# Services:  db · backend · frontend · pgadmin
+# Usage:     docker compose up --build
+###############################################################################
+
+name: edaptv2-dev
+
+services:
+
+  # ── PostgreSQL ─────────────────────────────────────────────────────────────
+  db:
+    image: postgres:16-alpine
+    container_name: edaptv2_db
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      POSTGRES_USER:     ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB:       ${POSTGRES_DB}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      # Place any seed / init SQL files in scripts/sql/ and they run on first boot
+      - ./scripts/sql:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "5432:5432"          # expose to host for direct DB access during dev
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── FastAPI backend ────────────────────────────────────────────────────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.dev
+    container_name: edaptv2_backend
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      ENVIRONMENT:  development
+    volumes:
+      - ./backend:/app          # hot-reload: source mounted into container
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    command: >
+      uvicorn app.main:app
+        --host 0.0.0.0
+        --port 8000
+        --reload
+        --log-level ${LOG_LEVEL:-info}
+
+  # ── React frontend ─────────────────────────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.dev
+    container_name: edaptv2_frontend
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      REACT_APP_API_BASE_URL: ${REACT_APP_API_BASE_URL:-http://localhost:8000}
+      CHOKIDAR_USEPOLLING: "true"   # needed for hot-reload inside Docker on some OS
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules           # anonymous volume prevents host override
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+
+  # ── pgAdmin ────────────────────────────────────────────────────────────────
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: edaptv2_pgadmin
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      PGADMIN_DEFAULT_EMAIL:    ${PGADMIN_DEFAULT_EMAIL}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_DEFAULT_PASSWORD}
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+    ports:
+      - "5050:80"
+    depends_on:
+      - db
+
+volumes:
+  postgres_data:
+  pgadmin_data:
