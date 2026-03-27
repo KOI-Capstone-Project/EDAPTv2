@@ -4,6 +4,7 @@
 This phase focuses on building the foundational database, Mode 1 (Descriptive Dashboard), and Mode 2 (Predictive Engine).
 
 ```mermaid
+%%{init: {'gantt': {'leftPadding': 150}}}%%
 gantt
     title EDAPT v2 - T2 2026 Timeline
     dateFormat  YYYY-MM-DD
