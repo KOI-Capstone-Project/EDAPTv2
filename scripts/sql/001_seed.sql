@@ -1,0 +1,14 @@
+-- EDAPT v2 — seed data placeholder
+-- Place any initial SQL here (e.g. lookup rows for trimesters, programs).
+-- This file is auto-executed by PostgreSQL on first container boot.
+
+-- Example: insert known trimesters
+-- INSERT INTO trimesters (study_period_code, year, trimester_number, is_prediction_target)
+-- VALUES
+--   ('2024T1', 2024, 1, FALSE),
+--   ('2024T2', 2024, 2, FALSE),
+--   ('2024T3', 2024, 3, FALSE),
+--   ('2025T1', 2025, 1, FALSE),
+--   ('2025T2', 2025, 2, FALSE),
+--   ('2025T3', 2025, 3, TRUE)
+-- ON CONFLICT DO NOTHING;
