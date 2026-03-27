@@ -1,6 +1,6 @@
 ## 📅 Project Timeline
 
-### Phase 1: T2 2026 (Core Development)
+### Phase 1: T1 2026 (Core Development)
 This phase focuses on building the foundational database, Mode 1 (Descriptive Dashboard), and Mode 2 (Predictive Engine).
 
 ```mermaid
@@ -28,7 +28,7 @@ gantt
     T1 Final Submission           :milestone, m3, 2026-05-18, 0d
 ```
 
-### Phase 2: T3 2026 (Live Integration & Handover)
+### Phase 2: T2 2026 (Live Integration & Handover)
 This future phase focuses on integrating the system with Moodle via LTI and handing the project over to KOI IT.
 ```mermaid
 %%{init: {'gantt': {'leftPadding': 150}}}%%
