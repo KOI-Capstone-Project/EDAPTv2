@@ -1,0 +1,6 @@
+services:
+  edaptv2:
+    image: edaptv2
+    build:
+      context: .
+      dockerfile: ./Dockerfile
