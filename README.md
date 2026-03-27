@@ -4,43 +4,45 @@
 This phase focuses on building the foundational database, Mode 1 (Descriptive Dashboard), and Mode 2 (Predictive Engine).
 
 ```mermaid
-%%{init: {'gantt': {'leftPadding': 180, 'rightPadding': 200}}}%%
+%%{init: {'gantt': {'leftPadding': 200, 'rightPadding': 200}}}%%
 gantt
-    title EDAPT v2 - T1 2026 Detailed Timeline
+    title EDAPT v2 - T1 2026 Realistic Timeline
     dateFormat  YYYY-MM-DD
     axisFormat  %b %d
+    tickInterval 7 day
+    todayMarker off
     
     section Planning & Setup
     T1 Officially Starts            :milestone, start, 2026-03-02, 0d
-    Project Kickoff & GitHub Repo   :a1, 2026-03-02, 3d
-    DB Schema Design (DrawSQL)      :a2, after a1, 3d
-    PostgreSQL Setup & Ingestion    :a3, after a2, 5d
-    UI Wireframing (Figma)          :a4, 2026-03-02, 7d
-    API Contract Definition         :a5, after a4, 4d
+    Course Intro & Team Formation   :p1, 2026-03-02, 14d
+    Project Topic Selection         :p2, 2026-03-16, 7d
+    Brainstorming & Task Dist.      :p3, 2026-03-23, 7d
+    Project Proposal Finalization   :p4, 2026-03-23, 7d
+    DB Schema & Repo Init           :a1, 2026-03-30, 4d
+    UI Wireframing (Figma)          :a2, 2026-03-30, 4d
+    API Contract Definition         :a3, 2026-03-30, 4d
     
     section Mode 1 (Descriptive)
-    FastAPI Boilerplate & Routers   :a6, 2026-03-16, 5d
-    Descriptive API Endpoints       :a7, after a6, 7d
-    React/Dash Layout & Routing     :a8, 2026-03-16, 5d
-    UI Component Build (Filters)    :a9, after a8, 7d
-    Chart Integration (Plotly/D3)   :a10, after a9, 10d
-    Mode 1 Integration Testing      :a11, after a10, 5d
+    FastAPI & React Boilerplate     :b1, 2026-04-03, 3d
+    Descriptive API Endpoints       :b2, after b1, 4d
+    UI Component Build (Filters)    :b3, 2026-04-03, 4d
+    Chart Integration (Plotly/D3)   :b4, after b3, 4d
+    Mode 1 Integration Testing      :b5, 2026-04-10, 3d
     Week 6 Check-in Prototype       :milestone, m1, 2026-04-13, 0d
     
     section Mode 2 (Predictive)
-    T2 2025 Data Cleaning & Prep    :a12, 2026-04-13, 5d
-    Feature Engineering             :a13, after a12, 4d
-    Model Training (XGBoost/RF)     :a14, after a13, 6d
-    Accuracy Validation (>75% KPI)  :a15, after a14, 4d
-    Predictive API Endpoints        :a16, after a14, 4d
+    T2 2025 Data Cleaning & Prep    :c1, 2026-04-13, 5d
+    Feature Engineering             :c2, after c1, 5d
+    Model Training (XGBoost/RF)     :c3, after c2, 6d
+    Accuracy Validation (>75% KPI)  :c4, after c3, 5d
+    Predictive API Endpoints        :c5, after c3, 5d
     Week 9 ML Check-in              :milestone, m2, 2026-05-04, 0d
     
-    section Finalization
-    Gemini Prompt Engineering       :a17, 2026-05-04, 3d
-    LLM API Integration & UI        :a18, after a17, 5d
-    White Paper: Predictive Logic   :a19, 2026-05-04, 7d
-    System & API Documentation      :a20, after a19, 5d
-    End-to-End Bug Fixing & QA      :a21, 2026-05-11, 7d
+    section Finalization & Docs
+    Gemini Prompt Eng & API         :d1, 2026-05-04, 5d
+    Compile Final System Docs       :d2, 2026-05-04, 7d
+    White Paper Drafting            :d3, 2026-05-04, 7d
+    End-to-End Bug Fixing & QA      :d4, 2026-05-11, 7d
     T1 Final Submission             :milestone, m3, 2026-05-18, 0d
 ```
 
