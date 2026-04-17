@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import api from './services/api';
 import './Login.css';
@@ -26,6 +26,12 @@ const Login = () => {
   const [error, setError]             = useState(null);
   const [showPassword, setShowPassword] = useState(false);
   const registered = location.state?.registered;
+
+  useEffect(() => {
+    if (registered) {
+      window.history.replaceState({}, document.title);
+    }
+  }, [registered]);
 
   const handleChange = (e) => {
     setFormData({ ...formData, [e.target.name]: e.target.value });
