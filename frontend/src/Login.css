@@ -1,0 +1,223 @@
+/* ── Login Page — EDAPT v2 ───────────────────────────────────────────────── */
+
+.login-container {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background-color: #1a1a2e;
+  font-family: 'Inter', sans-serif;
+}
+
+/* ── Card ───────────────────────────────────────────────────────────────── */
+.login-card {
+  background-color: #23233a;
+  padding: 44px 40px;
+  border-radius: 16px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.55);
+  width: 100%;
+  max-width: 400px;
+}
+
+/* ── Brand mark ─────────────────────────────────────────────────────────── */
+.login-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 28px;
+}
+
+.login-brand-icon {
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  background: linear-gradient(135deg, #6c63ff 0%, #4f8ef7 100%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 800;
+  font-size: 18px;
+  color: #fff;
+  letter-spacing: -1px;
+  flex-shrink: 0;
+}
+
+.login-brand span {
+  font-size: 15px;
+  font-weight: 600;
+  color: #c0c0d8;
+  letter-spacing: 0.5px;
+}
+
+/* ── Header ─────────────────────────────────────────────────────────────── */
+.login-header {
+  margin-bottom: 28px;
+}
+
+.login-header h2 {
+  margin: 0 0 6px;
+  font-size: 26px;
+  font-weight: 700;
+  color: #e0e0f0;
+}
+
+.login-header p {
+  margin: 0;
+  font-size: 14px;
+  color: #8f8f9d;
+}
+
+/* ── Form ───────────────────────────────────────────────────────────────── */
+.login-form {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.input-group {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.input-group label {
+  font-size: 13px;
+  font-weight: 600;
+  color: #b0b0c0;
+}
+
+.password-label-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.forgot-link {
+  font-size: 12px;
+  color: #6c63ff;
+  text-decoration: none;
+  font-weight: 500;
+  transition: color 0.2s;
+}
+
+.forgot-link:hover {
+  color: #574bfa;
+  text-decoration: underline;
+}
+
+.input-group input {
+  padding: 12px 16px;
+  border-radius: 8px;
+  border: 1px solid #3a3a5a;
+  background-color: #1a1a2e;
+  color: #ffffff;
+  font-size: 15px;
+  outline: none;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+  font-family: inherit;
+}
+
+.input-group input:focus {
+  border-color: #6c63ff;
+  box-shadow: 0 0 0 3px rgba(108, 99, 255, 0.2);
+}
+
+.input-group input::placeholder {
+  color: #5a5a7a;
+}
+
+/* ── Success banner ─────────────────────────────────────────────────────── */
+.login-success {
+  background-color: rgba(80, 200, 120, 0.12);
+  border: 1px solid rgba(80, 200, 120, 0.4);
+  color: #5dc887;
+  padding: 10px 14px;
+  border-radius: 8px;
+  font-size: 14px;
+  margin-bottom: 4px;
+}
+
+/* ── Error banner ───────────────────────────────────────────────────────── */
+.login-error {
+  background-color: rgba(255, 80, 80, 0.1);
+  border: 1px solid rgba(255, 80, 80, 0.35);
+  color: #ff7070;
+  border-radius: 8px;
+  padding: 10px 14px;
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.error-icon {
+  font-size: 15px;
+  flex-shrink: 0;
+}
+
+/* ── Submit button ──────────────────────────────────────────────────────── */
+.login-button {
+  margin-top: 6px;
+  padding: 14px;
+  background: linear-gradient(135deg, #6c63ff 0%, #574bfa 100%);
+  color: white;
+  border: none;
+  border-radius: 8px;
+  font-size: 15px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: opacity 0.2s ease, transform 0.1s ease;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 48px;
+  font-family: inherit;
+}
+
+.login-button:hover:not(:disabled) {
+  opacity: 0.9;
+  transform: translateY(-1px);
+}
+
+.login-button:active:not(:disabled) {
+  transform: translateY(0);
+}
+
+.login-button:disabled,
+.login-button--loading {
+  opacity: 0.65;
+  cursor: not-allowed;
+}
+
+/* ── Spinner ────────────────────────────────────────────────────────────── */
+.spinner {
+  width: 18px;
+  height: 18px;
+  border: 2px solid rgba(255, 255, 255, 0.3);
+  border-top-color: #ffffff;
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+  display: inline-block;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+/* ── Footer ─────────────────────────────────────────────────────────────── */
+.login-footer {
+  margin-top: 24px;
+  text-align: center;
+  font-size: 14px;
+  color: #8f8f9d;
+}
+
+.login-footer a {
+  color: #6c63ff;
+  text-decoration: none;
+  font-weight: 600;
+}
+
+.login-footer a:hover {
+  text-decoration: underline;
+}

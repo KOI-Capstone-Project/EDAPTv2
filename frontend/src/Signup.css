@@ -94,6 +94,39 @@
   background-color: #574bfa;
 }
 
+/* Error banner */
+.signup-error {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background-color: rgba(255, 80, 80, 0.12);
+  border: 1px solid rgba(255, 80, 80, 0.4);
+  color: #ff6b6b;
+  padding: 10px 14px;
+  border-radius: 8px;
+  font-size: 14px;
+}
+
+/* Loading spinner */
+.spinner {
+  display: inline-block;
+  width: 18px;
+  height: 18px;
+  border: 2px solid rgba(255, 255, 255, 0.3);
+  border-top-color: #ffffff;
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.signup-button--loading {
+  opacity: 0.75;
+  cursor: not-allowed;
+}
+
 /* Footer Link */
 .signup-footer {
   margin-top: 24px;
