@@ -115,6 +115,8 @@
   outline: none;
   transition: border-color 0.2s ease, box-shadow 0.2s ease;
   font-family: inherit;
+  width: 100%;
+  box-sizing: border-box;
 }
 
 .input-group input:focus {
@@ -124,6 +126,33 @@
 
 .input-group input::placeholder {
   color: #5a5a7a;
+}
+
+.password-wrapper {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.password-wrapper input {
+  padding-right: 44px;
+}
+
+.eye-toggle {
+  position: absolute;
+  right: 12px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: #5a5a7a;
+  display: flex;
+  align-items: center;
+  padding: 0;
+  transition: color 0.2s;
+}
+
+.eye-toggle:hover {
+  color: #b0b0c0;
 }
 
 /* ── Success banner ─────────────────────────────────────────────────────── */
