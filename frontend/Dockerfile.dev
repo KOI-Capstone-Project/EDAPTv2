@@ -8,7 +8,7 @@ WORKDIR /app
 
 # Install deps separately so layer is cached on package.json changes only
 COPY package.json package-lock.json* ./
-RUN npm ci
+RUN npm install
 
 EXPOSE 3000
 
