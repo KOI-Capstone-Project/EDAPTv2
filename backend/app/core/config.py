@@ -28,5 +28,9 @@ class Settings(BaseSettings):
     # Gemini
     GEMINI_API_KEY: str = ""
 
+    # ── Auth ─────────────────────────────────────────────────────────────────
+    # How long a JWT stays valid. 480 min = 8 hours (one work day).
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 480
+
 
 settings = Settings()
