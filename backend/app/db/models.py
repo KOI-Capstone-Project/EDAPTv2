@@ -41,7 +41,7 @@ from sqlalchemy.orm import DeclarativeBase, relationship
 
 class Base(DeclarativeBase):
     """Shared declarative base for all EDAPT models."""
-    pass
+    __allow_unmapped__ = True
 
 
 # ---------------------------------------------------------------------------
@@ -49,17 +49,8 @@ class Base(DeclarativeBase):
 # ---------------------------------------------------------------------------
 
 class AuditMixin:
-    created_at: datetime = Column(
-        DateTime(timezone=True),
-        server_default=func.now(),
-        nullable=False,
-    )
-    updated_at: datetime = Column(
-        DateTime(timezone=True),
-        server_default=func.now(),
-        onupdate=func.now(),
-        nullable=False,
-    )
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 
 
 # ===========================================================================
@@ -591,3 +582,45 @@ class Prediction(AuditMixin, Base):
     # Relationships
     student: "Student" = relationship("Student", back_populates="predictions")
     trimester: "Trimester" = relationship("Trimester", back_populates="predictions")
+
+class User(AuditMixin, Base):
+    """
+    Application user account for EDAPT staff / admins.
+
+    No student PII is ever stored in this table — it only represents
+    the system users who operate the analytics dashboard.
+    """
+
+    __tablename__ = "users"
+
+    id: int = Column(Integer, primary_key=True, autoincrement=True)
+
+    name: str = Column(String(120), nullable=False)
+
+    email: str = Column(
+        String(254),
+        unique=True,
+        nullable=False,
+        index=True,
+        comment="Login email address — must be unique across all accounts",
+    )
+
+    hashed_password: str = Column(
+        String(255),
+        nullable=False,
+        comment="bcrypt hash of the user's password. Plain-text is never stored.",
+    )
+
+    role: str = Column(
+        String(30),
+        nullable=False,
+        default="staff",
+        comment="Role label: 'admin' or 'staff'",
+    )
+
+    is_active: bool = Column(
+        Boolean,
+        nullable=False,
+        default=True,
+        comment="Set to False to disable login without deleting the account",
+    )

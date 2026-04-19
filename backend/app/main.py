@@ -11,6 +11,7 @@ from app.core.config import settings
 from app.db.session import engine
 from app.db.base import Base
 from app.api.routes import assessments, predictions, students, subjects
+from app.api.routes import auth
 
 
 @asynccontextmanager
@@ -40,7 +41,8 @@ app.add_middleware(
 )
 
 # ── Routers ───────────────────────────────────────────────────────────────────
-app.include_router(students.router,     prefix="/api/v1/students",     tags=["Students"])
+app.include_router(auth.router,         prefix="/api/v1/auth",          tags=["Auth"])
+app.include_router(students.router,     prefix="/api/v1/students",      tags=["Students"])
 app.include_router(subjects.router,     prefix="/api/v1/subjects",      tags=["Subjects"])
 app.include_router(assessments.router,  prefix="/api/v1/assessments",   tags=["Assessments"])
 app.include_router(predictions.router,  prefix="/api/v1/predictions",   tags=["Predictions"])
