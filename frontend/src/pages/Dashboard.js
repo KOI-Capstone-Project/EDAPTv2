@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid,
   Tooltip, ResponsiveContainer, Legend,
@@ -10,6 +10,12 @@ export default function Dashboard() {
   const [loading, setLoading] = useState(true);
   const [error, setError]     = useState(null);
 
+  const user     = (() => {
+    try { return JSON.parse(localStorage.getItem('edapt_user') || '{}'); }
+    catch { return {}; }
+  })();
+  const userName = user.name || 'User';
+
   useEffect(() => {
     api.get('/api/v1/assessments/summary')
       .then(res => setSummary(res.data?.data ?? []))
@@ -19,6 +25,13 @@ export default function Dashboard() {
 
   return (
     <div>
+      {/* ── Welcome banner ─────────────────────────────────────── */}
+      <div style={s.welcome}>
+        <p style={s.welcomeGreeting}>Welcome back,</p>
+        <h2 style={s.welcomeName}>{userName}</h2>
+        <p style={s.welcomeSub}>Thank you for your work today.</p>
+      </div>
+
       <h1 className="page-title">Mode 1 — Descriptive Analytics</h1>
 
       <div className="card">
@@ -51,3 +64,16 @@ export default function Dashboard() {
     </div>
   );
 }
+
+const s = {
+  welcome: {
+    background: 'linear-gradient(135deg, #1A2E40 0%, #2E6E8E 100%)',
+    borderRadius: 12,
+    padding: '20px 28px',
+    marginBottom: 28,
+    color: '#fff',
+  },
+  welcomeGreeting: { margin: 0, fontSize: 13, opacity: 0.75, fontWeight: 400 },
+  welcomeName:     { margin: '4px 0 0', fontSize: 22, fontWeight: 700 },
+  welcomeSub:      { margin: '6px 0 0', fontSize: 13, opacity: 0.65 },
+};

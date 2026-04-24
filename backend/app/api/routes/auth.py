@@ -9,6 +9,7 @@ from pydantic import BaseModel, EmailStr
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.audit import append_event
 from app.core.security import create_access_token, decode_access_token, hash_password, verify_password
 from app.db.models import User
 from app.db.session import get_db
@@ -106,12 +107,26 @@ async def login(
     user = result.scalar_one_or_none()
 
     if user is None or not verify_password(form.password, user.hashed_password):
+        append_event(
+            user_uid=form.username,
+            role="Unknown",
+            action_type="Login Failed",
+            status="Alert",
+            detail=f"Invalid credentials for {form.username}",
+        )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect email or password.",
             headers={"WWW-Authenticate": "Bearer"},
         )
 
+    append_event(
+        user_uid=user.email,
+        role=user.role,
+        action_type="Login",
+        status="Success",
+        detail=f"Successful login for {user.email}",
+    )
     token = create_access_token(subject=user.email)
     return TokenOut(access_token=token, user=UserOut.model_validate(user))
 

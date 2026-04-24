@@ -6,6 +6,13 @@ const api = axios.create({
   timeout: 30000,
 });
 
+// Attach JWT on every request if available
+api.interceptors.request.use((config) => {
+  const token = localStorage.getItem('edapt_token');
+  if (token) config.headers.Authorization = `Bearer ${token}`;
+  return config;
+});
+
 // Global response interceptor — log errors in dev
 api.interceptors.response.use(
   res => res,
