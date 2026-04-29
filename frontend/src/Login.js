@@ -53,11 +53,10 @@ const Login = () => {
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       });
 
-      // Persist token so subsequent API calls are authenticated
-      localStorage.setItem('access_token', res.data.access_token);
+      localStorage.setItem('edapt_token', res.data.access_token);
+      localStorage.setItem('edapt_user', JSON.stringify(res.data.user));
 
-      // Redirect to main dashboard
-      navigate('/');
+      navigate('/dashboard');
     } catch (err) {
       const detail = err.response?.data?.detail;
       setError(detail || 'Login failed. Please check your credentials.');
@@ -140,7 +139,7 @@ const Login = () => {
             className={`login-button ${loading ? 'login-button--loading' : ''}`}
             disabled={loading}
           >
-            {loading ? <span className="spinner" /> : 'Sign In'}
+            {loading ? <><span className="spinner" /> Signing in…</> : 'Sign In'}
           </button>
         </form>
 
