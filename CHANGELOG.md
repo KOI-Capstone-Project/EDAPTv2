@@ -4,6 +4,31 @@ All notable changes to EDAPT v2 are documented here.
 
 ---
 
+## [Unreleased] — 2026-04-24
+
+### Added
+- **Collapsible sidebar** (`frontend/src/components/Sidebar.jsx`) — toggle button collapses sidebar from 220 px (icons + labels) to 64 px (icons only); width animates with CSS transition; tooltips appear on icon hover when collapsed
+- **Shared layout component** (`frontend/src/components/Layout.jsx`) — wraps the collapsible sidebar and a scrollable main content area; used by all protected pages so sidebar is consistent across the entire app
+- **Welcome banner on Dashboard** — reads `edapt_user` from `localStorage` and displays "Welcome back, [name]. Thank you for your work today." as a gradient card above the analytics charts
+- **User info panel at sidebar bottom** — shows the logged-in user's initials avatar, full name, and role (read from `localStorage`); collapses to avatar-only when sidebar is collapsed
+- **Explorer page** (`frontend/src/pages/Explorer.jsx`) — placeholder page for the upcoming student record browser; wired to `/explorer` route
+- **Settings page** (`frontend/src/pages/Settings.jsx`) — displays account info (name, email, role) from `localStorage`; placeholder section for future preferences; wired to `/settings` route
+- **`POST /api/ingest` router** (`backend/app/api/routes/ingest.py`) — extracted from `main.py` into its own router; accepts `.csv`, `.xlsx`, `.json` uploads, parses with pandas, returns `row_count`, `columns`, and a 10-row preview; writes a `Data Upload` audit event on success
+- **`GET /api/audit-logs` router** (`backend/app/api/routes/audit.py`) — extracted from `main.py` into its own router; supports optional query filters: `uid`, `action_type`, `status`, `role`
+
+### Changed
+- **`frontend/src/App.js`** — all six protected routes now render inside `<Layout>` (unified sidebar layout); removed the old top header (`app-header`) and the `SIDEBAR_ROUTES` split logic; added routes for `/explorer` and `/settings`; root `/` redirects to `/dashboard`
+- **`frontend/src/pages/DataIngestion.jsx`** — removed the embedded `<Sidebar />` import and outer `flex` wrapper (Layout now provides both); page now returns its content directly, matching the shared Layout padding and background
+- **`frontend/src/pages/AuditLog.jsx`** — same as DataIngestion: removed embedded `<Sidebar />` and outer wrapper
+- **`backend/app/main.py`** — cleaned up to only contain app setup, middleware, and router registration; all business logic moved to dedicated route files; imports reduced from 10 to 6
+- **`frontend/src/components/Sidebar.jsx`** — rewritten to support collapsible state; nav item for Dashboard updated from `/` to `/dashboard`; logout button clears both `edapt_token` and `edapt_user` from `localStorage` before redirecting
+
+### Fixed
+- All six sidebar navigation links now navigate to their correct routes — previously Explorer (`/explorer`) and Settings (`/settings`) had no matching `<Route>` and would silently 404
+- Pages that previously embedded their own `<Sidebar />` (DataIngestion, AuditLog) no longer render a second sidebar when placed inside Layout
+
+---
+
 ## [Unreleased] — 2026-04-17
 
 ### Added

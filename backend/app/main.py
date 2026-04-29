@@ -1,23 +1,18 @@
-"""
-EDAPT v2 — FastAPI Application Entry Point
-"""
+"""EDAPT v2 — FastAPI Application Entry Point"""
 
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.api.routes import assessments, auth, audit, ingest, predictions, students, subjects
 from app.core.config import settings
-from app.db.session import engine
 from app.db.base import Base
-from app.api.routes import assessments, predictions, students, subjects
-from app.api.routes import auth
+from app.db.session import engine
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Create all DB tables on startup (dev convenience).
-    Use Alembic migrations in production instead."""
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all, checkfirst=True)
     yield
@@ -31,7 +26,6 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# ── CORS ──────────────────────────────────────────────────────────────────────
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.CORS_ORIGINS,
@@ -41,11 +35,13 @@ app.add_middleware(
 )
 
 # ── Routers ───────────────────────────────────────────────────────────────────
-app.include_router(auth.router,         prefix="/api/v1/auth",          tags=["Auth"])
-app.include_router(students.router,     prefix="/api/v1/students",      tags=["Students"])
-app.include_router(subjects.router,     prefix="/api/v1/subjects",      tags=["Subjects"])
-app.include_router(assessments.router,  prefix="/api/v1/assessments",   tags=["Assessments"])
-app.include_router(predictions.router,  prefix="/api/v1/predictions",   tags=["Predictions"])
+app.include_router(auth.router,         prefix="/api/v1/auth",        tags=["Auth"])
+app.include_router(students.router,     prefix="/api/v1/students",    tags=["Students"])
+app.include_router(subjects.router,     prefix="/api/v1/subjects",    tags=["Subjects"])
+app.include_router(assessments.router,  prefix="/api/v1/assessments", tags=["Assessments"])
+app.include_router(predictions.router,  prefix="/api/v1/predictions", tags=["Predictions"])
+app.include_router(ingest.router,       prefix="/api/ingest",         tags=["Ingest"])
+app.include_router(audit.router,        prefix="/api/audit-logs",     tags=["Audit"])
 
 
 @app.get("/health", tags=["Health"])
