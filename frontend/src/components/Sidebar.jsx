@@ -48,6 +48,14 @@ const IconSettings = () => (
     <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
   </svg>
 );
+const IconUsers = () => (
+  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/>
+    <circle cx="9" cy="7" r="4"/>
+    <path d="M23 21v-2a4 4 0 0 0-3-3.87"/>
+    <path d="M16 3.13a4 4 0 0 1 0 7.75"/>
+  </svg>
+);
 const IconLogout = () => (
   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
     <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
@@ -55,13 +63,17 @@ const IconLogout = () => (
   </svg>
 );
 
-const NAV_ITEMS = [
+const BASE_NAV = [
   { label: 'Dashboard',      icon: <IconDashboard />, to: '/dashboard'      },
   { label: 'Explorer',       icon: <IconExplorer />,  to: '/explorer'       },
   { label: 'Predictor',      icon: <IconPredictor />, to: '/predictions'    },
   { label: 'Data Ingestion', icon: <IconIngestion />, to: '/data-ingestion' },
   { label: 'Audit Log',      icon: <IconAuditLog />,  to: '/audit-log'      },
   { label: 'Settings',       icon: <IconSettings />,  to: '/settings'       },
+];
+
+const ADMIN_NAV = [
+  { label: 'Users', icon: <IconUsers />, to: '/users', adminOnly: true },
 ];
 
 export default function Sidebar() {
@@ -72,6 +84,9 @@ export default function Sidebar() {
     try { return JSON.parse(localStorage.getItem('edapt_user') || '{}'); }
     catch { return {}; }
   })();
+
+  const isAdmin = user.role === 'administrator';
+  const NAV_ITEMS = isAdmin ? [...BASE_NAV, ...ADMIN_NAV] : BASE_NAV;
 
   const initials = user.name
     ? user.name.split(' ').map(w => w[0]).join('').slice(0, 2).toUpperCase()
@@ -109,21 +124,35 @@ export default function Sidebar() {
 
       {/* ── Navigation ───────────────────────────────────────── */}
       <nav style={s.nav}>
-        {NAV_ITEMS.map(({ label, icon, to }) => (
-          <NavLink
-            key={to}
-            to={to}
-            style={({ isActive }) => ({
-              ...s.item,
-              ...(isActive ? s.itemActive : {}),
-              justifyContent: collapsed ? 'center' : 'flex-start',
-              padding: collapsed ? '10px 0' : '9px 12px',
-            })}
-            title={collapsed ? label : undefined}
-          >
-            <span style={s.icon}>{icon}</span>
-            {!collapsed && label}
-          </NavLink>
+        {NAV_ITEMS.map(({ label, icon, to, adminOnly }, idx) => (
+          <React.Fragment key={to}>
+            {adminOnly && (
+              <div style={{
+                borderTop: '1px solid rgba(255,255,255,0.07)',
+                margin: '6px 0',
+                ...(!collapsed && { paddingTop: 4 }),
+              }}>
+                {!collapsed && (
+                  <span style={{ fontSize: 10, fontWeight: 700, color: '#475569', letterSpacing: 1, textTransform: 'uppercase', padding: '4px 12px 2px', display: 'block' }}>
+                    Admin
+                  </span>
+                )}
+              </div>
+            )}
+            <NavLink
+              to={to}
+              style={({ isActive }) => ({
+                ...s.item,
+                ...(isActive ? s.itemActive : {}),
+                justifyContent: collapsed ? 'center' : 'flex-start',
+                padding: collapsed ? '10px 0' : '9px 12px',
+              })}
+              title={collapsed ? label : undefined}
+            >
+              <span style={s.icon}>{icon}</span>
+              {!collapsed && label}
+            </NavLink>
+          </React.Fragment>
         ))}
       </nav>
 

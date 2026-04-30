@@ -7,12 +7,26 @@ import DataIngestion from './pages/DataIngestion';
 import AuditLog from './pages/AuditLog';
 import Explorer from './pages/Explorer';
 import Settings from './pages/Settings';
+import Users from './pages/Users';
 import Signup from './Signup';
 import Login from './Login';
+
+function getUser() {
+  try { return JSON.parse(localStorage.getItem('edapt_user') || '{}'); }
+  catch { return {}; }
+}
 
 function PrivateRoute({ children }) {
   const token = localStorage.getItem('edapt_token');
   return token ? children : <Navigate to="/login" replace />;
+}
+
+function AdminRoute({ children }) {
+  const token = localStorage.getItem('edapt_token');
+  if (!token) return <Navigate to="/login" replace />;
+  const user = getUser();
+  if (user.role !== 'administrator') return <Navigate to="/dashboard" replace />;
+  return children;
 }
 
 function Protected({ children }) {
@@ -36,6 +50,12 @@ export default function App() {
       <Route path="/audit-log"      element={<Protected><AuditLog /></Protected>} />
       <Route path="/explorer"       element={<Protected><Explorer /></Protected>} />
       <Route path="/settings"       element={<Protected><Settings /></Protected>} />
+
+      <Route path="/users" element={
+        <AdminRoute>
+          <Layout><Users /></Layout>
+        </AdminRoute>
+      } />
     </Routes>
   );
 }

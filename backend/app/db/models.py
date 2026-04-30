@@ -14,6 +14,7 @@ Design notes:
   - Every table carries created_at / updated_at audit timestamps.
 """
 
+import enum
 from datetime import datetime
 
 from sqlalchemy import (
@@ -33,6 +34,16 @@ from sqlalchemy import (
     func,
 )
 from sqlalchemy.orm import DeclarativeBase, relationship
+
+
+# ---------------------------------------------------------------------------
+# Role enum
+# ---------------------------------------------------------------------------
+
+class UserRole(str, enum.Enum):
+    lecturer      = "lecturer"
+    hod           = "hod"
+    administrator = "administrator"
 
 
 # ---------------------------------------------------------------------------
@@ -273,6 +284,7 @@ class Lecturer(AuditMixin, Base):
 
     # Relationships
     class_groups: list = relationship("ClassGroup", back_populates="lecturer")
+    user: "User | None" = relationship("User", back_populates="lecturer", uselist=False)
 
 
 # ===========================================================================
@@ -614,8 +626,22 @@ class User(AuditMixin, Base):
     role: str = Column(
         String(30),
         nullable=False,
-        default="staff",
-        comment="Role label: 'admin' or 'staff'",
+        default=UserRole.lecturer,
+        comment="Role: 'lecturer', 'hod', or 'administrator'",
+    )
+
+    department: str | None = Column(
+        String(100),
+        nullable=True,
+        comment="Department name — used for HOD-scoped data access",
+    )
+
+    lecturer_id: int | None = Column(
+        Integer,
+        ForeignKey("lecturers.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+        comment="Links a lecturer-role user to their Lecturer record for data scoping",
     )
 
     is_active: bool = Column(
@@ -624,3 +650,12 @@ class User(AuditMixin, Base):
         default=True,
         comment="Set to False to disable login without deleting the account",
     )
+
+    last_login_at: datetime | None = Column(
+        DateTime(timezone=True),
+        nullable=True,
+        comment="Timestamp of the most recent successful login",
+    )
+
+    # Relationships
+    lecturer: "Lecturer | None" = relationship("Lecturer", back_populates="user", foreign_keys=[lecturer_id])

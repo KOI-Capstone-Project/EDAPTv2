@@ -1,28 +1,33 @@
 """
 EDAPT v2 — Auth router
 Endpoints: POST /register · POST /login · GET /me
+
+/register is the bootstrap endpoint: it only works when no users exist in the
+database yet, and it always creates an administrator account. Subsequent users
+are created by an administrator via POST /api/v1/users.
 """
 
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, Depends, HTTPException, status
-from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from fastapi.security import OAuth2PasswordRequestForm
 from pydantic import BaseModel, EmailStr
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from typing import Optional
 
 from app.core.audit import append_event
-from app.core.security import create_access_token, decode_access_token, hash_password, verify_password
-from app.db.models import User
+from app.core.deps import get_current_user
+from app.core.security import create_access_token, hash_password, verify_password
+from app.db.models import User, UserRole
 from app.db.session import get_db
 
 router = APIRouter()
 
-# FastAPI reads the Bearer token from the Authorization header
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
 
+# ── Schemas ───────────────────────────────────────────────────────────────────
 
-# ── Pydantic schemas ──────────────────────────────────────────────────────
-
-class UserCreate(BaseModel):
+class BootstrapCreate(BaseModel):
     name: str
     email: EmailStr
     password: str
@@ -33,6 +38,8 @@ class UserOut(BaseModel):
     name: str
     email: str
     role: str
+    department: Optional[str]
+    is_active: bool
 
     class Config:
         from_attributes = True
@@ -44,38 +51,29 @@ class TokenOut(BaseModel):
     user: UserOut
 
 
-# ── Dependency: resolve current user from JWT ─────────────────────────────
-
-async def get_current_user(
-    token: str = Depends(oauth2_scheme),
-    db: AsyncSession = Depends(get_db),
-) -> User:
-    subject = decode_access_token(token)
-    if subject is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Could not validate credentials.",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    result = await db.execute(select(User).where(User.email == subject))
-    user = result.scalar_one_or_none()
-    if user is None:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found.")
-    return user
-
-
-# ── Routes ────────────────────────────────────────────────────────────────
+# ── Routes ────────────────────────────────────────────────────────────────────
 
 @router.post("/register", response_model=UserOut, status_code=status.HTTP_201_CREATED)
-async def register(payload: UserCreate, db: AsyncSession = Depends(get_db)):
+async def register(payload: BootstrapCreate, db: AsyncSession = Depends(get_db)):
     """
-    Create a new staff / admin account.
+    Bootstrap endpoint — creates the first administrator account.
 
-    - Rejects duplicate emails with 409 Conflict.
-    - Stores only a bcrypt hash — the plain-text password is never persisted.
+    Only succeeds when the users table is empty. Once any user exists,
+    this endpoint returns 403. All further accounts must be created by
+    an administrator via POST /api/v1/users.
     """
-    result = await db.execute(select(User).where(User.email == payload.email))
-    if result.scalar_one_or_none():
+    count_result = await db.execute(select(func.count()).select_from(User))
+    if count_result.scalar() > 0:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                "Registration is disabled once users exist. "
+                "Ask an administrator to create your account via POST /api/v1/users."
+            ),
+        )
+
+    existing = await db.execute(select(User).where(User.email == payload.email))
+    if existing.scalar_one_or_none():
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="An account with that email already exists.",
@@ -85,9 +83,10 @@ async def register(payload: UserCreate, db: AsyncSession = Depends(get_db)):
         name=payload.name,
         email=payload.email,
         hashed_password=hash_password(payload.password),
+        role=UserRole.administrator.value,
     )
     db.add(user)
-    await db.flush()   # get the auto-generated id before commit
+    await db.flush()
     return user
 
 
@@ -119,6 +118,14 @@ async def login(
             detail="Incorrect email or password.",
             headers={"WWW-Authenticate": "Bearer"},
         )
+
+    if not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Account is disabled. Contact an administrator.",
+        )
+
+    user.last_login_at = datetime.now(timezone.utc)
 
     append_event(
         user_uid=user.email,
