@@ -86,8 +86,6 @@ export default function AIEngine() {
     }
   };
 
-  const selectedModelInfo = MODELS.find(m => m.value === model);
-
   return (
     <div>
       <div style={s.header}>
