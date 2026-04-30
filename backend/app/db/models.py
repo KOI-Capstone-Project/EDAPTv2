@@ -595,6 +595,26 @@ class Prediction(AuditMixin, Base):
     student: "Student" = relationship("Student", back_populates="predictions")
     trimester: "Trimester" = relationship("Trimester", back_populates="predictions")
 
+class AppSettings(Base):
+    """
+    Application-wide key-value settings store.
+
+    Used for administrator-managed configuration such as the Gemini API key
+    and selected AI model. Each row is a single named setting.
+    """
+
+    __tablename__ = "app_settings"
+
+    key: str = Column(String(100), primary_key=True, comment="Setting name, e.g. 'gemini_api_key'")
+    value: str | None = Column(Text, nullable=True, comment="Setting value")
+    updated_at: datetime = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
 class User(AuditMixin, Base):
     """
     Application user account for EDAPT staff / admins.

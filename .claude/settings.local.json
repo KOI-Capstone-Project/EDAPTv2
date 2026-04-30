@@ -6,7 +6,8 @@
       "Bash(curl -s -X POST http://localhost:8000/api/v1/auth/register -H 'Content-Type: application/json' -d '{\"name\":\"Admin User\",\"email\":\"admin@edapt.local\",\"password\":\"Admin1234!\"}')",
       "Bash(python -m json.tool)",
       "Bash(curl -s -X POST http://localhost:8000/api/v1/auth/register -H 'Content-Type: application/json' -d '{\"name\":\"Admin User\",\"email\":\"admin@edapt.com\",\"password\":\"Admin1234!\"}')",
-      "Bash(curl -s http://localhost:8000/openapi.json)"
+      "Bash(curl -s http://localhost:8000/openapi.json)",
+      "Bash(docker restart *)"
     ]
   }
 }

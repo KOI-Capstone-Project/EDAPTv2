@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.routes import assessments, auth, audit, ingest, predictions, students, subjects, users
+from app.api.routes import ai_engine, assessments, auth, audit, ingest, predictions, students, subjects, users
 from app.core.config import settings
 from app.db.base import Base
 from app.db.session import engine
@@ -37,6 +37,7 @@ app.add_middleware(
 # ── Routers ───────────────────────────────────────────────────────────────────
 app.include_router(auth.router,         prefix="/api/v1/auth",        tags=["Auth"])
 app.include_router(users.router,        prefix="/api/v1/users",       tags=["Users"])
+app.include_router(ai_engine.router,    prefix="/api/v1/ai-engine",   tags=["AI Engine"])
 app.include_router(students.router,     prefix="/api/v1/students",    tags=["Students"])
 app.include_router(subjects.router,     prefix="/api/v1/subjects",    tags=["Subjects"])
 app.include_router(assessments.router,  prefix="/api/v1/assessments", tags=["Assessments"])
