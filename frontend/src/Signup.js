@@ -49,11 +49,12 @@ const Signup = () => {
       });
       navigate('/login', { state: { registered: true } });
     } catch (err) {
+      const base = process.env.REACT_APP_API_BASE_URL || 'http://localhost:8000';
       const detail = err.response?.data?.detail;
       if (!err.response) {
-        setError(`Cannot reach the server (${process.env.REACT_APP_API_BASE_URL || 'localhost:8000'}). Backend may be offline.`);
+        setError(`Cannot reach backend at ${base} — server may be offline or URL is wrong.`);
       } else {
-        setError(detail || `Registration failed (HTTP ${err.response.status}).`);
+        setError(`${detail || 'Registration failed'} (HTTP ${err.response.status} — calling ${base})`);
       }
     } finally {
       setLoading(false);
