@@ -3,10 +3,14 @@ import React, { useEffect, useState } from 'react';
 const API = process.env.REACT_APP_API_BASE_URL || '';
 
 const MODELS = [
-  { value: 'gemini-2.0-flash',      label: 'Gemini 2.0 Flash',      desc: 'Latest model — fast, multimodal, best for most tasks' },
-  { value: 'gemini-2.0-flash-lite', label: 'Gemini 2.0 Flash Lite', desc: 'Lightweight variant — lowest latency and cost' },
-  { value: 'gemini-1.5-pro',        label: 'Gemini 1.5 Pro',        desc: 'Most capable — complex reasoning and long context' },
-  { value: 'gemini-1.5-flash',      label: 'Gemini 1.5 Flash',      desc: 'Balanced speed and quality for production workloads' },
+  { value: 'gemini-3',              label: 'Gemini 3',              desc: 'Newest generation — most advanced reasoning and multimodal capabilities' },
+  { value: 'gemini-2.5-pro',        label: 'Gemini 2.5 Pro',        desc: 'Most capable 2.5 model — deep reasoning, long context, complex tasks' },
+  { value: 'gemini-2.5-flash',      label: 'Gemini 2.5 Flash',      desc: 'Best price-to-performance — fast, smart, great for production' },
+  { value: 'gemini-2.5-flash-lite', label: 'Gemini 2.5 Flash Lite', desc: 'Lightest 2.5 variant — lowest latency and cost at scale' },
+  { value: 'gemini-2.0-flash',      label: 'Gemini 2.0 Flash',      desc: 'Fast, multimodal — reliable general-purpose model' },
+  { value: 'gemini-2.0-flash-lite', label: 'Gemini 2.0 Flash Lite', desc: 'Lightweight 2.0 variant — minimal resource usage' },
+  { value: 'gemini-1.5-pro',        label: 'Gemini 1.5 Pro',        desc: 'Proven 1.5 generation — strong reasoning and long context' },
+  { value: 'gemini-1.5-flash',      label: 'Gemini 1.5 Flash',      desc: 'Balanced 1.5 speed and quality for standard workloads' },
 ];
 
 function authHeader() {
@@ -35,7 +39,7 @@ const CheckIcon = () => (
 export default function AIEngine() {
   const [current, setCurrent]       = useState(null);
   const [apiKey, setApiKey]         = useState('');
-  const [model, setModel]           = useState('gemini-2.0-flash');
+  const [model, setModel]           = useState('gemini-2.5-flash');
   const [showKey, setShowKey]       = useState(false);
   const [loading, setLoading]       = useState(true);
   const [saving, setSaving]         = useState(false);
@@ -47,7 +51,7 @@ export default function AIEngine() {
       .then(r => r.json())
       .then(data => {
         setCurrent(data);
-        setModel(data.gemini_model || 'gemini-2.0-flash');
+        setModel(data.gemini_model || 'gemini-2.5-flash');
       })
       .catch(() => setError('Failed to load AI engine settings.'))
       .finally(() => setLoading(false));
