@@ -50,7 +50,11 @@ const Signup = () => {
       navigate('/login', { state: { registered: true } });
     } catch (err) {
       const detail = err.response?.data?.detail;
-      setError(detail || 'Registration failed. Please try again.');
+      if (!err.response) {
+        setError(`Cannot reach the server (${process.env.REACT_APP_API_BASE_URL || 'localhost:8000'}). Backend may be offline.`);
+      } else {
+        setError(detail || `Registration failed (HTTP ${err.response.status}).`);
+      }
     } finally {
       setLoading(false);
     }

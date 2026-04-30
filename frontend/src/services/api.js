@@ -13,13 +13,10 @@ api.interceptors.request.use((config) => {
   return config;
 });
 
-// Global response interceptor — log errors in dev
 api.interceptors.response.use(
   res => res,
   err => {
-    if (process.env.NODE_ENV === 'development') {
-      console.error('[EDAPT API error]', err.response?.status, err.config?.url);
-    }
+    console.error('[EDAPT API]', err.response?.status ?? 'network error', err.config?.url);
     return Promise.reject(err);
   }
 );
