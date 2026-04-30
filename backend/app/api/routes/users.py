@@ -14,6 +14,7 @@ from pydantic import BaseModel, EmailStr
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.audit import append_event
 from app.core.deps import require_roles
 from app.core.security import hash_password
 from app.db.models import User, UserRole
@@ -106,6 +107,13 @@ async def create_user(
     )
     db.add(user)
     await db.flush()
+    await append_event(
+        user_uid=current_user.email,
+        role=current_user.role,
+        action_type="User Created",
+        status="Success",
+        detail=f"Created user '{payload.email}' with role '{payload.role}'",
+    )
     return user
 
 
@@ -142,10 +150,19 @@ async def update_user(
     if payload.role is not None:
         _validate_role(payload.role)
 
-    for field, value in payload.model_dump(exclude_none=True).items():
+    changes = payload.model_dump(exclude_none=True)
+    for field, value in changes.items():
         setattr(user, field, value)
 
     await db.flush()
+    changed_fields = ", ".join(f"{k}='{v}'" for k, v in changes.items())
+    await append_event(
+        user_uid=current_user.email,
+        role=current_user.role,
+        action_type="User Updated",
+        status="Success",
+        detail=f"Updated user id={user_id}: {changed_fields}",
+    )
     return user
 
 
@@ -172,3 +189,10 @@ async def deactivate_user(
 
     user.is_active = False
     await db.flush()
+    await append_event(
+        user_uid=current_user.email,
+        role=current_user.role,
+        action_type="User Deactivated",
+        status="Alert",
+        detail=f"Deactivated account for '{user.email}' (id={user_id})",
+    )
