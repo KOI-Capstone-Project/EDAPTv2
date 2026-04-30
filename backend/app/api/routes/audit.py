@@ -4,9 +4,9 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, Query
 
-from app.api.routes.auth import get_current_user
+from app.core.deps import require_roles
 from app.core.audit import _AUDIT_LOGS
-from app.db.models import User
+from app.db.models import User, UserRole
 
 router = APIRouter()
 
@@ -17,7 +17,7 @@ async def get_audit_logs(
     action_type:  Optional[str] = Query(None),
     status:       Optional[str] = Query(None),
     role:         Optional[str] = Query(None),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_roles(UserRole.administrator.value)),
 ):
     rows = list(_AUDIT_LOGS)
     if uid:

@@ -5,7 +5,7 @@ import io
 import pandas as pd
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 
-from app.api.routes.auth import get_current_user
+from app.core.deps import get_current_user
 from app.core.audit import append_event
 from app.db.models import User
 
