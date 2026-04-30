@@ -14,6 +14,7 @@ Design notes:
   - Every table carries created_at / updated_at audit timestamps.
 """
 
+import enum
 from datetime import datetime
 
 from sqlalchemy import (
@@ -33,6 +34,16 @@ from sqlalchemy import (
     func,
 )
 from sqlalchemy.orm import DeclarativeBase, relationship
+
+
+# ---------------------------------------------------------------------------
+# Role enum
+# ---------------------------------------------------------------------------
+
+class UserRole(str, enum.Enum):
+    lecturer      = "lecturer"
+    hod           = "hod"
+    administrator = "administrator"
 
 
 # ---------------------------------------------------------------------------
@@ -273,6 +284,7 @@ class Lecturer(AuditMixin, Base):
 
     # Relationships
     class_groups: list = relationship("ClassGroup", back_populates="lecturer")
+    user: "User | None" = relationship("User", back_populates="lecturer", uselist=False)
 
 
 # ===========================================================================
@@ -583,6 +595,81 @@ class Prediction(AuditMixin, Base):
     student: "Student" = relationship("Student", back_populates="predictions")
     trimester: "Trimester" = relationship("Trimester", back_populates="predictions")
 
+class AuditEvent(Base):
+    """
+    Persisted audit trail for all significant system events.
+
+    Written via a dedicated session so events survive even when the
+    originating request rolls back (e.g. a failed login attempt).
+    """
+
+    __tablename__ = "audit_events"
+
+    id: int = Column(BigInteger, primary_key=True, autoincrement=True)
+
+    timestamp: datetime = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+        index=True,
+        comment="UTC timestamp of the event",
+    )
+
+    user_uid: str = Column(
+        String(254),
+        nullable=False,
+        index=True,
+        comment="Email or identifier of the actor",
+    )
+
+    role: str | None = Column(
+        String(30),
+        nullable=True,
+        index=True,
+        comment="Role of the actor at the time of the event",
+    )
+
+    action_type: str = Column(
+        String(50),
+        nullable=False,
+        index=True,
+        comment="Category of action, e.g. 'Login', 'Data Upload'",
+    )
+
+    status: str = Column(
+        String(20),
+        nullable=False,
+        index=True,
+        comment="Outcome: Success | Alert | Denied | Error",
+    )
+
+    detail: str | None = Column(
+        Text,
+        nullable=True,
+        comment="Human-readable description of the event",
+    )
+
+
+class AppSettings(Base):
+    """
+    Application-wide key-value settings store.
+
+    Used for administrator-managed configuration such as the Gemini API key
+    and selected AI model. Each row is a single named setting.
+    """
+
+    __tablename__ = "app_settings"
+
+    key: str = Column(String(100), primary_key=True, comment="Setting name, e.g. 'gemini_api_key'")
+    value: str | None = Column(Text, nullable=True, comment="Setting value")
+    updated_at: datetime = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
 class User(AuditMixin, Base):
     """
     Application user account for EDAPT staff / admins.
@@ -614,8 +701,22 @@ class User(AuditMixin, Base):
     role: str = Column(
         String(30),
         nullable=False,
-        default="staff",
-        comment="Role label: 'admin' or 'staff'",
+        default=UserRole.lecturer,
+        comment="Role: 'lecturer', 'hod', or 'administrator'",
+    )
+
+    department: str | None = Column(
+        String(100),
+        nullable=True,
+        comment="Department name — used for HOD-scoped data access",
+    )
+
+    lecturer_id: int | None = Column(
+        Integer,
+        ForeignKey("lecturers.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+        comment="Links a lecturer-role user to their Lecturer record for data scoping",
     )
 
     is_active: bool = Column(
@@ -624,3 +725,12 @@ class User(AuditMixin, Base):
         default=True,
         comment="Set to False to disable login without deleting the account",
     )
+
+    last_login_at: datetime | None = Column(
+        DateTime(timezone=True),
+        nullable=True,
+        comment="Timestamp of the most recent successful login",
+    )
+
+    # Relationships
+    lecturer: "Lecturer | None" = relationship("Lecturer", back_populates="user", foreign_keys=[lecturer_id])

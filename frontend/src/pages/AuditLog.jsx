@@ -8,14 +8,8 @@ const STATUS_BADGE = {
   Error:   { bg: '#FFF1F2', color: '#E11D48', border: '#FECDD3' },
 };
 
-function uidRole(uid) {
-  if (uid.startsWith('HOT-')) return 'Head of Technology';
-  if (uid.startsWith('LEC-')) return 'Lecturer';
-  return null;
-}
-
 function rowRole(row) {
-  return row.role || uidRole(row.user_uid) || '';
+  return (row.role || '').toLowerCase();
 }
 
 const IconCheck = () => (
@@ -42,9 +36,9 @@ export default function AuditLog() {
   }, []);
 
   const filtered = useMemo(() => logs.filter(row => {
-    if (filterUID    && rowRole(row) !== filterUID)      return false;
-    if (filterAction && row.action_type !== filterAction) return false;
-    if (filterStatus && row.status !== filterStatus)      return false;
+    if (filterUID    && rowRole(row) !== filterUID.toLowerCase()) return false;
+    if (filterAction && row.action_type !== filterAction)         return false;
+    if (filterStatus && row.status !== filterStatus)              return false;
     return true;
   }), [logs, filterUID, filterAction, filterStatus]);
 
@@ -63,19 +57,24 @@ export default function AuditLog() {
 
       <div style={s.filterRow}>
         <select style={s.select} value={filterUID} onChange={e => setFilterUID(e.target.value)}>
-          <option value="">All Users</option>
-          <option value="Lecturer">Lecturer</option>
-          <option value="Head of Technology">Head of Technology</option>
+          <option value="">All Roles</option>
+          <option value="administrator">Administrator</option>
+          <option value="hod">HOD</option>
+          <option value="lecturer">Lecturer</option>
+          <option value="unknown">Unknown</option>
         </select>
 
         <select style={s.select} value={filterAction} onChange={e => setFilterAction(e.target.value)}>
           <option value="">All Action Types</option>
           <option value="Login">Login</option>
           <option value="Login Failed">Login Failed</option>
-          <option value="Access Denied">Access Denied</option>
+          <option value="User Created">User Created</option>
+          <option value="User Updated">User Updated</option>
+          <option value="User Deactivated">User Deactivated</option>
           <option value="Data Upload">Data Upload</option>
-          <option value="Data Processed">Data Processed</option>
+          <option value="AI Engine Settings">AI Engine Settings</option>
           <option value="Prediction Run">Prediction Run</option>
+          <option value="Access Denied">Access Denied</option>
         </select>
 
         <select style={s.select} value={filterStatus} onChange={e => setFilterStatus(e.target.value)}>
