@@ -25,12 +25,16 @@ KEY_GEMINI_API_KEY = "gemini_api_key"
 KEY_GEMINI_MODEL   = "gemini_model"
 
 VALID_MODELS = [
+    "gemini-3",
+    "gemini-2.5-pro",
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-lite",
     "gemini-2.0-flash",
     "gemini-2.0-flash-lite",
     "gemini-1.5-pro",
     "gemini-1.5-flash",
 ]
-DEFAULT_MODEL = "gemini-2.0-flash"
+DEFAULT_MODEL = "gemini-2.5-flash"
 
 
 # ── Schemas ───────────────────────────────────────────────────────────────────
