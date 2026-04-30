@@ -1,76 +1,8 @@
-###############################################################################
-# EDAPT v2 — Render Blueprint
-# Docs: https://render.com/docs/blueprint-spec
+# render.yaml — DEPRECATED
 #
-# FIRST-TIME SETUP (one-time, ~10 min):
-#   1. Sign up at render.com (free)
-#   2. Go to: Dashboard → New → Blueprint → connect this GitHub repo
-#   3. Render will detect this file and create both services automatically
-#   4. Set the env vars marked "sync: false" in the Render dashboard
-#      (see "ENV VAR SETUP" section below)
-#   5. Enable Preview Environments: Project → Settings → Preview Envs → On
-#      → Every PR/branch now gets its own URL automatically
+# Render requires a credit card even for the free tier.
 #
-# ENV VAR SETUP (Dashboard → edaptv2-backend → Environment):
-#   DATABASE_URL  → postgresql+asyncpg://<user>:<pass>@<host>/<db>
-#                   Get this from neon.tech (free PostgreSQL, never expires)
-#                   Use the "asyncpg" driver variant from Neon's connection string
-#   GEMINI_API_KEY → your Google AI Studio key
-#   CORS_ORIGINS  → ["https://edaptv2-frontend.onrender.com"]
-#                   Paste your frontend URL (shown after first deploy)
-#
-# (Dashboard → edaptv2-frontend → Environment):
-#   REACT_APP_API_BASE_URL → https://edaptv2-backend.onrender.com
-#                            Paste your backend URL (shown after first deploy)
-#
-# BRANCH PREVIEW URLS (after enabling Preview Environments):
-#   Backend:  https://edaptv2-backend-<branch>.onrender.com
-#   Frontend: https://edaptv2-frontend-<branch>.onrender.com
-###############################################################################
-
-services:
-
-  # ── FastAPI Backend ──────────────────────────────────────────────────────────
-  - type: web
-    name: edaptv2-backend
-    runtime: docker
-    dockerfilePath: ./backend/Dockerfile.prod
-    dockerContext: ./backend
-    healthCheckPath: /health
-    envVars:
-      # Set in Render dashboard — do NOT commit real values here
-      - key: DATABASE_URL
-        sync: false
-      - key: GEMINI_API_KEY
-        sync: false
-      # CORS_ORIGINS must be a JSON array, e.g: ["https://edaptv2-frontend.onrender.com"]
-      - key: CORS_ORIGINS
-        sync: false
-
-      # Auto-generated — Render creates a secure random value on first deploy
-      - key: SECRET_KEY
-        generateValue: true
-
-      # Static values
-      - key: ENVIRONMENT
-        value: production
-      - key: LOG_LEVEL
-        value: warning
-
-  # ── React Frontend (Static Site) ─────────────────────────────────────────────
-  - type: web
-    name: edaptv2-frontend
-    runtime: static
-    rootDir: frontend
-    buildCommand: npm ci && npm run build
-    staticPublishPath: build
-    envVars:
-      # Set to your backend URL after first deploy, e.g: https://edaptv2-backend.onrender.com
-      # For branch previews this will be:            https://edaptv2-backend-<branch>.onrender.com
-      - key: REACT_APP_API_BASE_URL
-        sync: false
-    routes:
-      # SPA fallback — React Router handles all client-side routes
-      - type: rewrite
-        source: /*
-        destination: /index.html
+# This project now deploys via:
+#   Frontend  → Vercel          (vercel.json)                    free, no CC
+#   Backend   → Hugging Face    (.github/workflows/deploy-backend-hf.yml)  free, no CC
+#   Database  → Neon.tech       (https://neon.tech)              free, no CC

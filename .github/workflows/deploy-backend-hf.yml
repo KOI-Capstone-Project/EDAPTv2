@@ -1,0 +1,68 @@
+# Deploys the FastAPI backend to Hugging Face Spaces on every push to main.
+# Hugging Face Spaces is free, no credit card required.
+#
+# ONE-TIME SETUP — add these two GitHub repository secrets:
+#   HF_TOKEN  → your HF write token  (huggingface.co → Settings → Access Tokens)
+#   HF_SPACE  → your Space path, e.g. niteshbhatta/edaptv2-backend
+#
+# Create the Space at: huggingface.co/new-space
+#   SDK: Docker  |  Visibility: Public  |  Space name: edaptv2-backend
+
+name: Deploy Backend → Hugging Face Spaces
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "backend/**"
+      - ".github/workflows/deploy-backend-hf.yml"
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Push to Hugging Face Space
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_SPACE: ${{ secrets.HF_SPACE }}
+        run: |
+          git config --global user.email "github-actions@github.com"
+          git config --global user.name  "GitHub Actions"
+
+          # Clone the HF Space (shallow — we only need to push, not the full history)
+          git clone "https://user:${HF_TOKEN}@huggingface.co/spaces/${HF_SPACE}" hf_space --depth=1
+
+          # Sync backend source files into the Space root
+          rsync -a --delete \
+            --exclude='.git'          \
+            --exclude='__pycache__'   \
+            --exclude='*.pyc'         \
+            --exclude='*.egg-info'    \
+            backend/ hf_space/
+
+          # HF Spaces requires the file to be named exactly 'Dockerfile'
+          cp hf_space/Dockerfile.prod hf_space/Dockerfile
+
+          # Write the required HF Space metadata README (overwrites any existing one)
+          printf '%s\n' \
+            '---'                       \
+            'title: EDAPT v2 Backend'   \
+            'sdk: docker'               \
+            'app_port: 8000'            \
+            'pinned: false'             \
+            '---'                       \
+            > hf_space/README.md
+
+          cd hf_space
+          git add -A
+
+          # Only commit + push if something actually changed
+          if git diff --cached --quiet; then
+            echo "Nothing changed — skipping deploy."
+          else
+            git commit -m "chore: sync from GitHub main (${GITHUB_SHA::7})"
+            git push
+          fi
