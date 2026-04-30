@@ -39,7 +39,7 @@ async def ingest_dataset(
     columns   = list(df.columns)
     preview   = df.head(10).fillna("").to_dict(orient="records")
 
-    append_event(
+    await append_event(
         user_uid=current_user.email,
         role=current_user.role,
         action_type="Data Upload",

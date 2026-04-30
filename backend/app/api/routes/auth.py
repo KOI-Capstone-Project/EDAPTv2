@@ -106,9 +106,9 @@ async def login(
     user = result.scalar_one_or_none()
 
     if user is None or not verify_password(form.password, user.hashed_password):
-        append_event(
+        await append_event(
             user_uid=form.username,
-            role="Unknown",
+            role="unknown",
             action_type="Login Failed",
             status="Alert",
             detail=f"Invalid credentials for {form.username}",
@@ -127,7 +127,7 @@ async def login(
 
     user.last_login_at = datetime.now(timezone.utc)
 
-    append_event(
+    await append_event(
         user_uid=user.email,
         role=user.role,
         action_type="Login",

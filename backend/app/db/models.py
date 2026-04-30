@@ -595,6 +595,61 @@ class Prediction(AuditMixin, Base):
     student: "Student" = relationship("Student", back_populates="predictions")
     trimester: "Trimester" = relationship("Trimester", back_populates="predictions")
 
+class AuditEvent(Base):
+    """
+    Persisted audit trail for all significant system events.
+
+    Written via a dedicated session so events survive even when the
+    originating request rolls back (e.g. a failed login attempt).
+    """
+
+    __tablename__ = "audit_events"
+
+    id: int = Column(BigInteger, primary_key=True, autoincrement=True)
+
+    timestamp: datetime = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+        index=True,
+        comment="UTC timestamp of the event",
+    )
+
+    user_uid: str = Column(
+        String(254),
+        nullable=False,
+        index=True,
+        comment="Email or identifier of the actor",
+    )
+
+    role: str | None = Column(
+        String(30),
+        nullable=True,
+        index=True,
+        comment="Role of the actor at the time of the event",
+    )
+
+    action_type: str = Column(
+        String(50),
+        nullable=False,
+        index=True,
+        comment="Category of action, e.g. 'Login', 'Data Upload'",
+    )
+
+    status: str = Column(
+        String(20),
+        nullable=False,
+        index=True,
+        comment="Outcome: Success | Alert | Denied | Error",
+    )
+
+    detail: str | None = Column(
+        Text,
+        nullable=True,
+        comment="Human-readable description of the event",
+    )
+
+
 class AppSettings(Base):
     """
     Application-wide key-value settings store.

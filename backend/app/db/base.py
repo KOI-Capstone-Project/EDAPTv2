@@ -4,7 +4,7 @@ via a single `from app.db.base import Base` import.
 """
 
 from app.db.models import Base  # noqa: F401 — re-exported for Alembic
-from app.db.models import User, UserRole, AppSettings  # noqa: F401
+from app.db.models import User, UserRole, AppSettings, AuditEvent  # noqa: F401
 
 # Import every model so SQLAlchemy registers them against the metadata
 from app.db.models import (  # noqa: F401
