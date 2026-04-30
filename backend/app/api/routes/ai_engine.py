@@ -13,6 +13,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.audit import append_event
 from app.core.deps import require_roles
 from app.db.models import AppSettings, UserRole
 from app.db.session import get_db
@@ -111,6 +112,14 @@ async def update_ai_settings(
     await db.flush()
 
     api_key = await _get_setting(db, KEY_GEMINI_API_KEY)
+    key_action = "updated" if payload.gemini_api_key and payload.gemini_api_key.strip() else "unchanged"
+    await append_event(
+        user_uid=current_user.email,
+        role=current_user.role,
+        action_type="AI Engine Settings",
+        status="Success",
+        detail=f"Model set to '{payload.gemini_model}'; API key {key_action}",
+    )
     return AIEngineOut(
         gemini_api_key_set=bool(api_key),
         gemini_api_key_preview=_mask_key(api_key) if api_key else None,

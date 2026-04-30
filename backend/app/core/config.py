@@ -22,7 +22,8 @@ class Settings(BaseSettings):
     LOG_LEVEL: str = "info"
     SECRET_KEY: str = "change-me"
 
-    # CORS — in dev allow the React dev server
+    # CORS — override via CORS_ORIGINS env var in production
+    # Format: JSON array, e.g. '["https://edaptv2-frontend.onrender.com"]'
     CORS_ORIGINS: list[str] = ["http://localhost:3000", "http://localhost:80"]
 
     # Gemini
