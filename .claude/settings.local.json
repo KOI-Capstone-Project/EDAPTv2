@@ -11,7 +11,9 @@
       "Bash(curl -s -X POST http://localhost:8000/api/v1/auth/login -d 'username=bhatta.nitesh1@gmail.com&password=Admin@123' -H 'Content-Type: application/x-www-form-urlencoded')",
       "Bash(python3 -c ' *)",
       "Bash(curl -s -X POST http://localhost:8000/api/v1/auth/login -d 'username=bhatta.nitesh1%40gmail.com&password=Admin%40123' -H 'Content-Type: application/x-www-form-urlencoded')",
-      "Bash(curl -s -X POST http://localhost:8000/api/v1/auth/login -F username=20035193@students.koi.edu.au -F password=Admin@123)"
+      "Bash(curl -s -X POST http://localhost:8000/api/v1/auth/login -F username=20035193@students.koi.edu.au -F password=Admin@123)",
+      "Bash(npx react-scripts *)",
+      "Bash(node_modules/.bin/react-scripts build *)"
     ]
   }
 }
