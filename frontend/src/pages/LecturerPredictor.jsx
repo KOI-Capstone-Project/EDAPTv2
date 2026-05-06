@@ -1,31 +1,40 @@
 import { useState, useEffect } from 'react';
+import { useSearchParams } from 'react-router-dom';
+import { getUser } from '../utils/auth';
 import api from '../services/api';
 
-export default function Predictions() {
-  const [subjects,  setSubjects]  = useState([]);
-  const [subject,   setSubject]   = useState('');
-  const [assess1,   setAssess1]   = useState('');
-  const [assess2,   setAssess2]   = useState('');
-  const [result,    setResult]    = useState(null);
-  const [loading,   setLoading]   = useState(false);
-  const [error,     setError]     = useState('');
-  const [noModel,   setNoModel]   = useState(false);
+export default function LecturerPredictor() {
+  const user       = getUser();
+  const mySubjects = user?.subjects || [];
 
-  useEffect(() => {
-    api.get('/api/filters').then(r => setSubjects(r.data.subjects || [])).catch(() => {});
-  }, []);
+  const [searchParams] = useSearchParams();
 
+  // Inputs — pre-fill from URL query params if present
+  const [subject,  setSubject]  = useState(searchParams.get('subject') || '');
+  const [assess1,  setAssess1]  = useState(searchParams.get('mark')    || '');
+  const [assess2,  setAssess2]  = useState('');
+
+  // Result state
+  const [result,   setResult]   = useState(null);
+  const [loading,  setLoading]  = useState(false);
+  const [error,    setError]    = useState('');
+
+  // Validation
   const a1Num     = parseFloat(assess1);
   const a2Num     = parseFloat(assess2);
   const a1Invalid = assess1 !== '' && (isNaN(a1Num) || a1Num < 0 || a1Num > 100);
   const a2Invalid = assess2 !== '' && (isNaN(a2Num) || a2Num < 0 || a2Num > 100);
   const canSubmit = subject && assess1 !== '' && !a1Invalid && !a2Invalid;
 
+  // Auto-select first subject if none selected and only one available
+  useEffect(() => {
+    if (!subject && mySubjects.length === 1) setSubject(mySubjects[0]);
+  }, []);  // eslint-disable-line
+
   const handlePredict = async () => {
     setLoading(true);
     setError('');
     setResult(null);
-    setNoModel(false);
     try {
       const body = {
         subject,
@@ -35,11 +44,7 @@ export default function Predictions() {
       const res = await api.post('/api/predict', body);
       setResult(res.data);
     } catch (err) {
-      if (err.response?.status === 503) {
-        setNoModel(true);
-      } else {
-        setError(err.response?.data?.detail || 'Prediction failed. Please try again.');
-      }
+      setError(err.response?.data?.detail || 'Prediction failed. Please try again.');
     } finally {
       setLoading(false);
     }
@@ -47,7 +52,7 @@ export default function Predictions() {
 
   const handleReset = () => {
     setSubject(''); setAssess1(''); setAssess2('');
-    setResult(null); setError(''); setNoModel(false);
+    setResult(null); setError('');
   };
 
   const riskColour = result
@@ -55,51 +60,57 @@ export default function Predictions() {
     : '#1D9E75';
 
   return (
-    <div style={{ maxWidth: 680 }}>
+    <div style={{ maxWidth: 680, margin: '0 auto' }}>
 
+      {/* ── Header ──────────────────────────────────────────────── */}
       <div style={s.pageHeader}>
-        <h1 style={s.pageTitle}>Predictive Analytics</h1>
-        <p style={s.pageSub}>Predict whether a student will pass based on their current marks</p>
+        <h1 style={s.pageTitle}>Predictive Console</h1>
+        <p style={s.pageSub}>
+          Predict whether a student will pass based on their current marks
+        </p>
       </div>
 
-      {/* Model not trained warning */}
-      {noModel && (
-        <div style={s.warnBox}>
-          <strong>ML model not loaded.</strong> Run <code>backend/app/ml/train_model.py</code> to train
-          the model, then restart the backend.
-        </div>
-      )}
-
-      {/* Input card */}
+      {/* ── Input card ──────────────────────────────────────────── */}
       <div style={s.card}>
         <h2 style={s.cardTitle}>Student Assessment Inputs</h2>
 
+        {/* Subject */}
         <div style={s.field}>
           <label style={s.label}>Subject <span style={s.req}>*</span></label>
-          <select style={s.select} value={subject} onChange={e => setSubject(e.target.value)}>
+          <select
+            style={s.select}
+            value={subject}
+            onChange={e => setSubject(e.target.value)}
+          >
             <option value="">Select subject…</option>
-            {subjects.map(sub => <option key={sub} value={sub}>{sub}</option>)}
+            {mySubjects.map(sub => (
+              <option key={sub} value={sub}>{sub}</option>
+            ))}
           </select>
         </div>
 
+        {/* Assessment 1 */}
         <div style={s.field}>
           <label style={s.label}>Assessment 1 Mark <span style={s.req}>*</span></label>
           <input
-            type="number" min={0} max={100} placeholder="e.g. 72.5"
+            type="number"
+            min={0} max={100}
             style={{ ...s.input, borderColor: a1Invalid ? '#DC2626' : '#C5D2DC' }}
+            placeholder="e.g. 72.5"
             value={assess1}
             onChange={e => setAssess1(e.target.value)}
           />
           {a1Invalid && <p style={s.fieldErr}>Must be between 0 and 100</p>}
         </div>
 
+        {/* Assessment 2 */}
         <div style={s.field}>
-          <label style={s.label}>
-            Assessment 2 Mark <span style={s.optional}>(Optional)</span>
-          </label>
+          <label style={s.label}>Assessment 2 Mark <span style={s.optional}>(Optional)</span></label>
           <input
-            type="number" min={0} max={100} placeholder="Enter if available"
+            type="number"
+            min={0} max={100}
             style={{ ...s.input, borderColor: a2Invalid ? '#DC2626' : '#C5D2DC' }}
+            placeholder="Enter if available"
             value={assess2}
             onChange={e => setAssess2(e.target.value)}
           />
@@ -114,14 +125,19 @@ export default function Predictions() {
           disabled={!canSubmit || loading}
           onClick={handlePredict}
         >
-          {loading ? 'Predicting…' : 'Predict Outcome'}
+          {loading ? (
+            <span style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8 }}>
+              <Spinner /> Predicting…
+            </span>
+          ) : 'Predict Outcome'}
         </button>
       </div>
 
-      {/* Result card */}
+      {/* ── Result card ─────────────────────────────────────────── */}
       {result && (
         <div style={s.card}>
 
+          {/* Probability number */}
           <div style={{ textAlign: 'center', marginBottom: 20 }}>
             <p style={{ ...s.probNumber, color: riskColour }}>
               {result.pass_probability}%
@@ -131,6 +147,7 @@ export default function Predictions() {
             </p>
           </div>
 
+          {/* Pass/Fail badge */}
           <div style={{ display: 'flex', justifyContent: 'center', marginBottom: 24 }}>
             <span style={{
               ...s.predBadge,
@@ -143,9 +160,14 @@ export default function Predictions() {
             </span>
           </div>
 
+          {/* Risk bar */}
           <div style={{ marginBottom: 8 }}>
             <div style={s.barTrack}>
-              <div style={{ ...s.barFill, width: `${result.pass_probability}%`, background: riskColour }} />
+              <div style={{
+                ...s.barFill,
+                width:      `${result.pass_probability}%`,
+                background: riskColour,
+              }} />
             </div>
             <div style={s.barLabels}>
               <span>High Risk</span>
@@ -153,19 +175,14 @@ export default function Predictions() {
             </div>
           </div>
 
+          {/* Confidence note */}
           {result.confidence_records > 0 && (
             <p style={s.confNote}>
               Based on {result.confidence_records.toLocaleString()} similar historical records
             </p>
           )}
 
-          {result.model_name && (
-            <p style={s.confNote}>
-              Model: {result.model_name}
-              {result.model_accuracy != null && ` · Accuracy: ${result.model_accuracy}%`}
-            </p>
-          )}
-
+          {/* Gemini advice */}
           {result.gemini_advice && result.gemini_advice !== 'AI insight unavailable.' && (
             <div style={s.geminiBox}>
               <span style={s.geminiIcon}>🤖</span>
@@ -185,10 +202,20 @@ export default function Predictions() {
   );
 }
 
+function Spinner() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      strokeWidth="2.5" style={{ animation: 'spin 0.8s linear infinite' }}>
+      <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
+      <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/>
+    </svg>
+  );
+}
+
 const s = {
   pageHeader: { marginBottom: 24 },
-  pageTitle:  { margin: '0 0 4px', fontSize: 22, fontWeight: 700, color: '#1E293B' },
-  pageSub:    { margin: 0, fontSize: 13, color: '#64748B' },
+  pageTitle:  { margin: '0 0 4px', fontSize: 24, fontWeight: 500, color: '#1A2E40' },
+  pageSub:    { margin: 0, fontSize: 13, color: '#5A7A8A' },
 
   card: {
     background: '#fff', border: '0.5px solid #DDE4EA',
@@ -210,23 +237,19 @@ const s = {
   },
   input: {
     width: '100%', padding: '10px 14px', borderRadius: 8,
-    fontSize: 13, color: '#1E293B', outline: 'none', boxSizing: 'border-box',
-    border: '0.5px solid #C5D2DC',
+    border: '0.5px solid #C5D2DC', fontSize: 13, color: '#1E293B',
+    outline: 'none', boxSizing: 'border-box',
   },
 
   errorBox: {
     background: '#FCEBEB', color: '#A32D2D', borderRadius: 8,
     padding: '10px 14px', fontSize: 13, marginBottom: 16,
   },
-  warnBox: {
-    background: '#FFFBEB', border: '1px solid #FDE68A', color: '#92400E',
-    borderRadius: 8, padding: '12px 16px', fontSize: 13, marginBottom: 16,
-  },
 
   btn: {
     width: '100%', padding: '12px 0', borderRadius: 8, border: 'none',
     background: '#2E6E8E', color: '#fff', fontSize: 14, fontWeight: 600,
-    cursor: 'pointer', letterSpacing: 0.3,
+    cursor: 'pointer', letterSpacing: 0.3, transition: 'background 0.15s',
   },
 
   probNumber: { margin: 0, fontSize: 56, fontWeight: 500, letterSpacing: -2, lineHeight: 1 },
@@ -236,8 +259,13 @@ const s = {
     fontSize: 15, fontWeight: 600,
   },
 
-  barTrack: { width: '100%', height: 10, background: '#F0F4F8', borderRadius: 5, overflow: 'hidden' },
-  barFill:  { height: '100%', borderRadius: 5, transition: 'width 0.6s ease' },
+  barTrack: {
+    width: '100%', height: 10, background: '#F0F4F8',
+    borderRadius: 5, overflow: 'hidden',
+  },
+  barFill: {
+    height: '100%', borderRadius: 5, transition: 'width 0.6s ease',
+  },
   barLabels: {
     display: 'flex', justifyContent: 'space-between',
     fontSize: 11, color: '#94A3B8', marginTop: 4,

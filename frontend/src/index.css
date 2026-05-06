@@ -1,35 +1,42 @@
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
 body {
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-  background: #f4f6f9;
-  color: #1a1a2e;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background: #F0F4F8;
+  color: #1A2E40;
+  -webkit-font-smoothing: antialiased;
 }
 
-.app-header {
-  background: #1a1a2e;
-  color: #fff;
-  padding: 1rem 2rem;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
+@keyframes spin {
+  to { transform: rotate(360deg); }
 }
 
-.app-header h1 { font-size: 1.25rem; font-weight: 600; }
-.app-header h1 span { font-weight: 300; font-size: 0.9rem; margin-left: 0.5rem; opacity: 0.7; }
-
-.app-header nav { display: flex; gap: 1.5rem; }
-.app-header nav a { color: #aaa; text-decoration: none; font-size: 0.9rem; transition: color .2s; }
-.app-header nav a.active { color: #fff; border-bottom: 2px solid #4f8ef7; padding-bottom: 2px; }
-
+/* legacy class-based styles used by older pages */
 .app-main { padding: 2rem; max-width: 1400px; margin: 0 auto; }
 
-.page-title { font-size: 1.5rem; font-weight: 600; margin-bottom: 1.5rem; }
+.page-title {
+  font-size: 24px;
+  font-weight: 500;
+  color: #1A2E40;
+  margin-bottom: 4px;
+}
+
 .card {
   background: #fff;
+  border: 0.5px solid #DDE4EA;
   border-radius: 12px;
-  padding: 1.5rem;
-  box-shadow: 0 1px 4px rgba(0,0,0,.08);
-  margin-bottom: 1.5rem;
+  padding: 20px;
+  margin-bottom: 20px;
 }
-.card h2 { font-size: 1rem; font-weight: 600; margin-bottom: 1rem; color: #444; }
+.card h2 { font-size: 14px; font-weight: 500; margin-bottom: 14px; color: #1A2E40; }
+
+/* hover card utility */
+.hover-card {
+  transition: box-shadow 0.2s;
+}
+.hover-card:hover {
+  box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+}
+
+/* select / input focus ring */
+select:focus, input:focus { outline: none; border-color: #2E6E8E !important; }
