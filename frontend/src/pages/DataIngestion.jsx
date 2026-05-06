@@ -229,8 +229,8 @@ export default function DataIngestion() {
 
 const s = {
   pageHeader:   { marginBottom: 28 },
-  pageTitle:    { margin: '0 0 6px', fontSize: 26, fontWeight: 700, color: '#1E293B' },
-  pageSubtitle: { margin: 0, fontSize: 14, color: '#64748B' },
+  pageTitle:    { margin: '0 0 4px', fontSize: 24, fontWeight: 500, color: '#1A2E40' },
+  pageSubtitle: { margin: 0, fontSize: 13, color: '#5A7A8A' },
 
   dropZone: {
     background: '#2E6E8E', border: '2px dashed rgba(255,255,255,0.35)', borderRadius: 14,

@@ -4,6 +4,65 @@ All notable changes to EDAPT v2 are documented here.
 
 ---
 
+## [Unreleased] — 2026-04-26
+
+### Added
+
+#### Frontend — Pages
+- **`AdminDashboard.jsx`** (`/dashboard/admin`) — institution-wide analytics for the Head of Technology; KPI cards (total students, overall pass rate, average mark, at-risk count); six Recharts panels (grade distribution bar chart, pass/fail donut, performance trend line, assessment comparison bar, international/domestic split, difficulty index); year/trimester filter controls; institution-level GeminiPanel for AI insights
+- **`AdminExplorer.jsx`** (`/student-analytics`) — admin student record browser; subject + trimester + search filters with paginated table; click-through to individual student detail panel showing mark timeline chart, assessment breakdown table with inline mark bars, and pass/fail badge
+- **`LecturerDashboard.jsx`** (`/dashboard/lecturer`) — per-lecturer dashboard filtered to the lecturer's assigned subjects; KPI cards (enrolled students, pass rate, avg mark, at-risk count) with period-over-period delta badges; grade distribution, pass/fail donut, performance trend, assessment comparison, and international split charts; GeminiPanel at the bottom for subject-level AI alerts, full analysis, and Q&A
+- **`LecturerExplorer.jsx`** (`/explorer`) — student record explorer scoped to the lecturer's subjects; subject, trimester, search, and pass/fail filters; paginated results table with inline mark progress bar and pass badge; sidebar student detail with mark timeline and GeminiPanel "Predict" shortcut
+- **`LecturerPredictor.jsx`** (`/predictor`) — ML prediction tool; subject selector pre-populated from the lecturer's assigned subjects; Assessment 1 and Assessment 2 mark inputs (pre-fillable via URL query params `?subject=&mark=`); calls `POST /api/predict` and displays predicted final mark, letter grade, and risk category with colour-coded result card
+- **`LecturerSettings.jsx`** (`/settings`) — profile page showing name, email, role, and assigned subjects; change-password section (current + new + confirm, calls `POST /api/auth/change-password`); notification preferences panel (subject-level toggles persisted to `localStorage`)
+- **`SubjectAnalytics.jsx`** (`/analytics/subjects`) — admin subject-level analytics; searchable subject dropdown, trimester filter; grade distribution bar chart, performance trend line chart, assessment comparison; subject summary table with pass rate and average mark columns
+- **`UserManagement.jsx`** (`/users`) — admin CRUD for lecturer accounts; table of all users with role badge and active status; inline edit form to update name/role/subjects; create-lecturer form with auto-generated secure password; calls `GET /POST /PUT /api/users`
+- **`Login.jsx`** — rewritten login page in JSX with password visibility toggle and role-based redirect (`/dashboard/admin` for Head of Technology, `/dashboard/lecturer` for Lecturer)
+
+#### Frontend — Components
+- **`GeminiPanel.jsx`** — reusable three-level AI insights panel; Level 1 auto-fetches a performance alert when subject/trimester change; Level 2 shows a full deep-dive analysis on demand; Level 3 provides a Q&A interface with a 3-message rolling history; used in LecturerDashboard, LecturerExplorer, and AdminDashboard
+
+#### Frontend — Utilities
+- **`frontend/src/utils/auth.js`** — shared auth helpers: `getUser()`, `getToken()`, `isAdmin()`, `isLecturer()`, `logout()`; all read from `localStorage` keys `edapt_user` / `edapt_token`
+
+#### Backend — API Endpoints (`backend/app/main.py`)
+- `GET /api/dashboard/summary` — overall KPI metrics (total students, pass rate, average mark, at-risk count) with optional `subject` and `period` filters
+- `GET /api/dashboard/grade-distribution` — grade band counts (0–49, 50–59, … 90–100) per subject/period
+- `GET /api/dashboard/performance-trend` — average mark by trimester across configured periods
+- `GET /api/dashboard/assessment-comparison` — mean Assessment 1 vs Assessment 2 vs Final by subject
+- `GET /api/dashboard/pass-fail` — pass and fail counts for a subject/period
+- `GET /api/dashboard/international` — international vs domestic student counts and pass rates
+- `GET /api/dashboard/difficulty-index` — subjects ranked by fail rate (difficulty proxy)
+- `GET /api/dashboard/classgroups` — breakdown by class group with average marks
+- `GET /api/explorer/records` — paginated student records with filters (subject, period, search term, pass/fail)
+- `GET /api/explorer/filters` — available subject and period values for filter dropdowns
+- `GET /api/explorer/student/{student_id}` — full record for a single student including all subject marks
+- `GET /api/explorer/export` — export current filtered view as a downloadable CSV
+- `GET /api/subjects/list` — flat list of distinct subject codes
+- `GET /api/subjects/analytics` — per-subject summary stats for the Subject Analytics page
+- `GET /api/users` — list all staff accounts (admin only)
+- `POST /api/users` — create a new staff account with hashed password (admin only)
+- `PUT /api/users/{email}` — update name, role, subjects, or active status for a user (admin only)
+- `POST /api/predict` — RandomForest final-mark prediction; accepts `subject`, `assess1`, `assess2`; returns `predicted_mark`, `grade`, `risk_category`
+- `POST /api/gemini/alert` — generate a short AI performance alert for a given subject + trimester
+- `POST /api/gemini/analyse` — generate a full AI deep-dive analysis for a subject + trimester
+- `POST /api/gemini/ask` — answer a free-text question about a subject's data
+- `POST /api/gemini/institution-alert` — institution-wide AI performance alert (admin)
+- `POST /api/gemini/institution-analyse` — institution-wide AI analysis (admin)
+- `POST /api/gemini/institution-ask` — institution-wide Q&A (admin)
+- `GET /api/gemini/token-log` — view per-request Gemini API token usage log
+- `POST /api/auth/change-password` — update password for the authenticated user (requires current password)
+- `POST /api/auth/logout` — logout endpoint (client-side token removal; returns 200)
+
+#### Backend — ML
+- **`backend/app/ml/train_model.py`** — standalone script to train the RandomForest final-mark predictor; reads the ingested dataset, engineers features (subject encoding, assess1, assess2), trains with `sklearn`, and serialises the model to `backend/app/ml/model.pkl`
+
+### Changed
+- **`frontend/src/App.js`** — role-based route guards (`AdminRoute` / `AdminProtected`); separate dashboard routes for admin (`/dashboard/admin`) and lecturer (`/dashboard/lecturer`); added all new page routes; `/users` now mounts `UserManagement`; `/analytics/subjects` added as an admin-only route
+- **`frontend/src/components/Sidebar.jsx`** — role-aware navigation: lecturers see Dashboard / Explorer / Predictor / Settings; admins see Dashboard / Subject Analytics / Student Analytics / Predictive Reports / Data Ingestion / Audit Log / User Management / Settings; active link highlighted; collapse/expand behaviour retained
+
+---
+
 ## [Unreleased] — 2026-04-24
 
 ### Added

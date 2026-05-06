@@ -5,7 +5,11 @@ export default function Layout({ children }) {
   return (
     <div style={s.root}>
       <Sidebar />
-      <main style={s.main}>{children}</main>
+      <main style={s.main}>
+        <div style={s.content}>
+          {children}
+        </div>
+      </main>
     </div>
   );
 }
@@ -21,7 +25,11 @@ const s = {
     flex: 1,
     background: '#F0F4F8',
     overflowY: 'auto',
-    padding: '36px 40px',
+    padding: '28px',
     boxSizing: 'border-box',
+  },
+  content: {
+    maxWidth: 1200,
+    margin: '0 auto',
   },
 };
