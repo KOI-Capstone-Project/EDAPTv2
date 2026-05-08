@@ -1,274 +1,284 @@
 # EDAPT v2 — Educational Data Analytics and Predictive Tool
 
-> King's Own Institute (KOI) Capstone Project
+> King's Own Institute (KOI) — Capstone Project (Second Year)
+
+EDAPT v2 is a role-based academic analytics platform. It lets **Lecturers** explore their class performance and get AI-generated insights, while the **Head of Technology** has full institution-wide analytics, data ingestion, user management, and predictive reports.
 
 ---
 
-## Tech stack
+## Tech Stack
 
-| Layer       | Technology                                        |
-|-------------|---------------------------------------------------|
-| Backend     | Python 3.12 · FastAPI · SQLAlchemy (async)        |
-| Database    | PostgreSQL 16                                     |
-| ML          | Scikit-Learn · Pandas                             |
-| Frontend    | React 18 · React Router v6 · Recharts · Axios     |
-| AI insights | Google Gemini API                                 |
-| Container   | Docker · Docker Compose                           |
-| Proxy       | nginx (production)                                |
+| Layer       | Technology                                       |
+|-------------|--------------------------------------------------|
+| Backend     | Python 3.12 · FastAPI · Uvicorn                  |
+| Data / ML   | Pandas · Scikit-Learn · Joblib · NumPy           |
+| AI          | Google Gemini API (Flash + Pro models)           |
+| Auth        | JWT (python-jose) · Bcrypt (passlib)             |
+| Frontend    | React 18 · React Router v6 · Recharts · Axios   |
+| Styling     | Inline styles (no CSS framework)                 |
 
----
-
-## Pages
-
-| Route            | Description                                      |
-|------------------|--------------------------------------------------|
-| `/login`         | JWT login (email + password)                     |
-| `/signup`        | New account registration                         |
-| `/dashboard`     | Mode 1 — Descriptive Analytics + welcome banner  |
-| `/predictions`   | Mode 2 — Predictive Analytics (ML inference)     |
-| `/data-ingestion`| Upload CSV / XLSX / JSON datasets                |
-| `/audit-log`     | System event history with filters                |
-| `/explorer`      | Student record browser (coming soon)             |
-| `/settings`      | Account info and preferences                     |
-
-All routes except `/login` and `/signup` are protected — unauthenticated users are automatically redirected to `/login`.
+> **No database required.** All student data is loaded from a CSV/XLSX file into an in-memory pandas DataFrame at runtime. User accounts are stored in memory and reset on server restart.
 
 ---
 
-## Project structure
+## Roles
+
+| Role                   | Access                                                              |
+|------------------------|---------------------------------------------------------------------|
+| `Lecturer`             | Their own subject dashboard, explorer, predictor, AI insights       |
+| `Head of Technology`   | Full institution analytics, data ingestion, all subjects            |
+| Super-admin (`admin`)  | All of the above + audit log and user management                    |
+
+The super-admin account has the fixed email `admin`. All other Head of Technology accounts can see analytics but not audit logs or user management.
+
+---
+
+## Pages & Routes
+
+### Lecturer (role: Lecturer)
+
+| Route                | Page               | Description                                      |
+|----------------------|--------------------|--------------------------------------------------|
+| `/dashboard/lecturer`| Lecturer Dashboard | KPI cards, grade charts, pass/fail donut, trends |
+| `/explorer`          | Explorer           | Coming in next release                           |
+| `/predictor`         | Predictor          | Coming in next release                           |
+| `/ai-insights`       | AI Insights        | Gemini-powered analysis scoped to your subjects  |
+| `/settings`          | Settings           | Change name, email, password                     |
+
+### Admin (role: Head of Technology)
+
+| Route                 | Page                | Description                                            |
+|-----------------------|---------------------|--------------------------------------------------------|
+| `/dashboard/admin`    | Admin Dashboard     | Institution-wide KPIs, charts, filters, Gemini alerts  |
+| `/subject-analytics`  | Subject Analytics   | Compare two subjects side-by-side across trimesters    |
+| `/student-analytics`  | Student Analytics   | Paginated student record explorer + drill-down detail  |
+| `/predictive-reports` | Predictive Reports  | ML pass-probability predictor + Gemini advice          |
+| `/data-ingestion`     | Data Ingestion      | Upload CSV/XLSX, preview data, paginate                |
+| `/audit-log`          | Audit Log           | Event history (super-admin only)                       |
+| `/users`              | User Management     | Create, edit, delete accounts (super-admin only)       |
+| `/settings`           | Settings            | Change name, email, password                           |
+
+---
+
+## Project Structure
 
 ```
 EDAPTv2/
 ├── backend/
-│   ├── app/
-│   │   ├── api/routes/
-│   │   │   ├── auth.py          # POST /register · POST /login · GET /me
-│   │   │   ├── ingest.py        # POST /api/ingest
-│   │   │   ├── audit.py         # GET /api/audit-logs
-│   │   │   ├── assessments.py   # GET /api/v1/assessments
-│   │   │   ├── predictions.py   # POST /api/v1/predictions/run
-│   │   │   ├── students.py
-│   │   │   └── subjects.py
-│   │   ├── core/
-│   │   │   ├── config.py        # Pydantic settings (.env)
-│   │   │   ├── security.py      # JWT + bcrypt helpers
-│   │   │   └── audit.py         # In-memory audit log + append_event()
-│   │   ├── db/
-│   │   │   ├── models.py        # SQLAlchemy ORM models
-│   │   │   ├── session.py       # Async engine + get_db dependency
-│   │   │   └── base.py
-│   │   ├── ml/predictor.py      # Scikit-Learn pipeline
-│   │   └── main.py              # FastAPI app entry point
-│   ├── tests/
-│   ├── requirements.txt
-│   ├── Dockerfile.dev
-│   └── Dockerfile.prod
+│   └── app/
+│       ├── main.py              # FastAPI app — all routes, auth, ML, Gemini
+│       └── ml/
+│           ├── train_model.py   # Train & save the ML model
+│           ├── best_model.pkl   # Trained RandomForest classifier
+│           ├── model_meta.pkl   # Accuracy + model name metadata
+│           ├── subject_difficulty.pkl  # Per-subject difficulty index
+│           └── predictor.py     # Inference helpers
 ├── frontend/
-│   ├── src/
-│   │   ├── components/
-│   │   │   ├── Sidebar.jsx      # Collapsible sidebar navigation
-│   │   │   └── Layout.jsx       # Sidebar + main content wrapper
-│   │   ├── pages/
-│   │   │   ├── Dashboard.js     # Mode 1 — Descriptive Analytics
-│   │   │   ├── Predictions.js   # Mode 2 — Predictive Analytics
-│   │   │   ├── DataIngestion.jsx
-│   │   │   ├── AuditLog.jsx
-│   │   │   ├── Explorer.jsx
-│   │   │   └── Settings.jsx
-│   │   ├── services/api.js      # Axios client (JWT interceptor)
-│   │   ├── Login.js
-│   │   ├── Signup.js
-│   │   └── App.js               # Routes + PrivateRoute guard
-│   ├── public/
-│   ├── Dockerfile.dev
-│   └── Dockerfile.prod
-├── nginx/nginx.conf             # Production reverse proxy
-├── scripts/sql/                 # DB seed files
-├── docker-compose.yml           # Development
-├── docker-compose.prod.yml      # Production
-├── .env.example
-└── .gitignore
+│   └── src/
+│       ├── App.js               # Routes + Protected/AdminProtected guards
+│       ├── components/
+│       │   ├── Layout.jsx       # Sidebar + main content wrapper
+│       │   ├── Sidebar.jsx      # Collapsible role-aware sidebar
+│       │   ├── GeminiPanel.jsx  # 3-level AI panel (alert, analyse, Q&A)
+│       │   ├── PageUnavailable.jsx  # Shared "coming soon" page
+│       │   └── ErrorBoundary.jsx
+│       ├── pages/
+│       │   ├── Login.jsx
+│       │   ├── LecturerDashboard.jsx
+│       │   ├── LecturerAIInsights.jsx
+│       │   ├── LecturerExplorer.jsx
+│       │   ├── LecturerPredictor.jsx
+│       │   ├── LecturerSettings.jsx
+│       │   ├── AdminDashboard.jsx
+│       │   ├── SubjectAnalytics.jsx
+│       │   ├── AdminExplorer.jsx      # Student Analytics
+│       │   ├── AdminPredictor.jsx     # Predictive Reports
+│       │   ├── DataIngestion.jsx
+│       │   ├── AuditLog.jsx
+│       │   ├── UserManagement.jsx
+│       │   └── AdminSettings.jsx
+│       ├── services/api.js      # Axios instance with JWT interceptor
+│       └── utils/auth.js        # getUser, getToken, getUserName helpers
+├── data/                        # Place your CSV/XLSX dataset here
+├── docker-compose.yml
+├── docker-compose.prod.yml
+└── nginx/
 ```
 
 ---
 
-## Quick start (development)
+## Quick Start (without Docker)
+
+Open **two terminals** from the project root.
 
 ### Prerequisites
-- Docker Desktop ≥ 4.x
-- Git
 
-### 1 — Clone and configure
-
-```bash
-git clone https://github.com/KOI-Capstone-Project/EDAPTv2.git
-cd EDAPTv2
-cp .env.example .env
-# Edit .env — set GEMINI_API_KEY and change default passwords
-```
-
-### 2 — Start all services
-
-```bash
-docker compose up --build
-```
-
-| Service    | URL                        | Notes                      |
-|------------|----------------------------|----------------------------|
-| Frontend   | http://localhost:3000      | React dev server           |
-| Backend    | http://localhost:8000      | FastAPI + auto-reload      |
-| API Docs   | http://localhost:8000/docs | Swagger UI                 |
-| pgAdmin    | http://localhost:5050      | DB GUI                     |
-
-### 3 — Stop
-
-```bash
-docker compose down        # keep volumes (DB data preserved)
-docker compose down -v     # also wipe the DB volume (fresh start)
-```
+- Python 3.12+
+- Node.js 18+ and npm
+- A `GEMINI_API_KEY` from [Google AI Studio](https://aistudio.google.com/)
 
 ---
 
-## Running without Docker
+### Terminal 1 — Backend
 
-Open two separate terminals:
-
-**Terminal 1 — Backend**
 ```bash
 cd backend
+
+# Create and activate a virtual environment
+python3 -m venv venv
+source venv/bin/activate        # Windows: venv\Scripts\activate
+
+# Install dependencies
 pip install -r requirements.txt
+
+# Set your Gemini API key
+export GEMINI_API_KEY="your-key-here"   # Windows: set GEMINI_API_KEY=your-key-here
+
+# Start the server
 uvicorn app.main:app --reload --port 8000
 ```
 
-**Terminal 2 — Frontend**
+API available at: `http://localhost:8000`
+Swagger docs at: `http://localhost:8000/docs`
+
+---
+
+### Terminal 2 — Frontend
+
 ```bash
 cd frontend
 npm install
 npm start
 ```
 
-> You will need PostgreSQL running locally and the `DATABASE_URL` in `.env` pointing to it.
+App available at: `http://localhost:3000`
 
 ---
 
-## Production deployment
+## Default Login
+
+| Email   | Password  | Role                 |
+|---------|-----------|----------------------|
+| `admin` | `admin123`| Head of Technology (super-admin) |
+
+Use **User Management** (super-admin only) to create additional accounts for lecturers or other admin users.
+
+---
+
+## Loading Data
+
+1. Log in as the `admin` account
+2. Navigate to **Data Ingestion** in the sidebar
+3. Upload a `.csv` or `.xlsx` file with the expected columns (see below)
+4. Click **Process & Preview** — the data loads into memory immediately
+5. All analytics pages update to reflect the uploaded dataset
+
+### Expected Columns
+
+| Column               | Description                        |
+|----------------------|------------------------------------|
+| `STUDENTID_MASKED`   | Anonymised student identifier      |
+| `SUBJECTCODE`        | Subject code (e.g. `ICT101`)       |
+| `ASSESSMENTTYPECODE` | Assessment type (e.g. `Quiz`, `Exam`) |
+| `MARKPERCENT`        | Mark as a percentage (0–100)       |
+| `STUDYPERIOD`        | Trimester code (e.g. `24.2`)       |
+| `COUNTRY_MASKED`     | Student's origin country (masked)  |
+| `GENDERCODE`         | Gender code                        |
+| `AGEGROUP`           | Age group bracket                  |
+| `CLASSGROUP`         | Class group label                  |
+
+Columns not in the list are ignored. Missing optional columns degrade gracefully (charts simply show no data for that dimension).
+
+---
+
+## Training the ML Model
+
+The ML model predicts pass probability from Assessment 1 mark, Assessment 2 mark (optional), subject difficulty, and trimester.
 
 ```bash
-cp .env.example .env
-# Set ENVIRONMENT=production, strong passwords, GEMINI_API_KEY
-
-docker compose -f docker-compose.prod.yml up --build -d
+cd backend
+source venv/bin/activate
+python app/ml/train_model.py
 ```
 
-The nginx proxy listens on port 80. Add TLS certs to `nginx/certs/` and extend `nginx/nginx.conf` with an HTTPS server block.
+This reads from the in-memory data (you must have data loaded via ingestion first, or point the script at a CSV) and writes three `.pkl` files to `backend/app/ml/`. The backend loads these automatically on startup.
+
+The model is a `RandomForestClassifier`. Accuracy and model name are shown on the **Predictive Reports** page header.
 
 ---
 
-## Environment variables
+## AI Insights (Gemini)
 
-Copy `.env.example` to `.env` and fill in:
+Three tiers of AI are available throughout the app, all powered by the Google Gemini API:
 
-| Variable                   | Description                               |
-|----------------------------|-------------------------------------------|
-| `POSTGRES_USER`            | DB username                               |
-| `POSTGRES_PASSWORD`        | DB password                               |
-| `POSTGRES_DB`              | Database name                             |
-| `DATABASE_URL`             | Full asyncpg DSN (auto-built from above)  |
-| `SECRET_KEY`               | JWT signing secret (change in production) |
-| `GEMINI_API_KEY`           | Google Gemini API key                     |
-| `PGADMIN_DEFAULT_EMAIL`    | pgAdmin login email                       |
-| `PGADMIN_DEFAULT_PASSWORD` | pgAdmin login password                    |
-| `REACT_APP_API_BASE_URL`   | API base URL seen by the browser          |
+| Tier | Endpoint | Trigger | Scope |
+|------|----------|---------|-------|
+| 1 — Auto Alert | `POST /api/gemini/alert` | On page load | Subject + trimester |
+| 2 — Deep Analysis | `POST /api/gemini/analyse` | Click button | Subject + trimester |
+| 3 — Free Q&A | `POST /api/gemini/ask` | User question | Subject + trimester |
+
+Admin-level equivalents (`/api/gemini/institution-*`) are used on the Admin Dashboard and Predictive Reports for institution-wide context.
+
+Set `GEMINI_API_KEY` before starting the backend. Without it, AI features will fail silently (no crash, just empty responses).
 
 ---
 
 ## Authentication
 
-- Login stores a JWT in `localStorage` as `edapt_token` and user profile as `edapt_user`
-- All API requests attach the token via an Axios interceptor (`Authorization: Bearer <token>`)
-- Tokens expire after **8 hours** (one work day)
-- The sidebar reads `edapt_user` to display the logged-in user's name, initials, and role
+- JWT tokens are stored in `localStorage` as `edapt_token`
+- User profile is stored as `edapt_user` (JSON)
+- Tokens expire after **8 hours**
+- All API requests attach the token via an Axios request interceptor
+- Role checking happens both on the frontend (route guards) and the backend (`require_admin` / `require_super_admin` dependencies)
 
 ---
 
-## Sidebar navigation
+## API Overview
 
-The sidebar is collapsible:
-- **Expanded** (220 px) — shows icons + labels
-- **Collapsed** (64 px) — shows icons only; hover tooltips show labels
+| Group     | Key Endpoints                                                                                      |
+|-----------|----------------------------------------------------------------------------------------------------|
+| Auth      | `POST /api/auth/login` · `POST /api/auth/logout` · `POST /api/auth/change-password`               |
+| Dashboard | `GET /api/dashboard/summary` · `grade-distribution` · `performance-trend` · `assessment-comparison` · `pass-fail` · `international` · `difficulty-index` |
+| Explorer  | `GET /api/explorer/records` · `GET /api/explorer/filters` · `GET /api/explorer/student/{id}` · `GET /api/explorer/export` |
+| Subjects  | `GET /api/subjects/list` · `GET /api/subjects/analytics`                                           |
+| Ingest    | `POST /api/ingest` · `GET /api/ingest/preview`                                                     |
+| ML        | `POST /api/predict`                                                                                |
+| Gemini    | `POST /api/gemini/alert` · `analyse` · `ask` · `institution-alert` · `institution-analyse` · `institution-ask` · `GET /api/gemini/token-log` |
+| Users     | `GET /api/users` · `POST /api/users` · `PUT /api/users/{email}` · `DELETE /api/users/{email}`     |
+| Audit     | `GET /api/audit-logs`                                                                              |
 
-Clicking the chevron button at the top toggles between modes. The logout button clears `localStorage` and redirects to `/login`.
-
----
-
-## Data pipeline
-
-```
-CSV / XLSX / JSON file
-        ↓
-  POST /api/ingest          ← authenticated upload
-        ↓
-  pandas parse + validate
-        ↓
-  Anonymise (PII stripped)
-        ↓
-  PostgreSQL (assessments, enrollments, students)
-        ↓
-  POST /api/v1/predictions/run
-        ↓
-  RandomForest inference → pass_probability
-        ↓
-  Google Gemini API → gemini_insight (contextual text)
-        ↓
-  predictions table → Dashboard / Predictor page
-```
-
-Every ingest and login event is written to the audit log (`GET /api/audit-logs`).
+Full interactive docs: `http://localhost:8000/docs`
 
 ---
 
-## Database schema
+## Sidebar Navigation
 
-Ten tables across three layers:
+The sidebar is collapsible (toggle with the chevron button at the top):
 
-**Dimension / lookup:** `countries`, `programs`, `trimesters`, `subjects`, `class_groups`, `lecturers`
+- **Expanded** (220 px) — icons + labels
+- **Collapsed** (64 px) — icons only with hover tooltips
 
-**Core entity:** `students` — stores only `student_masked_id` (integer). No PII.
+Nav items shown depend on role:
 
-**Fact / output:** `enrollments`, `assessments`, `predictions`
-
-**Auth:** `users` — name, email (unique), bcrypt-hashed password, role (`admin` / `staff`)
-
-See [backend/app/db/models.py](backend/app/db/models.py) for full column definitions.
-
----
-
-## ML pipeline (Mode 2)
-
-- Trained on data up to **T2 2025**
-- Target: **Pass / Fail** classification for T3 2025
-- Algorithm: `RandomForestClassifier` (200 trees, `max_depth=8`)
-- Target accuracy: **> 75%**
-- Model serialised to `backend/app/ml/saved_models/rf_v1.joblib`
-- Predictions stored with `pass_probability` and `gemini_insight` fields
-
-Trigger inference via:
-```
-POST /api/v1/predictions/run?trimester_id=<id>&model_version=rf_v1
-```
+- **Lecturer**: Dashboard · Explorer · Predictor · AI Insights · Settings
+- **Admin**: Dashboard · Subject Analytics · Student Analytics · Predictive Reports · Data Ingestion · Settings
+- **Super-admin** (admin email only): All of the above + Audit Log · User Management
 
 ---
 
-## Running tests
+## Branch Strategy
 
-```bash
-docker compose exec backend pytest tests/ -v
-```
+| Branch        | Purpose                        |
+|---------------|--------------------------------|
+| `main`        | Stable, reviewed code          |
+| `sangam_dev`  | Active development             |
+
+PRs are opened from `sangam_dev` → `main`.
 
 ---
 
-## Contributing
+## Authors
 
-1. Branch from `main`: `git checkout -b feature/your-feature`
-2. Commit with conventional messages: `feat:`, `fix:`, `chore:`
-3. Open a pull request against `main`
+- **Sangam Ghale Gurung** — Full-stack development, ML pipeline, AI integration
+
+King's Own Institute · Bachelor of Information Technology · Capstone Project 1 · 2025
