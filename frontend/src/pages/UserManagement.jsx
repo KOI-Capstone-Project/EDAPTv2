@@ -1,17 +1,21 @@
-import { useState, useEffect, useRef } from 'react';
+import { Fragment, useState, useEffect, useRef } from 'react';
+import { useNavigate } from 'react-router-dom';
 import api from '../services/api';
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
+const ROLE_BADGE = {
+  'Lecturer':          { bg: '#EEEDFE', color: '#534AB7', border: '#C5C2F5' },
+  'Head of Technology':{ bg: '#1A2E40', color: '#fff',    border: '#1A2E40' },
+};
 
 const genPassword = () => {
   const chars = 'ABCDEFGHJKMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789!@#$';
   return Array.from({ length: 8 }, () => chars[Math.floor(Math.random() * chars.length)]).join('');
 };
 
-function Spinner() {
+function Spinner({ cols = 6 }) {
   return (
     <tr>
-      <td colSpan={5} style={{ padding: 0, border: 'none' }}>
+      <td colSpan={cols} style={{ padding: 0, border: 'none' }}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: 200 }}>
           <div style={{ width: 32, height: 32, border: '3px solid #F0F4F8', borderTop: '3px solid #2E6E8E', borderRadius: '50%', animation: 'spin 0.8s linear infinite' }} />
         </div>
@@ -19,8 +23,6 @@ function Spinner() {
     </tr>
   );
 }
-
-// ── Multi-select for subjects ─────────────────────────────────────────────────
 
 function SubjectMultiSelect({ value, onChange, allSubjects, placeholder }) {
   const [open, setOpen] = useState(false);
@@ -82,9 +84,16 @@ function SubjectMultiSelect({ value, onChange, allSubjects, placeholder }) {
   );
 }
 
-// ── Main component ────────────────────────────────────────────────────────────
-
 export default function UserManagement() {
+  const navigate = useNavigate();
+
+  const storedUser = (() => { try { return JSON.parse(localStorage.getItem('edapt_user')); } catch { return null; } })();
+  const isSuperAdmin = storedUser?.email === 'admin';
+
+  useEffect(() => {
+    if (!isSuperAdmin) navigate('/dashboard', { replace: true });
+  }, [isSuperAdmin, navigate]);
+
   const [users,        setUsers]        = useState([]);
   const [allSubjects,  setAllSubjects]  = useState([]);
   const [loading,      setLoading]      = useState(true);
@@ -97,13 +106,14 @@ export default function UserManagement() {
   const [createErr,    setCreateErr]    = useState('');
   const [creating,     setCreating]     = useState(false);
 
-  const [form, setForm]     = useState({ name: '', email: '', password: '', subjects: [] });
+  const [form, setForm]   = useState({ name: '', email: '', password: '', role: 'Lecturer', subjects: [] });
   const [showPwd, setShowPwd] = useState(false);
 
   useEffect(() => {
+    if (!isSuperAdmin) return;
     api.get('/api/subjects/list').then(r => setAllSubjects(r.data)).catch(() => {});
     fetchUsers();
-  }, []);
+  }, [isSuperAdmin]);
 
   const fetchUsers = () => {
     setLoading(true);
@@ -139,22 +149,36 @@ export default function UserManagement() {
     }
   };
 
+  const handleDelete = async user => {
+    if (!window.confirm(`Delete account "${user.name}" (${user.email})? This cannot be undone.`)) return;
+    try {
+      await api.delete(`/api/users/${encodeURIComponent(user.email)}`);
+      setUsers(prev => prev.filter(u => u.email !== user.email));
+      if (editingEmail === user.email) cancelEdit();
+    } catch (err) {
+      alert(err.response?.data?.detail || 'Failed to delete account.');
+    }
+  };
+
   const handleCreate = async () => {
     setCreateErr('');
     if (!form.name.trim())        return setCreateErr('Full name is required.');
     if (!form.email.trim())       return setCreateErr('Email is required.');
     if (form.password.length < 6) return setCreateErr('Password must be at least 6 characters.');
-    if (!form.subjects.length)    return setCreateErr('At least one subject must be selected.');
+    if (form.role === 'Lecturer' && !form.subjects.length)
+      return setCreateErr('At least one subject must be selected for a Lecturer.');
 
     setCreating(true);
     try {
-      const res = await api.post('/api/users', {
+      const payload = {
         name: form.name.trim(), email: form.email.trim(),
-        password: form.password, subjects: form.subjects,
-      });
+        password: form.password, role: form.role,
+        subjects: form.role === 'Lecturer' ? form.subjects : [],
+      };
+      const res = await api.post('/api/users', payload);
       setUsers(prev => [res.data.user, ...prev]);
       setCreateMsg(`Account created. ${form.name.trim()} can now log in.`);
-      setForm({ name: '', email: '', password: '', subjects: [] });
+      setForm({ name: '', email: '', password: '', role: 'Lecturer', subjects: [] });
       setTimeout(() => { setShowCreate(false); setCreateMsg(''); }, 3000);
     } catch (err) {
       setCreateErr(err.response?.data?.detail || 'Failed to create account.');
@@ -170,27 +194,32 @@ export default function UserManagement() {
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
         {visible.map(sub => <span key={sub} style={s_chip}>{sub}</span>)}
         {extra > 0 && <span style={{ ...s_chip, background: '#F0F4F8', color: '#5A7A8A' }}>+{extra} more</span>}
+        {subjects.length === 0 && <span style={{ fontSize: 12, color: '#C5D2DC' }}>—</span>}
       </div>
     );
   };
 
+  if (!isSuperAdmin) return null;
+
   return (
     <div>
+      <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+
       {/* ── Header ──────────────────────────────────────────────────── */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 24 }}>
         <div>
           <h1 style={s.pageTitle}>User Management</h1>
-          <p style={s.pageSub}>Create and manage lecturer accounts</p>
+          <p style={s.pageSub}>Create and manage user accounts</p>
         </div>
         <button style={s.createBtn} onClick={() => { setShowCreate(o => !o); setCreateErr(''); setCreateMsg(''); }}>
-          {showCreate ? '✕ Cancel' : '+ Create New Lecturer'}
+          {showCreate ? '✕ Cancel' : '+ Create New User'}
         </button>
       </div>
 
       {/* ── Create form ─────────────────────────────────────────────── */}
       {showCreate && (
         <div style={s.createPanel}>
-          <h3 style={{ margin: '0 0 16px', fontSize: 15, fontWeight: 500, color: '#1A2E40' }}>New Lecturer Account</h3>
+          <h3 style={{ margin: '0 0 16px', fontSize: 15, fontWeight: 500, color: '#1A2E40' }}>New User Account</h3>
 
           <div style={s.formGrid}>
             <div style={s.formField}>
@@ -202,9 +231,20 @@ export default function UserManagement() {
               <input style={s.input} value={form.email} onChange={e => setForm(f => ({ ...f, email: e.target.value }))} placeholder="jane.smith" />
             </div>
             <div style={s.formField}>
+              <label style={s.label}>Role *</label>
+              <select
+                style={{ ...s.input, cursor: 'pointer' }}
+                value={form.role}
+                onChange={e => setForm(f => ({ ...f, role: e.target.value, subjects: [] }))}
+              >
+                <option value="Lecturer">Lecturer</option>
+                <option value="Head of Technology">Head of Technology</option>
+              </select>
+            </div>
+            <div style={{ ...s.formField, gridColumn: '1 / -1' }}>
               <label style={s.label}>Temporary Password *</label>
               <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                <div style={{ position: 'relative', flex: 1 }}>
+                <div style={{ position: 'relative', flex: 1, maxWidth: 360 }}>
                   <input
                     type={showPwd ? 'text' : 'password'}
                     style={{ ...s.input, paddingRight: 40 }}
@@ -224,15 +264,17 @@ export default function UserManagement() {
             </div>
           </div>
 
-          <div style={{ marginTop: 16 }}>
-            <label style={s.label}>Assigned Subjects * <span style={{ color: '#8BA5B8', fontWeight: 400 }}>(required)</span></label>
-            <SubjectMultiSelect
-              value={form.subjects}
-              onChange={v => setForm(f => ({ ...f, subjects: v }))}
-              allSubjects={allSubjects}
-              placeholder="Select subjects…"
-            />
-          </div>
+          {form.role === 'Lecturer' && (
+            <div style={{ marginTop: 16 }}>
+              <label style={s.label}>Assigned Subjects * <span style={{ color: '#8BA5B8', fontWeight: 400 }}>(required for Lecturer)</span></label>
+              <SubjectMultiSelect
+                value={form.subjects}
+                onChange={v => setForm(f => ({ ...f, subjects: v }))}
+                allSubjects={allSubjects}
+                placeholder="Select subjects…"
+              />
+            </div>
+          )}
 
           {createErr && <div style={s.errMsg}>{createErr}</div>}
           {createMsg && <div style={s.successMsg}>{createMsg}</div>}
@@ -253,6 +295,7 @@ export default function UserManagement() {
             <tr style={s.thead}>
               <th style={s.th}>Name</th>
               <th style={s.th}>Email</th>
+              <th style={s.th}>Role</th>
               <th style={s.th}>Subjects</th>
               <th style={s.th}>Status</th>
               <th style={s.th}>Actions</th>
@@ -260,89 +303,105 @@ export default function UserManagement() {
           </thead>
           <tbody>
             {loading ? (
-              <Spinner />
+              <Spinner cols={6} />
             ) : users.length === 0 ? (
               <tr>
-                <td colSpan={5} style={{ padding: 0, border: 'none' }}>
+                <td colSpan={6} style={{ padding: 0, border: 'none' }}>
                   <div style={{ textAlign: 'center', padding: '60px 20px', color: '#8BA5B8' }}>
                     <div style={{ fontSize: 32, marginBottom: 12 }}>📭</div>
-                    <div style={{ fontSize: 14, fontWeight: 500, color: '#1A2E40', marginBottom: 4 }}>No lecturer accounts found</div>
+                    <div style={{ fontSize: 14, fontWeight: 500, color: '#1A2E40', marginBottom: 4 }}>No accounts found</div>
                     <div style={{ fontSize: 13 }}>Create a new account to get started</div>
                   </div>
                 </td>
               </tr>
-            ) : users.map((user, i) => (
-              <>
-                <tr key={user.email} style={{ background: editingEmail === user.email ? '#EFF6FF' : (i % 2 === 0 ? '#fff' : '#F8FAFB') }}>
-                  <td style={s.td}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                      <div style={s.avatar}>{user.name?.split(' ').map(w => w[0]).join('').slice(0,2).toUpperCase()}</div>
-                      <span style={{ fontWeight: 500 }}>{user.name}</span>
-                    </div>
-                  </td>
-                  <td style={{ ...s.td, color: '#5A7A8A', fontSize: 12, fontFamily: 'monospace' }}>{user.email}</td>
-                  <td style={s.td}>
-                    <SubjectChips subjects={user.subjects || []} />
-                  </td>
-                  <td style={s.td}>
-                    <span style={{
-                      background: user.active !== false ? '#E1F5EE' : '#FCEBEB',
-                      color:      user.active !== false ? '#0F6E56' : '#A32D2D',
-                      borderRadius: 20, padding: '3px 10px', fontSize: 12, fontWeight: 500,
-                    }}>
-                      {user.active !== false ? 'Active' : 'Inactive'}
-                    </span>
-                  </td>
-                  <td style={s.td}>
-                    <div style={{ display: 'flex', gap: 8 }}>
-                      <button style={s.iconBtn} title="Edit subjects" onClick={() => editingEmail === user.email ? cancelEdit() : startEdit(user)}>
-                        ✏️
-                      </button>
-                      <button
-                        style={{ ...s.iconBtn, background: user.active !== false ? '#FAEEDA' : '#E1F5EE' }}
-                        title={user.active !== false ? 'Deactivate' : 'Activate'}
-                        onClick={() => toggleActive(user)}
-                      >
-                        {user.active !== false ? '🔒' : '✅'}
-                      </button>
-                    </div>
-                  </td>
-                </tr>
-
-                {editingEmail === user.email && (
-                  <tr key={`edit-${user.email}`}>
-                    <td colSpan={5} style={{ padding: '12px 20px', background: '#EFF6FF', borderBottom: '0.5px solid #DDE4EA' }}>
-                      <div style={{ maxWidth: 520 }}>
-                        <p style={{ margin: '0 0 8px', fontSize: 13, fontWeight: 500, color: '#1A2E40' }}>Edit Subjects for {user.name}</p>
-                        <SubjectMultiSelect value={editSubjects} onChange={setEditSubjects} allSubjects={allSubjects} />
-                        {editMsg && (
-                          <div style={{
-                            marginTop: 8, fontSize: 12, fontWeight: 500,
-                            color: editMsg.includes('success') ? '#0F6E56' : '#A32D2D',
-                          }}>
-                            {editMsg}
-                          </div>
-                        )}
-                        <div style={{ display: 'flex', gap: 10, marginTop: 12 }}>
-                          <button style={{ ...s.createBtn, fontSize: 12, padding: '7px 16px', opacity: editSaving ? 0.6 : 1 }} disabled={editSaving} onClick={saveEdit}>
-                            {editSaving ? 'Saving…' : 'Save Changes'}
+            ) : users.map((user, i) => {
+              const roleBadge = ROLE_BADGE[user.role] || ROLE_BADGE['Lecturer'];
+              const isLecturer = user.role === 'Lecturer' || !user.role;
+              return (
+                <Fragment key={user.email}>
+                  <tr style={{ background: editingEmail === user.email ? '#EFF6FF' : (i % 2 === 0 ? '#fff' : '#F8FAFB') }}>
+                    <td style={s.td}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                        <div style={s.avatar}>{user.name?.split(' ').map(w => w[0]).join('').slice(0,2).toUpperCase()}</div>
+                        <span style={{ fontWeight: 500 }}>{user.name}</span>
+                      </div>
+                    </td>
+                    <td style={{ ...s.td, color: '#5A7A8A', fontSize: 12, fontFamily: 'monospace' }}>{user.email}</td>
+                    <td style={s.td}>
+                      <span style={{ ...s.roleBadge, background: roleBadge.bg, color: roleBadge.color, borderColor: roleBadge.border }}>
+                        {user.role || 'Lecturer'}
+                      </span>
+                    </td>
+                    <td style={s.td}>
+                      <SubjectChips subjects={user.subjects || []} />
+                    </td>
+                    <td style={s.td}>
+                      <span style={{
+                        background: user.active !== false ? '#E1F5EE' : '#FCEBEB',
+                        color:      user.active !== false ? '#0F6E56' : '#A32D2D',
+                        borderRadius: 20, padding: '3px 10px', fontSize: 12, fontWeight: 500,
+                      }}>
+                        {user.active !== false ? 'Active' : 'Inactive'}
+                      </span>
+                    </td>
+                    <td style={s.td}>
+                      <div style={{ display: 'flex', gap: 8 }}>
+                        {isLecturer && (
+                          <button style={s.iconBtn} title="Edit subjects" onClick={() => editingEmail === user.email ? cancelEdit() : startEdit(user)}>
+                            ✏️
                           </button>
-                          <button style={s.cancelLink} onClick={cancelEdit}>Cancel</button>
-                        </div>
+                        )}
+                        <button
+                          style={{ ...s.iconBtn, background: user.active !== false ? '#FAEEDA' : '#E1F5EE' }}
+                          title={user.active !== false ? 'Deactivate' : 'Activate'}
+                          onClick={() => toggleActive(user)}
+                        >
+                          {user.active !== false ? '🔒' : '✅'}
+                        </button>
+                        <button
+                          style={{ ...s.iconBtn, background: '#FCEBEB', color: '#A32D2D' }}
+                          title="Delete account"
+                          onClick={() => handleDelete(user)}
+                        >
+                          🗑️
+                        </button>
                       </div>
                     </td>
                   </tr>
-                )}
-              </>
-            ))}
+
+                  {editingEmail === user.email && (
+                    <tr key={`edit-${user.email}`}>
+                      <td colSpan={6} style={{ padding: '12px 20px', background: '#EFF6FF', borderBottom: '0.5px solid #DDE4EA' }}>
+                        <div style={{ maxWidth: 520 }}>
+                          <p style={{ margin: '0 0 8px', fontSize: 13, fontWeight: 500, color: '#1A2E40' }}>Edit Subjects for {user.name}</p>
+                          <SubjectMultiSelect value={editSubjects} onChange={setEditSubjects} allSubjects={allSubjects} />
+                          {editMsg && (
+                            <div style={{
+                              marginTop: 8, fontSize: 12, fontWeight: 500,
+                              color: editMsg.includes('success') ? '#0F6E56' : '#A32D2D',
+                            }}>
+                              {editMsg}
+                            </div>
+                          )}
+                          <div style={{ display: 'flex', gap: 10, marginTop: 12 }}>
+                            <button style={{ ...s.createBtn, fontSize: 12, padding: '7px 16px', opacity: editSaving ? 0.6 : 1 }} disabled={editSaving} onClick={saveEdit}>
+                              {editSaving ? 'Saving…' : 'Save Changes'}
+                            </button>
+                            <button style={s.cancelLink} onClick={cancelEdit}>Cancel</button>
+                          </div>
+                        </div>
+                      </td>
+                    </tr>
+                  )}
+                </Fragment>
+              );
+            })}
           </tbody>
         </table>
       </div>
     </div>
   );
 }
-
-// ── Styles ────────────────────────────────────────────────────────────────────
 
 const s_chip = {
   background: '#E6F1FB', color: '#185FA5',
@@ -376,6 +435,8 @@ const s = {
 
   errMsg:     { background: '#FCEBEB', border: '0.5px solid #F09595', color: '#A32D2D', borderRadius: 8, padding: '10px 16px', fontSize: 13, marginTop: 12 },
   successMsg: { background: '#E1F5EE', border: '0.5px solid #5DCAA5', color: '#0F6E56', borderRadius: 8, padding: '10px 16px', fontSize: 13, marginTop: 12 },
+
+  roleBadge: { display: 'inline-block', padding: '3px 10px', borderRadius: 20, border: '0.5px solid', fontSize: 12, fontWeight: 500, whiteSpace: 'nowrap' },
 
   msBox:    { display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '0 12px', height: 36, border: '0.5px solid #C5D2DC', borderRadius: 8, cursor: 'pointer', background: '#fff', userSelect: 'none' },
   msDrop:   { position: 'absolute', top: '100%', left: 0, right: 0, zIndex: 200, background: '#fff', border: '0.5px solid #C5D2DC', borderRadius: 8, boxShadow: '0 4px 12px rgba(0,0,0,0.1)', marginTop: 4 },

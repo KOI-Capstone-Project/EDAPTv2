@@ -4,11 +4,10 @@ import api from '../services/api';
 
 const ALL_PERIODS = ['23.1','23.2','23.3','24.1','24.2','24.3','25.1','25.2','25.3'];
 
-export default function LecturerSettings() {
+export default function AdminSettings() {
   const user     = getUser();
   const email    = user?.email    || '';
-  const role     = user?.role     || 'Lecturer';
-  const subjects = user?.subjects || [];
+  const role     = user?.role     || 'Head of Technology';
   const PHOTO_KEY = `user_photo_${email}`;
 
   // ── Section 1: Profile ───────────────────────────────────────────────────
@@ -85,12 +84,10 @@ export default function LecturerSettings() {
   };
 
   // ── Section 3: Preferences ───────────────────────────────────────────────
-  const [prefSubject,   setPrefSubject]   = useState(localStorage.getItem('pref_default_subject')   || '');
   const [prefTrimester, setPrefTrimester] = useState(localStorage.getItem('pref_default_trimester') || '');
   const [prefSaved,     setPrefSaved]     = useState(false);
 
   const handleSavePrefs = () => {
-    localStorage.setItem('pref_default_subject',   prefSubject);
     localStorage.setItem('pref_default_trimester', prefTrimester);
     setPrefSaved(true);
     setTimeout(() => setPrefSaved(false), 2500);
@@ -172,18 +169,6 @@ export default function LecturerSettings() {
           />
         </div>
 
-        {/* Assigned subjects (read-only) */}
-        <div style={s.prefField}>
-          <label style={s.label}>Assigned Subjects</label>
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 4 }}>
-            {subjects.length > 0
-              ? subjects.map(sub => <span key={sub} style={s.subjectChip}>{sub}</span>)
-              : <span style={s.muted}>None assigned</span>
-            }
-          </div>
-          <p style={s.fieldNote}>Subjects are assigned by the Head of Technology</p>
-        </div>
-
         {profileMsg && (
           <div style={profileMsg.type === 'success' ? s.successBox : s.errorBox}>
             {profileMsg.text}
@@ -204,8 +189,8 @@ export default function LecturerSettings() {
         <h2 style={s.cardTitle}>Security</h2>
         <form onSubmit={handleChangePassword}>
 
-          <PasswordField label="Current Password"     value={curPwd}  onChange={setCurPwd}  show={showCur}  onToggle={() => setShowCur(v => !v)} />
-          <PasswordField label="New Password"         value={newPwd}  onChange={setNewPwd}  show={showNew}  onToggle={() => setShowNew(v => !v)} />
+          <PasswordField label="Current Password" value={curPwd} onChange={setCurPwd} show={showCur} onToggle={() => setShowCur(v => !v)} />
+          <PasswordField label="New Password"     value={newPwd} onChange={setNewPwd} show={showNew} onToggle={() => setShowNew(v => !v)} />
           {newPwd && newPwd.length < 8 && <p style={s.inlineErr}>New password must be at least 8 characters.</p>}
 
           <PasswordField label="Confirm New Password" value={confPwd} onChange={setConfPwd} show={showConf} onToggle={() => setShowConf(v => !v)} />
@@ -230,15 +215,7 @@ export default function LecturerSettings() {
       {/* ── Section 3: Preferences ──────────────────────────────── */}
       <div style={s.card}>
         <h2 style={s.cardTitle}>Preferences</h2>
-        <p style={s.muted}>These preferences are applied when you log in.</p>
-
-        <div style={s.prefField}>
-          <label style={s.prefLabel}>Default Subject on Login</label>
-          <select style={s.select} value={prefSubject} onChange={e => setPrefSubject(e.target.value)}>
-            <option value="">All My Subjects</option>
-            {subjects.map(sub => <option key={sub} value={sub}>{sub}</option>)}
-          </select>
-        </div>
+        <p style={s.muted}>Applied when you log in or navigate to the dashboard.</p>
 
         <div style={s.prefField}>
           <label style={s.prefLabel}>Default Trimester View</label>
@@ -294,7 +271,7 @@ const s = {
   photo: { width: 72, height: 72, borderRadius: '50%', objectFit: 'cover', display: 'block' },
   avatarFallback: {
     width: 72, height: 72, borderRadius: '50%',
-    background: 'linear-gradient(135deg, #2E6E8E, #4f8ef7)',
+    background: 'linear-gradient(135deg, #1A2E40, #2E6E8E)',
     display: 'flex', alignItems: 'center', justifyContent: 'center',
     fontSize: 24, fontWeight: 700, color: '#fff',
   },
@@ -319,12 +296,6 @@ const s = {
     border: '0.5px solid #C5D2DC', fontSize: 13, color: '#1E293B',
     outline: 'none', width: '100%', boxSizing: 'border-box',
   },
-
-  subjectChip: {
-    background: '#E6F1FB', color: '#185FA5',
-    borderRadius: 20, padding: '3px 10px', fontSize: 11, fontWeight: 600,
-  },
-  fieldNote: { margin: '6px 0 0', fontSize: 11, color: '#94A3B8' },
 
   successBox: { background: '#E1F5EE', color: '#0F6E56', borderRadius: 8, padding: '10px 14px', fontSize: 13, marginBottom: 14 },
   errorBox:   { background: '#FCEBEB', color: '#A32D2D', borderRadius: 8, padding: '10px 14px', fontSize: 13, marginBottom: 14 },

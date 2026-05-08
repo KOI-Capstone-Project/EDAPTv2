@@ -12,12 +12,14 @@ import LecturerExplorer   from './pages/LecturerExplorer';
 import AdminExplorer      from './pages/AdminExplorer';
 import SubjectAnalytics   from './pages/SubjectAnalytics';
 import UserManagement     from './pages/UserManagement';
-import Predictions        from './pages/Predictions';
 import LecturerPredictor  from './pages/LecturerPredictor';
+import LecturerAIInsights from './pages/LecturerAIInsights';
 import LecturerSettings   from './pages/LecturerSettings';
+import AdminSettings      from './pages/AdminSettings';
+import AdminPredictor     from './pages/AdminPredictor';
 
 // Auth utilities
-import { getToken } from './utils/auth';
+import { getToken, getUser } from './utils/auth';
 
 // ── Route guards ──────────────────────────────────────────────────────────────
 
@@ -49,45 +51,45 @@ function AdminProtected({ children }) {
   return <AdminRoute><Layout>{children}</Layout></AdminRoute>;
 }
 
+function SettingsPage() {
+  const user = getUser();
+  return user?.role === 'Head of Technology' ? <AdminSettings /> : <LecturerSettings />;
+}
+
 // ── App ───────────────────────────────────────────────────────────────────────
 
 export default function App() {
   return (
     <Routes>
       {/* Public */}
-      <Route path="/login"  element={<Login />} />
+      <Route path="/login" element={<Login />} />
 
       {/* Root → login */}
       <Route path="/" element={<Navigate to="/login" replace />} />
 
-      {/* Lecturer dashboard */}
-      <Route path="/dashboard/lecturer" element={
-        <Protected><LecturerDashboard /></Protected>
-      } />
+      {/* Lecturer pages */}
+      <Route path="/dashboard/lecturer" element={<Protected><LecturerDashboard /></Protected>} />
+      <Route path="/explorer"            element={<Protected><LecturerExplorer /></Protected>} />
+      <Route path="/predictor"           element={<Protected><LecturerPredictor /></Protected>} />
+      <Route path="/ai-insights"         element={<Protected><LecturerAIInsights /></Protected>} />
 
       {/* Admin dashboard */}
       <Route path="/dashboard/admin" element={
         <ErrorBoundary>
-          <AdminProtected>
-            <AdminDashboard />
-          </AdminProtected>
+          <AdminProtected><AdminDashboard /></AdminProtected>
         </ErrorBoundary>
       } />
 
-      {/* Shared protected pages */}
-      <Route path="/predictions" element={<Protected><Predictions /></Protected>} />
-      <Route path="/predictor"   element={<Protected><LecturerPredictor /></Protected>} />
-      <Route path="/settings"    element={<Protected><LecturerSettings /></Protected>} />
-
-      {/* Lecturer explorer */}
-      <Route path="/explorer" element={<Protected><LecturerExplorer /></Protected>} />
-
       {/* Admin-only pages */}
-      <Route path="/data-ingestion"    element={<AdminProtected><DataIngestion /></AdminProtected>} />
-      <Route path="/audit-log"         element={<AdminProtected><AuditLog /></AdminProtected>} />
-      <Route path="/analytics/subjects" element={<AdminProtected><SubjectAnalytics /></AdminProtected>} />
-      <Route path="/student-analytics" element={<AdminProtected><AdminExplorer /></AdminProtected>} />
-      <Route path="/users"             element={<AdminProtected><UserManagement /></AdminProtected>} />
+      <Route path="/data-ingestion"     element={<AdminProtected><DataIngestion /></AdminProtected>} />
+      <Route path="/audit-log"          element={<AdminProtected><AuditLog /></AdminProtected>} />
+      <Route path="/subject-analytics"  element={<AdminProtected><SubjectAnalytics /></AdminProtected>} />
+      <Route path="/student-analytics"  element={<AdminProtected><AdminExplorer /></AdminProtected>} />
+      <Route path="/predictive-reports" element={<AdminProtected><AdminPredictor /></AdminProtected>} />
+      <Route path="/users"              element={<AdminProtected><UserManagement /></AdminProtected>} />
+
+      {/* Shared settings (role-aware) */}
+      <Route path="/settings" element={<Protected><SettingsPage /></Protected>} />
 
       {/* Fallback */}
       <Route path="*" element={<Navigate to="/login" replace />} />

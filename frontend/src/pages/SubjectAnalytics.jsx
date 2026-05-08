@@ -1,340 +1,339 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect } from 'react';
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend,
   LineChart, Line, ResponsiveContainer,
 } from 'recharts';
 import api from '../services/api';
 
-const ALL_PERIODS = ['23.1','23.2','23.3','24.1','24.2','24.3','25.1','25.2','25.3'];
+const TEAL   = '#2E6E8E';
+const ORANGE = '#E8873A';
+const GRAY   = '#94A3B8';
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
+const fmtPct = v => v != null ? `${v}%` : '—';
+const diff   = (a, b) => a != null && b != null ? +(a - b).toFixed(1) : null;
 
-function Spinner() {
+function KpiCard({ label, value, sub, change, warn }) {
+  const d = change;
   return (
-    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: 200 }}>
-      <div style={{ width: 32, height: 32, border: '3px solid #F0F4F8', borderTop: '3px solid #2E6E8E', borderRadius: '50%', animation: 'spin 0.8s linear infinite' }} />
-    </div>
-  );
-}
-
-// ── Searchable dropdown ───────────────────────────────────────────────────────
-
-function SearchableSelect({ value, onChange, options, placeholder }) {
-  const [q, setQ]       = useState('');
-  const [open, setOpen] = useState(false);
-  const ref             = useRef(null);
-
-  useEffect(() => {
-    const h = e => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
-    document.addEventListener('mousedown', h);
-    return () => document.removeEventListener('mousedown', h);
-  }, []);
-
-  const filtered = q ? options.filter(o => o.toLowerCase().includes(q.toLowerCase())) : options;
-
-  return (
-    <div ref={ref} style={{ position: 'relative', minWidth: 200 }}>
-      <div style={s.ssWrap}>
-        <input
-          style={s.ssInput}
-          value={value || q}
-          placeholder={placeholder}
-          onChange={e => { setQ(e.target.value); if (value) onChange(''); setOpen(true); }}
-          onFocus={() => setOpen(true)}
-        />
-        {(value || q) && (
-          <button style={s.ssClear} onMouseDown={e => { e.preventDefault(); onChange(''); setQ(''); setOpen(false); }}>✕</button>
-        )}
-      </div>
-      {open && filtered.length > 0 && (
-        <div style={s.ssDrop}>
-          {filtered.slice(0, 60).map(o => (
-            <div key={o} style={s.ssItem}
-              onMouseDown={e => { e.preventDefault(); onChange(o); setQ(''); setOpen(false); }}>
-              {o}
-            </div>
-          ))}
-        </div>
+    <div style={s.kpiCard}>
+      <p style={s.kpiLabel}>{label}</p>
+      <p style={{ ...s.kpiValue, color: warn ? '#DC2626' : '#1E293B' }}>{value ?? '—'}</p>
+      {sub && <p style={s.kpiSub}>{sub}</p>}
+      {d != null && (
+        <p style={{ ...s.kpiDelta, color: d >= 0 ? '#059669' : '#DC2626' }}>
+          {d >= 0 ? '▲' : '▼'} {Math.abs(d)}% vs prev period
+        </p>
       )}
     </div>
   );
 }
 
-// ── Subject column ────────────────────────────────────────────────────────────
-
-function SubjectColumn({ stats, selectedTrimester, label }) {
-  if (!stats) return null;
-
-  const vs        = parseFloat((stats.avg_mark - stats.institution_avg).toFixed(1));
-  const diffColor = stats.difficulty === 'Low' ? '#1D9E75' : stats.difficulty === 'Medium' ? '#D97706' : '#DC2626';
-
-  const passTrendVal = stats.prev_pass_rate != null
-    ? parseFloat((stats.pass_rate - stats.prev_pass_rate).toFixed(1)) : null;
-
+function DifficultyBadge({ level }) {
+  const colors = { Low: '#059669', Medium: '#D97706', High: '#DC2626' };
   return (
-    <div>
-      {label && (
-        <div style={s.colHeader}>{label}</div>
-      )}
-
-      {/* ── 3 KPI cards ──────────────────────────────────────────── */}
-      <div style={s.kpiRow}>
-        <div style={s.kpiCard}>
-          <p style={s.kpiLabel}>Average Grade</p>
-          <p style={s.kpiValue}>{stats.avg_mark}%</p>
-          <p style={s.kpiSub}>Institution avg: {stats.institution_avg}%</p>
-          <span style={{ ...s.badge, background: vs >= 0 ? '#E1F5EE' : '#FCEBEB', color: vs >= 0 ? '#0F6E56' : '#A32D2D' }}>
-            {vs >= 0 ? `+${vs}%` : `${vs}%`} {vs >= 0 ? 'above' : 'below'} average
-          </span>
-        </div>
-
-        <div style={s.kpiCard}>
-          <p style={s.kpiLabel}>Pass Rate</p>
-          <p style={s.kpiValue}>{stats.pass_rate}%</p>
-          <p style={s.kpiSub}>Institution: {stats.institution_pass_rate}%</p>
-          {passTrendVal !== null && (
-            <p style={{ fontSize: 12, fontWeight: 500, marginTop: 4, color: passTrendVal >= 0 ? '#1D9E75' : '#DC2626' }}>
-              {passTrendVal >= 0 ? `↑ +${passTrendVal}%` : `↓ ${passTrendVal}%`} vs prev period
-            </p>
-          )}
-        </div>
-
-        <div style={s.kpiCard}>
-          <p style={s.kpiLabel}>Subject Difficulty</p>
-          <p style={{ ...s.kpiValue, color: diffColor }}>{stats.difficulty}</p>
-          <p style={s.kpiSub}>{stats.failure_rate}% failure rate</p>
-          <p style={{ fontSize: 11, color: '#8BA5B8', marginTop: 2 }}>{stats.student_count.toLocaleString()} students</p>
-        </div>
-      </div>
-
-      {/* Chart 1: Grade Distribution */}
-      <div style={s.chartCard}>
-        <h3 style={s.chartTitle}>Grade Distribution — Subject vs Institution</h3>
-        <ResponsiveContainer width="100%" height={280}>
-          <BarChart data={stats.grade_distribution} margin={{ top: 4, right: 12, left: 0, bottom: 0 }}>
-            <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" />
-            <XAxis dataKey="band" tick={{ fontSize: 10 }} />
-            <YAxis tick={{ fontSize: 11 }} />
-            <Tooltip />
-            <Legend />
-            <Bar dataKey="subject_count"     name="Subject"     fill="#2E6E8E" radius={[3,3,0,0]} />
-            <Bar dataKey="institution_count" name="Institution" fill="#94A3B8" radius={[3,3,0,0]} />
-          </BarChart>
-        </ResponsiveContainer>
-      </div>
-
-      {/* Chart 2: Performance Trend */}
-      <div style={s.chartCard}>
-        <h3 style={s.chartTitle}>Performance Trend</h3>
-        <ResponsiveContainer width="100%" height={280}>
-          <LineChart data={stats.performance_trend} margin={{ top: 4, right: 12, left: 0, bottom: 0 }}>
-            <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" />
-            <XAxis dataKey="period" type="category" tick={{ fontSize: 11 }} />
-            <YAxis domain={[0, 100]} unit="%" tick={{ fontSize: 11 }} />
-            <Tooltip formatter={v => v != null ? `${v}%` : 'N/A'} />
-            <Legend />
-            <Line type="monotone" dataKey="subject_avg"     name="Subject Avg"     stroke="#2E6E8E" strokeWidth={2}   dot={{ r: 3 }} connectNulls />
-            <Line type="monotone" dataKey="institution_avg" name="Institution Avg" stroke="#1A2E40" strokeWidth={1.5} strokeDasharray="4 3" dot={false} connectNulls />
-          </LineChart>
-        </ResponsiveContainer>
-      </div>
-
-      {/* Chart 3: Assessment Type */}
-      {stats.assessment_breakdown.length > 0 && (
-        <div style={s.chartCard}>
-          <h3 style={s.chartTitle}>Assessment Type Performance</h3>
-          <ResponsiveContainer width="100%" height={Math.max(160, stats.assessment_breakdown.length * 42)}>
-            <BarChart layout="vertical" data={stats.assessment_breakdown} margin={{ top: 4, right: 50, left: 0, bottom: 0 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" horizontal={false} />
-              <XAxis type="number" domain={[0, 100]} unit="%" tick={{ fontSize: 11 }} />
-              <YAxis type="category" dataKey="type" width={70} tick={{ fontSize: 11 }} />
-              <Tooltip formatter={v => `${v}%`} />
-              <Bar dataKey="avg" name="Avg Mark %" fill="#2E6E8E" radius={[0,3,3,0]} />
-            </BarChart>
-          </ResponsiveContainer>
-        </div>
-      )}
-
-      {/* Chart 4: Trimester Comparison table */}
-      <div style={s.chartCard}>
-        <h3 style={s.chartTitle}>Trimester Comparison</h3>
-        <div style={{ overflowX: 'auto' }}>
-          <table style={s.table}>
-            <thead>
-              <tr style={s.thead}>
-                <th style={s.th}>Study Period</th>
-                <th style={s.th}>Avg Mark</th>
-                <th style={s.th}>Pass Rate</th>
-                <th style={s.th}>Student Count</th>
-              </tr>
-            </thead>
-            <tbody>
-              {stats.trimester_comparison.map((row, i) => {
-                const highlighted = row.period === selectedTrimester;
-                return (
-                  <tr key={row.period} style={{ background: highlighted ? '#DFF0FA' : (i % 2 === 0 ? '#fff' : '#F8FAFB') }}>
-                    <td style={{ ...s.td, fontWeight: highlighted ? 600 : 400, color: highlighted ? '#185FA5' : '#1A2E40' }}>{row.period}</td>
-                    <td style={s.td}>{row.avg}%</td>
-                    <td style={s.td}>{row.pass_rate}%</td>
-                    <td style={s.td}>{row.count.toLocaleString()}</td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-      </div>
-    </div>
+    <span style={{ ...s.badge, background: colors[level] + '18', color: colors[level] }}>
+      {level} Difficulty
+    </span>
   );
 }
-
-// ── Main component ────────────────────────────────────────────────────────────
 
 export default function SubjectAnalytics() {
-  const [subjects,  setSubjects]  = useState([]);
-  const [subjectA,  setSubjectA]  = useState('');
-  const [subjectB,  setSubjectB]  = useState('');
-  const [trimester, setTrimester] = useState('');
-  const [data,      setData]      = useState(null);
-  const [loading,   setLoading]   = useState(false);
-  const [error,     setError]     = useState('');
+  const [subjects,   setSubjects]   = useState([]);
+  const [trimesters, setTrimesters] = useState([]);
+  const [subjectA,   setSubjectA]   = useState('');
+  const [subjectB,   setSubjectB]   = useState('');
+  const [trimester,  setTrimester]  = useState('');
+  const [data,       setData]       = useState(null);
+  const [loading,    setLoading]    = useState(false);
+  const [error,      setError]      = useState(null);
 
   useEffect(() => {
     api.get('/api/subjects/list').then(r => setSubjects(r.data)).catch(() => {});
+    api.get('/api/explorer/filters').then(r => setTrimesters(r.data.trimesters || [])).catch(() => {});
   }, []);
 
-  useEffect(() => {
-    if (!subjectA) { setData(null); return; }
+  const handleLoad = async () => {
+    if (!subjectA) return;
     setLoading(true);
-    setError('');
-    const params = { subject_a: subjectA };
-    if (trimester) params.trimester = trimester;
-    if (subjectB)  params.subject_b = subjectB;
-    api.get('/api/subjects/analytics', { params })
-      .then(r => setData(r.data))
-      .catch(err => setError(err.response?.data?.detail || 'Failed to load analytics.'))
-      .finally(() => setLoading(false));
-  }, [subjectA, subjectB, trimester]);
+    setError(null);
+    try {
+      const params = { subject_a: subjectA };
+      if (subjectB)   params.subject_b = subjectB;
+      if (trimester)  params.trimester = trimester;
+      const res = await api.get('/api/subjects/analytics', { params });
+      setData(res.data);
+    } catch (err) {
+      setError(err.response?.data?.detail || 'Failed to load analytics.');
+    } finally {
+      setLoading(false);
+    }
+  };
 
-  const comparing = !!(data?.subject_a && data?.subject_b);
+  const a = data?.subject_a;
+  const b = data?.subject_b;
+
+  // Merge grade distribution for grouped bar chart
+  const gradeDist = a ? a.grade_distribution.map((row, i) => ({
+    band:        row.band,
+    [a.subject]: row.subject_count,
+    ...(b ? { [b.subject]: b.grade_distribution[i]?.subject_count ?? 0 } : {}),
+    Institution: row.institution_count,
+  })) : [];
+
+  // Merge performance trend by period
+  const trendMap = {};
+  if (a) {
+    a.performance_trend.forEach(p => {
+      trendMap[p.period] = { period: p.period, [a.subject]: p.subject_avg, Institution: p.institution_avg };
+    });
+  }
+  if (b) {
+    b.performance_trend.forEach(p => {
+      if (!trendMap[p.period]) trendMap[p.period] = { period: p.period };
+      trendMap[p.period][b.subject] = p.subject_avg;
+    });
+  }
+  const trendData = Object.values(trendMap);
+
+  // Merge assessment breakdown by type
+  const typeMap = {};
+  if (a) a.assessment_breakdown.forEach(ab => { typeMap[ab.type] = { type: ab.type, [a.subject]: ab.avg }; });
+  if (b) b.assessment_breakdown.forEach(ab => {
+    if (!typeMap[ab.type]) typeMap[ab.type] = { type: ab.type };
+    typeMap[ab.type][b.subject] = ab.avg;
+  });
+  const breakdownData = Object.values(typeMap);
 
   return (
-    <div>
+    <div style={s.page}>
+      {/* Header */}
       <div style={s.pageHeader}>
-        <h1 style={s.pageTitle}>
-          {comparing ? `${subjectA} vs ${subjectB}` : 'Subject Analytics'}
-        </h1>
-        <p style={s.pageSub}>Comprehensive performance insights and comparative analysis</p>
+        <div>
+          <h1 style={s.pageTitle}>Subject Analytics</h1>
+          <p style={s.pageSub}>Compare subject performance and grade distributions</p>
+        </div>
       </div>
 
-      {/* ── Scope selector ──────────────────────────────────────────── */}
-      <div style={s.scopeCard}>
-        <div style={s.scopeRow}>
-          <div style={s.scopeField}>
-            <label style={s.scopeLabel}>Subject A <span style={{ color: '#DC2626' }}>*</span></label>
-            <SearchableSelect
-              value={subjectA}
-              onChange={v => { setSubjectA(v); if (!v) setSubjectB(''); }}
-              options={subjects}
-              placeholder="Select subject…"
-            />
-          </div>
-          <div style={s.scopeField}>
-            <label style={s.scopeLabel}>Study Period</label>
-            <select style={s.select} value={trimester} onChange={e => setTrimester(e.target.value)}>
-              <option value="">All Periods</option>
-              {ALL_PERIODS.map(p => <option key={p} value={p}>{p}</option>)}
+      {/* Filters */}
+      <div style={s.card}>
+        <div style={s.filterRow}>
+          <div style={s.filterGroup}>
+            <label style={s.filterLabel}>Subject A <span style={{ color: '#DC2626' }}>*</span></label>
+            <select style={s.select} value={subjectA} onChange={e => { setSubjectA(e.target.value); setData(null); }}>
+              <option value="">Select subject…</option>
+              {subjects.map(sv => <option key={sv} value={sv}>{sv}</option>)}
             </select>
           </div>
-          <div style={s.scopeField}>
-            <label style={s.scopeLabel}>Compare with (optional)</label>
-            <SearchableSelect
-              value={subjectB}
-              onChange={setSubjectB}
-              options={subjects.filter(s => s !== subjectA)}
-              placeholder="Add subject B…"
-            />
+          <div style={s.filterGroup}>
+            <label style={s.filterLabel}>Subject B <span style={{ color: '#94A3B8', fontSize: 11 }}>(compare)</span></label>
+            <select style={s.select} value={subjectB} onChange={e => { setSubjectB(e.target.value); setData(null); }}>
+              <option value="">None</option>
+              {subjects.filter(sv => sv !== subjectA).map(sv => <option key={sv} value={sv}>{sv}</option>)}
+            </select>
           </div>
+          <div style={s.filterGroup}>
+            <label style={s.filterLabel}>Trimester</label>
+            <select style={s.select} value={trimester} onChange={e => { setTrimester(e.target.value); setData(null); }}>
+              <option value="">All periods</option>
+              {trimesters.map(t => <option key={t} value={t}>{t}</option>)}
+            </select>
+          </div>
+          <button
+            style={{ ...s.loadBtn, opacity: (!subjectA || loading) ? 0.55 : 1 }}
+            disabled={!subjectA || loading}
+            onClick={handleLoad}
+          >
+            {loading ? 'Loading…' : 'Load Analytics'}
+          </button>
         </div>
-        {!subjectA && (
-          <p style={{ margin: '10px 0 0', fontSize: 12, color: '#8BA5B8' }}>Select Subject A to begin.</p>
-        )}
+        {error && <p style={s.errorMsg}>{error}</p>}
       </div>
 
-      {error && (
-        <div style={s.errorBox}>{error}</div>
+      {/* Empty state */}
+      {!a && !loading && (
+        <div style={s.emptyCard}>
+          <p style={s.emptyIcon}>📊</p>
+          <p style={s.emptyText}>Select a subject and click <strong>Load Analytics</strong> to view insights.</p>
+        </div>
       )}
-      {loading && <Spinner />}
 
-      {/* ── Content ─────────────────────────────────────────────────── */}
-      {!loading && data?.subject_a && (
-        comparing ? (
-          <div style={s.compareGrid}>
-            <SubjectColumn stats={data.subject_a} selectedTrimester={trimester} label={subjectA} />
-            <SubjectColumn stats={data.subject_b} selectedTrimester={trimester} label={subjectB} />
+      {/* Results */}
+      {a && (
+        <>
+          {/* Subject headers */}
+          <div style={s.subjectHeaders}>
+            <div style={s.subjectBadge}>
+              <span style={{ ...s.badge, background: TEAL + '18', color: TEAL }}>{a.subject}</span>
+              <DifficultyBadge level={a.difficulty} />
+              <span style={s.kpiSub}>{a.student_count} students</span>
+            </div>
+            {b && (
+              <div style={s.subjectBadge}>
+                <span style={{ ...s.badge, background: ORANGE + '18', color: ORANGE }}>{b.subject}</span>
+                <DifficultyBadge level={b.difficulty} />
+                <span style={s.kpiSub}>{b.student_count} students</span>
+              </div>
+            )}
           </div>
-        ) : (
-          <SubjectColumn stats={data.subject_a} selectedTrimester={trimester} />
-        )
+
+          {/* KPI row */}
+          <div style={{ ...s.kpiRow, gridTemplateColumns: b ? 'repeat(4, 1fr)' : 'repeat(4, 1fr)' }}>
+            {b ? (
+              <>
+                <KpiCard label={`${a.subject} — Avg Mark`} value={fmtPct(a.avg_mark)}
+                  sub={`Institution: ${fmtPct(a.institution_avg)}`}
+                  change={diff(a.avg_mark, a.prev_avg)} />
+                <KpiCard label={`${b.subject} — Avg Mark`} value={fmtPct(b.avg_mark)}
+                  sub={`Institution: ${fmtPct(b.institution_avg)}`}
+                  change={diff(b.avg_mark, b.prev_avg)} />
+                <KpiCard label={`${a.subject} — Pass Rate`} value={fmtPct(a.pass_rate)}
+                  change={diff(a.pass_rate, a.prev_pass_rate)} warn={a.pass_rate < 50} />
+                <KpiCard label={`${b.subject} — Pass Rate`} value={fmtPct(b.pass_rate)}
+                  change={diff(b.pass_rate, b.prev_pass_rate)} warn={b.pass_rate < 50} />
+              </>
+            ) : (
+              <>
+                <KpiCard label="Average Mark" value={fmtPct(a.avg_mark)}
+                  sub={`Institution: ${fmtPct(a.institution_avg)}`}
+                  change={diff(a.avg_mark, a.prev_avg)} />
+                <KpiCard label="Pass Rate" value={fmtPct(a.pass_rate)}
+                  sub={`Institution: ${fmtPct(a.institution_pass_rate)}`}
+                  change={diff(a.pass_rate, a.prev_pass_rate)} warn={a.pass_rate < 50} />
+                <KpiCard label="Failure Rate" value={fmtPct(a.failure_rate)} warn={a.failure_rate > 40}
+                  sub="≥40% is high difficulty" />
+                <KpiCard label="Enrolled Students" value={a.student_count}
+                  sub={`Difficulty: ${a.difficulty}`} />
+              </>
+            )}
+          </div>
+
+          {/* Charts row 1 */}
+          <div style={s.chartGrid}>
+            <div style={s.chartCard}>
+              <h3 style={s.chartTitle}>Grade Distribution</h3>
+              <ResponsiveContainer width="100%" height={220}>
+                <BarChart data={gradeDist} barCategoryGap="20%">
+                  <CartesianGrid strokeDasharray="3 3" stroke="#EEF0F4" vertical={false} />
+                  <XAxis dataKey="band" tick={{ fontSize: 11, fill: '#64748B' }} />
+                  <YAxis tick={{ fontSize: 11, fill: '#64748B' }} />
+                  <Tooltip />
+                  <Legend iconType="circle" iconSize={8} wrapperStyle={{ fontSize: 12 }} />
+                  <Bar dataKey={a.subject} fill={TEAL} radius={[4, 4, 0, 0]} />
+                  {b && <Bar dataKey={b.subject} fill={ORANGE} radius={[4, 4, 0, 0]} />}
+                  <Bar dataKey="Institution" fill={GRAY} radius={[4, 4, 0, 0]} opacity={0.6} />
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+
+            <div style={s.chartCard}>
+              <h3 style={s.chartTitle}>Performance Trend</h3>
+              <ResponsiveContainer width="100%" height={220}>
+                <LineChart data={trendData}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#EEF0F4" vertical={false} />
+                  <XAxis dataKey="period" tick={{ fontSize: 11, fill: '#64748B' }} />
+                  <YAxis tick={{ fontSize: 11, fill: '#64748B' }} domain={[0, 100]} unit="%" />
+                  <Tooltip formatter={v => `${v}%`} />
+                  <Legend iconType="circle" iconSize={8} wrapperStyle={{ fontSize: 12 }} />
+                  <Line type="monotone" dataKey={a.subject} stroke={TEAL} strokeWidth={2} dot={{ r: 3 }} />
+                  {b && <Line type="monotone" dataKey={b.subject} stroke={ORANGE} strokeWidth={2} dot={{ r: 3 }} />}
+                  <Line type="monotone" dataKey="Institution" stroke={GRAY} strokeWidth={1.5}
+                    dot={{ r: 2 }} strokeDasharray="4 3" />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+          </div>
+
+          {/* Assessment breakdown */}
+          {breakdownData.length > 0 && (
+            <div style={s.card}>
+              <h3 style={s.chartTitle}>Assessment Type Breakdown — Average Mark</h3>
+              <ResponsiveContainer width="100%" height={Math.max(160, breakdownData.length * 46)}>
+                <BarChart data={breakdownData} layout="vertical" barCategoryGap="25%">
+                  <CartesianGrid strokeDasharray="3 3" stroke="#EEF0F4" horizontal={false} />
+                  <XAxis type="number" tick={{ fontSize: 11, fill: '#64748B' }} domain={[0, 100]} unit="%" />
+                  <YAxis dataKey="type" type="category" tick={{ fontSize: 12, fill: '#475569' }} width={80} />
+                  <Tooltip formatter={v => `${v}%`} />
+                  <Legend iconType="circle" iconSize={8} wrapperStyle={{ fontSize: 12 }} />
+                  <Bar dataKey={a.subject} fill={TEAL} radius={[0, 4, 4, 0]} />
+                  {b && <Bar dataKey={b.subject} fill={ORANGE} radius={[0, 4, 4, 0]} />}
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          )}
+
+          {/* Trimester comparison (single subject only) */}
+          {!b && a.trimester_comparison?.length > 0 && (
+            <div style={s.card}>
+              <h3 style={s.chartTitle}>Period-by-Period Comparison — {a.subject}</h3>
+              <ResponsiveContainer width="100%" height={220}>
+                <BarChart data={a.trimester_comparison} barCategoryGap="20%">
+                  <CartesianGrid strokeDasharray="3 3" stroke="#EEF0F4" vertical={false} />
+                  <XAxis dataKey="period" tick={{ fontSize: 11, fill: '#64748B' }} />
+                  <YAxis tick={{ fontSize: 11, fill: '#64748B' }} domain={[0, 100]} unit="%" />
+                  <Tooltip formatter={v => `${v}%`} />
+                  <Legend iconType="circle" iconSize={8} wrapperStyle={{ fontSize: 12 }} />
+                  <Bar dataKey="avg"       name="Avg Mark"  fill={TEAL}   radius={[4, 4, 0, 0]} />
+                  <Bar dataKey="pass_rate" name="Pass Rate" fill='#1D9E75' radius={[4, 4, 0, 0]} />
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          )}
+        </>
       )}
     </div>
   );
 }
 
-// ── Styles ────────────────────────────────────────────────────────────────────
-
 const s = {
-  pageHeader: { marginBottom: 24 },
-  pageTitle:  { margin: '0 0 4px', fontSize: 24, fontWeight: 500, color: '#1A2E40' },
-  pageSub:    { margin: 0, fontSize: 13, color: '#5A7A8A' },
+  page:       { padding: '28px 32px', background: '#F0F4F8', minHeight: '100vh', boxSizing: 'border-box' },
+  pageHeader: { display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 24 },
+  pageTitle:  { margin: 0, fontSize: 20, fontWeight: 700, color: '#1A2E40' },
+  pageSub:    { margin: '4px 0 0', fontSize: 13, color: '#64748B' },
 
-  scopeCard:  { background: '#fff', border: '0.5px solid #DDE4EA', borderRadius: 12, padding: '16px 20px', marginBottom: 24 },
-  scopeRow:   { display: 'flex', gap: 20, flexWrap: 'wrap', alignItems: 'flex-end' },
-  scopeField: { display: 'flex', flexDirection: 'column', gap: 6 },
-  scopeLabel: { fontSize: 11, fontWeight: 600, color: '#8BA5B8', textTransform: 'uppercase', letterSpacing: 0.5 },
+  card: {
+    background: '#fff', border: '0.5px solid #DDE4EA', borderRadius: 10,
+    padding: '20px 24px', marginBottom: 20,
+  },
+  filterRow:   { display: 'flex', flexWrap: 'wrap', alignItems: 'flex-end', gap: 16 },
+  filterGroup: { display: 'flex', flexDirection: 'column', gap: 4 },
+  filterLabel: { fontSize: 11, fontWeight: 600, color: '#475569', textTransform: 'uppercase', letterSpacing: 0.5 },
   select: {
-    height: 36, padding: '0 12px', borderRadius: 8,
-    border: '0.5px solid #C5D2DC', fontSize: 13, color: '#1A2E40',
-    background: '#fff', cursor: 'pointer', minWidth: 170, outline: 'none',
+    border: '0.5px solid #C5D2DC', borderRadius: 8, padding: '8px 12px',
+    fontSize: 13, color: '#1E293B', background: '#fff', outline: 'none',
+    minWidth: 160, cursor: 'pointer',
   },
-
-  ssWrap:  { display: 'flex', alignItems: 'center', border: '0.5px solid #C5D2DC', borderRadius: 8, background: '#fff', overflow: 'hidden' },
-  ssInput: { flex: 1, padding: '9px 12px', border: 'none', outline: 'none', fontSize: 13, color: '#1A2E40', background: 'transparent', minWidth: 0 },
-  ssClear: { padding: '0 10px', background: 'none', border: 'none', cursor: 'pointer', color: '#94A3B8', fontSize: 12, flexShrink: 0 },
-  ssDrop: {
-    position: 'absolute', top: '100%', left: 0, right: 0, zIndex: 200,
-    background: '#fff', border: '0.5px solid #C5D2DC', borderRadius: 8,
-    maxHeight: 220, overflowY: 'auto', boxShadow: '0 4px 12px rgba(0,0,0,0.1)',
+  loadBtn: {
+    padding: '9px 22px', borderRadius: 8, border: 'none',
+    background: '#2E6E8E', color: '#fff', fontSize: 13,
+    fontWeight: 600, cursor: 'pointer', alignSelf: 'flex-end',
   },
-  ssItem: { padding: '9px 14px', fontSize: 13, cursor: 'pointer', color: '#1A2E40', borderBottom: '0.5px solid #F8FAFB' },
+  errorMsg: { margin: '12px 0 0', fontSize: 12, color: '#DC2626' },
 
-  errorBox: {
-    background: '#FCEBEB', border: '0.5px solid #F09595',
-    color: '#A32D2D', borderRadius: 8, padding: '10px 16px', fontSize: 13, marginBottom: 16,
+  emptyCard: {
+    background: '#fff', border: '0.5px solid #DDE4EA', borderRadius: 10,
+    padding: '56px 24px', textAlign: 'center',
   },
+  emptyIcon: { fontSize: 36, margin: '0 0 12px' },
+  emptyText: { margin: 0, fontSize: 14, color: '#64748B' },
 
-  compareGrid: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 24 },
+  subjectHeaders: { display: 'flex', gap: 20, marginBottom: 16, flexWrap: 'wrap' },
+  subjectBadge:   { display: 'flex', alignItems: 'center', gap: 8 },
+  badge: { fontSize: 12, fontWeight: 600, padding: '3px 10px', borderRadius: 20 },
 
-  colHeader: {
-    margin: '0 0 16px', fontSize: 15, fontWeight: 600, color: '#fff',
-    padding: '10px 16px', background: '#1A2E40', borderRadius: 8,
-  },
-
-  kpiRow:  { display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12, marginBottom: 16 },
+  kpiRow:  { display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 16, marginBottom: 20 },
   kpiCard: {
-    background: '#fff', border: '0.5px solid #DDE4EA', borderRadius: 12, padding: '20px 16px',
-    transition: 'box-shadow 0.2s',
+    background: '#fff', border: '0.5px solid #DDE4EA', borderRadius: 10,
+    padding: '16px 20px',
   },
-  kpiLabel: { margin: '0 0 8px', fontSize: 11, fontWeight: 600, color: '#8BA5B8', textTransform: 'uppercase', letterSpacing: 0.5 },
-  kpiValue: { margin: '0 0 4px', fontSize: 28, fontWeight: 500, color: '#1A2E40', letterSpacing: -0.5 },
-  kpiSub:   { margin: 0, fontSize: 11, color: '#5A7A8A' },
-  badge:    { display: 'inline-block', marginTop: 6, padding: '3px 10px', borderRadius: 20, fontSize: 11, fontWeight: 500 },
+  kpiLabel: { margin: 0, fontSize: 11, fontWeight: 600, color: '#64748B', textTransform: 'uppercase', letterSpacing: 0.5 },
+  kpiValue: { margin: '8px 0 4px', fontSize: 24, fontWeight: 700, color: '#1E293B' },
+  kpiSub:   { margin: 0, fontSize: 11, color: '#94A3B8' },
+  kpiDelta: { margin: '6px 0 0', fontSize: 11, fontWeight: 600 },
 
-  chartCard:  { background: '#fff', border: '0.5px solid #DDE4EA', borderRadius: 12, padding: '20px', marginBottom: 16 },
-  chartTitle: { margin: '0 0 14px', fontSize: 14, fontWeight: 500, color: '#1A2E40' },
-
-  table: { width: '100%', borderCollapse: 'collapse', fontSize: 13 },
-  thead: { background: '#F0F4F8' },
-  th: { padding: '12px 16px', fontSize: 11, fontWeight: 500, color: '#5A7A8A', textTransform: 'uppercase', letterSpacing: 0.5, textAlign: 'left', borderBottom: '0.5px solid #F0F4F8' },
-  td: { padding: '12px 16px', color: '#1A2E40', borderBottom: '0.5px solid #F0F4F8' },
+  chartGrid: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 20, marginBottom: 20 },
+  chartCard: {
+    background: '#fff', border: '0.5px solid #DDE4EA', borderRadius: 10,
+    padding: '20px 24px',
+  },
+  chartTitle: { margin: '0 0 16px', fontSize: 14, fontWeight: 600, color: '#1A2E40' },
 };

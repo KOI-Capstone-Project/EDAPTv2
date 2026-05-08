@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect } from 'react';
+import { useState, useMemo, useEffect, useRef, useCallback } from 'react';
 import api from '../services/api';
 
 const STATUS_BADGE = {
@@ -7,6 +7,20 @@ const STATUS_BADGE = {
   Denied:  { bg: '#FCEBEB', color: '#A32D2D', border: '#F09595' },
   Error:   { bg: '#FCEBEB', color: '#A32D2D', border: '#F09595' },
 };
+
+const ACTION_ICON = {
+  'Login':            '🔐',
+  'Login Failed':     '⚠️',
+  'Logout':           '🚪',
+  'Data Upload':      '📤',
+  'Password Changed': '🔑',
+  'User Created':     '👤',
+  'User Modified':    '✏️',
+  'Access Denied':    '🚫',
+  'Data Access':      '👁',
+};
+
+const ALL_ACTIONS = Object.keys(ACTION_ICON);
 
 function Spinner() {
   return (
@@ -21,8 +35,9 @@ function Spinner() {
 }
 
 function uidRole(uid) {
-  if (uid.startsWith('HOT-')) return 'Head of Technology';
-  if (uid.startsWith('LEC-')) return 'Lecturer';
+  if (!uid) return null;
+  if (uid === 'admin' || uid.startsWith('HOT-')) return 'Head of Technology';
+  if (uid.startsWith('LEC-') || (uid !== 'unknown' && uid.length > 0)) return 'Lecturer';
   return null;
 }
 
@@ -37,6 +52,15 @@ const IconCheck = () => (
   </svg>
 );
 
+const IconRefresh = ({ spinning }) => (
+  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+    strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"
+    style={{ display: 'block', animation: spinning ? 'spin 0.8s linear infinite' : 'none' }}>
+    <polyline points="23 4 23 10 17 10"/>
+    <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+  </svg>
+);
+
 export default function AuditLog() {
   const [filterUID,    setFilterUID]    = useState('');
   const [filterAction, setFilterAction] = useState('');
@@ -44,14 +68,30 @@ export default function AuditLog() {
   const [logs,         setLogs]         = useState([]);
   const [total,        setTotal]        = useState(0);
   const [loading,      setLoading]      = useState(true);
+  const [refreshing,   setRefreshing]   = useState(false);
   const [fetchError,   setFetchError]   = useState(null);
+  const [lastUpdated,  setLastUpdated]  = useState(null);
+  const intervalRef = useRef(null);
+
+  const fetchLogs = useCallback((silent = false) => {
+    if (silent) setRefreshing(true);
+    else setLoading(true);
+    setFetchError(null);
+    api.get('/api/audit-logs')
+      .then(res => {
+        setLogs(res.data.data);
+        setTotal(res.data.total);
+        setLastUpdated(new Date());
+      })
+      .catch(() => setFetchError('Failed to load audit logs.'))
+      .finally(() => { setLoading(false); setRefreshing(false); });
+  }, []);
 
   useEffect(() => {
-    api.get('/api/audit-logs')
-      .then(res => { setLogs(res.data.data); setTotal(res.data.total); })
-      .catch(() => setFetchError('Failed to load audit logs.'))
-      .finally(() => setLoading(false));
-  }, []);
+    fetchLogs(false);
+    intervalRef.current = setInterval(() => fetchLogs(true), 30000);
+    return () => clearInterval(intervalRef.current);
+  }, [fetchLogs]);
 
   const filtered = useMemo(() => logs.filter(row => {
     if (filterUID    && rowRole(row) !== filterUID)      return false;
@@ -60,17 +100,38 @@ export default function AuditLog() {
     return true;
   }), [logs, filterUID, filterAction, filterStatus]);
 
+  const fmtTime = (d) => d
+    ? d.toLocaleTimeString('en-AU', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+    : '—';
+
   return (
     <div>
+      <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+
       {/* ── Header ──────────────────────────────────────────────────── */}
       <div style={s.topRow}>
         <div>
           <h1 style={s.pageTitle}>Audit Log</h1>
           <p style={s.pageSub}>System event history — filterable by user and action type</p>
         </div>
-        <div style={s.ethicsBadge}>
-          <span style={s.ethicsCheck}><IconCheck /></span>
-          Certified Ethical — Verified
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+          <div style={s.refreshInfo}>
+            <span style={{ ...s.refreshDot, background: refreshing ? '#2E6E8E' : '#5DCAA5' }} />
+            <span style={{ fontSize: 12, color: '#8BA5B8' }}>
+              {refreshing ? 'Refreshing…' : `Updated ${fmtTime(lastUpdated)}`}
+            </span>
+            <button
+              style={s.refreshBtn}
+              onClick={() => fetchLogs(true)}
+              title="Refresh now"
+            >
+              <IconRefresh spinning={refreshing} />
+            </button>
+          </div>
+          <div style={s.ethicsBadge}>
+            <span style={s.ethicsCheck}><IconCheck /></span>
+            Certified Ethical — Verified
+          </div>
         </div>
       </div>
 
@@ -89,12 +150,9 @@ export default function AuditLog() {
             <label style={s.filterLabel}>Action Type</label>
             <select style={s.select} value={filterAction} onChange={e => setFilterAction(e.target.value)}>
               <option value="">All Actions</option>
-              <option value="Login">Login</option>
-              <option value="Login Failed">Login Failed</option>
-              <option value="Access Denied">Access Denied</option>
-              <option value="Data Upload">Data Upload</option>
-              <option value="Data Processed">Data Processed</option>
-              <option value="Prediction Run">Prediction Run</option>
+              {ALL_ACTIONS.map(a => (
+                <option key={a} value={a}>{ACTION_ICON[a]} {a}</option>
+              ))}
             </select>
           </div>
           <div style={s.filterGroup}>
@@ -108,9 +166,12 @@ export default function AuditLog() {
             </select>
           </div>
           <div style={{ alignSelf: 'flex-end' }}>
-            <span style={s.resultCount}>
-              {loading ? 'Loading…' : `${filtered.length} of ${total} events`}
-            </span>
+            <button
+              style={s.clearBtn}
+              onClick={() => { setFilterUID(''); setFilterAction(''); setFilterStatus(''); }}
+            >
+              Clear filters
+            </button>
           </div>
         </div>
       </div>
@@ -126,7 +187,7 @@ export default function AuditLog() {
           <table style={s.table}>
             <thead>
               <tr style={s.thead}>
-                {['Event ID', 'Timestamp', 'User UID', 'Action Type', 'Status', 'Detail'].map(col => (
+                {['Event ID', 'Timestamp', 'User', 'Action', 'Status', 'Detail'].map(col => (
                   <th key={col} style={s.th}>{col}</th>
                 ))}
               </tr>
@@ -145,13 +206,23 @@ export default function AuditLog() {
                   </td>
                 </tr>
               ) : filtered.map((row, i) => {
-                const badge = STATUS_BADGE[row.status] || STATUS_BADGE.Error;
+                const badge  = STATUS_BADGE[row.status] || STATUS_BADGE.Error;
+                const icon   = ACTION_ICON[row.action_type] || '📋';
+                const role   = rowRole(row);
                 return (
                   <tr key={row.event_id} style={{ background: i % 2 === 0 ? '#fff' : '#F8FAFB' }}>
                     <td style={{ ...s.td, ...s.tdMono }}>{row.event_id}</td>
                     <td style={{ ...s.td, ...s.tdMono, whiteSpace: 'nowrap' }}>{row.timestamp}</td>
-                    <td style={{ ...s.td, ...s.tdMono }}>{row.user_uid}</td>
-                    <td style={s.td}>{row.action_type}</td>
+                    <td style={s.td}>
+                      <div style={{ fontWeight: 500, fontSize: 13, color: '#1A2E40' }}>{row.user_uid}</div>
+                      {role && (
+                        <div style={{ fontSize: 11, color: '#8BA5B8', marginTop: 1 }}>{role}</div>
+                      )}
+                    </td>
+                    <td style={s.td}>
+                      <span style={{ fontSize: 15, marginRight: 6 }}>{icon}</span>
+                      {row.action_type}
+                    </td>
                     <td style={s.td}>
                       <span style={{ ...s.badge, background: badge.bg, color: badge.color, borderColor: badge.border }}>
                         {row.status}
@@ -164,22 +235,41 @@ export default function AuditLog() {
             </tbody>
           </table>
         </div>
+
+        {/* ── Footer ────────────────────────────────────────────────── */}
+        {!loading && (
+          <div style={s.footer}>
+            Showing <strong>{filtered.length}</strong> of <strong>{total}</strong> events
+            {(filterUID || filterAction || filterStatus) && (
+              <span style={{ color: '#8BA5B8' }}> (filtered)</span>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );
 }
 
 const s = {
-  topRow:   { display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 24 },
+  topRow:   { display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 24, flexWrap: 'wrap', gap: 12 },
   pageTitle: { margin: '0 0 4px', fontSize: 24, fontWeight: 500, color: '#1A2E40' },
   pageSub:   { margin: 0, fontSize: 13, color: '#5A7A8A' },
+
+  refreshInfo: { display: 'flex', alignItems: 'center', gap: 6, background: '#F0F4F8', borderRadius: 20, padding: '5px 12px' },
+  refreshDot:  { width: 8, height: 8, borderRadius: '50%', flexShrink: 0, transition: 'background 0.3s' },
+  refreshBtn: {
+    display: 'flex', alignItems: 'center', justifyContent: 'center',
+    width: 24, height: 24, borderRadius: '50%', border: 'none',
+    background: 'transparent', cursor: 'pointer', color: '#5A7A8A',
+    padding: 0, marginLeft: 2,
+  },
 
   ethicsBadge: {
     display: 'flex', alignItems: 'center', gap: 7,
     background: '#E1F5EE', border: '0.5px solid #5DCAA5',
     color: '#0F6E56', borderRadius: 20,
     padding: '7px 16px', fontSize: 13, fontWeight: 500,
-    whiteSpace: 'nowrap', alignSelf: 'center',
+    whiteSpace: 'nowrap',
   },
   ethicsCheck: {
     display: 'flex', alignItems: 'center', justifyContent: 'center',
@@ -196,7 +286,11 @@ const s = {
     border: '0.5px solid #C5D2DC', fontSize: 13, color: '#1A2E40',
     background: '#fff', cursor: 'pointer', minWidth: 180, outline: 'none',
   },
-  resultCount: { fontSize: 12, color: '#8BA5B8' },
+  clearBtn: {
+    height: 36, padding: '0 16px', borderRadius: 8,
+    border: '0.5px solid #C5D2DC', fontSize: 13, color: '#5A7A8A',
+    background: '#fff', cursor: 'pointer',
+  },
 
   errorBox: {
     background: '#FCEBEB', border: '0.5px solid #F09595',
@@ -219,5 +313,10 @@ const s = {
     display: 'inline-block', padding: '3px 10px',
     borderRadius: 20, border: '0.5px solid',
     fontSize: 12, fontWeight: 500,
+  },
+
+  footer: {
+    padding: '10px 16px', fontSize: 12, color: '#5A7A8A',
+    borderTop: '0.5px solid #F0F4F8', background: '#FAFBFC',
   },
 };

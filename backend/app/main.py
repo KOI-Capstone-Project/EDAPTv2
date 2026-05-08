@@ -76,17 +76,19 @@ USERS: dict[str, dict] = {
     "admin": {
         "email": "admin", "hashed_password": _pwd.hash("admin"),
         "role": "Head of Technology", "name": "Ken Emeleus", "subjects": [], "active": True,
+        "is_super_admin": True,
     },
     "user": {
         "email": "user", "hashed_password": _pwd.hash("user"),
         "role": "Lecturer", "name": "Demo Lecturer",
         "subjects": ["ICT104", "ICT201", "ICT301"], "active": True,
+        "is_super_admin": False,
     },
 }
 
 # ── In-memory data store ──────────────────────────────────────────────────────
 
-_DATA: Optional[pd.DataFrame] = None
+_DATA: Optional[pd.DataFrame] = pd.DataFrame()
 
 # ── Startup data load ─────────────────────────────────────────────────────────
 
@@ -244,6 +246,12 @@ class UpdateUserRequest(BaseModel):
     subjects: Optional[list[str]] = None
     active:   Optional[bool]      = None
 
+class UpdateProfileRequest(BaseModel):
+    name:       Optional[str] = None
+    phone:      Optional[str] = None
+    department: Optional[str] = None
+    bio:        Optional[str] = None
+
 class GeminiInstitutionAskRequest(BaseModel):
     question: str
 
@@ -293,6 +301,12 @@ async def require_admin(user: dict = Depends(get_current_user)) -> dict:
         raise HTTPException(status_code=403, detail="Only Head of Technology can access this feature.")
     return user
 
+
+async def require_super_admin(user: dict = Depends(get_current_user)) -> dict:
+    if user.get("sub") != "admin":
+        raise HTTPException(status_code=403, detail="Only the system administrator can access this feature.")
+    return user
+
 # ─────────────────────────────────────────────────────────────────────────────
 # ROUTES
 # ─────────────────────────────────────────────────────────────────────────────
@@ -321,11 +335,12 @@ async def login(req: LoginRequest):
         _append_audit(user_uid=req.email, action_type="Login Failed", status="Alert", detail="Invalid credentials")
         raise HTTPException(status_code=401, detail="Invalid email or password")
 
-    token = _create_token({"sub": user["email"], "role": user["role"], "name": user["name"], "subjects": user["subjects"]})
+    is_super_admin = user.get("is_super_admin", user["email"] == "admin")
+    token = _create_token({"sub": user["email"], "role": user["role"], "name": user["name"], "subjects": user["subjects"], "is_super_admin": is_super_admin})
     _append_audit(user_uid=user["email"], action_type="Login", status="Success", detail="Successful login")
     return {
         "access_token": token, "token_type": "bearer",
-        "user": {"email": user["email"], "name": user["name"], "role": user["role"], "subjects": user["subjects"]},
+        "user": {"email": user["email"], "name": user["name"], "role": user["role"], "subjects": user["subjects"], "is_super_admin": is_super_admin},
     }
 
 
@@ -373,21 +388,38 @@ async def get_filters(user: dict = Depends(get_current_user)):
 async def ingest_dataset(file: UploadFile = File(...), user: dict = Depends(require_admin)):
     global _DATA
     ext = (file.filename or "").rsplit(".", 1)[-1].lower()
-    if ext not in {"csv", "xlsx", "json"}:
-        raise HTTPException(400, "Unsupported file type. Upload .csv, .xlsx, or .json.")
+    if ext != "csv":
+        _append_audit(user_uid=user["sub"], action_type="Data Upload", status="Alert",
+                      detail=f"Rejected upload: unsupported file type '.{ext}'")
+        raise HTTPException(400, "Unsupported file type. Only .csv files are accepted.")
 
     content = await file.read()
-    try:
-        if ext == "csv":
-            df = pd.read_csv(io.BytesIO(content))
-        elif ext == "xlsx":
-            df = pd.read_excel(io.BytesIO(content))
-        else:
-            df = pd.read_json(io.BytesIO(content))
-    except Exception as exc:
-        raise HTTPException(422, f"Could not parse file: {exc}")
+    if len(content) > 50 * 1024 * 1024:
+        _append_audit(user_uid=user["sub"], action_type="Data Upload", status="Alert",
+                      detail=f"Rejected upload: file exceeds 50 MB limit")
+        raise HTTPException(400, "File exceeds the 50 MB limit.")
 
-    # ── Normalise key columns ──────────────────────────────────────────────────
+    try:
+        df = pd.read_csv(io.BytesIO(content))
+    except Exception as exc:
+        _append_audit(user_uid=user["sub"], action_type="Data Upload", status="Error",
+                      detail=f"Failed to parse CSV: {exc}")
+        raise HTTPException(422, f"Could not parse CSV file: {exc}")
+
+    df.columns = [c.strip() for c in df.columns]
+
+    REQUIRED_COLS = [
+        "STUDYPACKAGEASSESSMENTID", "ASSESSMENTTYPECODE", "ATTEMPTNUMBER",
+        "ASSESSMENTMARK", "MAXMARK", "WEIGHTING", "GENDERCODE", "AGEGROUP",
+        "STUDYPERIOD", "SUBJECTCODE", "CLASSGROUP", "MARKPERCENT",
+        "STUDENTID_MASKED", "COUNTRY_MASKED",
+    ]
+    missing = [c for c in REQUIRED_COLS if c not in df.columns]
+    if missing:
+        _append_audit(user_uid=user["sub"], action_type="Data Upload", status="Alert",
+                      detail=f"Rejected upload: missing column '{missing[0]}'")
+        raise HTTPException(400, f"Missing required column: {missing[0]}")
+
     if "STUDYPERIOD" in df.columns:
         df["STUDYPERIOD"] = df["STUDYPERIOD"].apply(
             lambda x: str(round(float(x), 1)) if pd.notna(x) else ""
@@ -395,22 +427,38 @@ async def ingest_dataset(file: UploadFile = File(...), user: dict = Depends(requ
     if "MARKPERCENT" in df.columns:
         df["MARKPERCENT"] = pd.to_numeric(df["MARKPERCENT"], errors="coerce")
 
-    REQUIRED_COLS = ["MARKPERCENT", "STUDENTID_MASKED", "SUBJECTCODE", "COUNTRY_MASKED",
-                     "ASSESSMENTTYPECODE", "STUDYPERIOD", "CLASSGROUP", "ATTEMPTNUMBER"]
-    missing = [c for c in REQUIRED_COLS if c not in df.columns]
-    if missing:
-        raise HTTPException(400, f"Missing required column: {missing[0]}")
-
     df["PASSED"] = df["MARKPERCENT"] >= 50
-
     _DATA = df
+
     _append_audit(user_uid=user["sub"], action_type="Data Upload", status="Success",
-                  detail=f"Uploaded {file.filename} — {len(df):,} rows ingested")
+                  detail=f"{len(df):,} rows ingested from {file.filename}")
     return {
         "row_count": len(df),
         "columns":   list(df.columns),
-        "preview":   df.head(10).fillna("").to_dict("records"),
         "message":   f"{len(df):,} rows successfully loaded",
+    }
+
+
+@app.get("/api/ingest/preview", tags=["Ingest"])
+async def ingest_preview(
+    page:      int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=500),
+    user: dict = Depends(require_admin),
+):
+    global _DATA
+    if _DATA is None or _DATA.empty:
+        return {"total": 0, "page": page, "page_size": page_size, "total_pages": 0, "columns": [], "data": []}
+    total       = len(_DATA)
+    total_pages = math.ceil(total / page_size) if total > 0 else 0
+    start       = (page - 1) * page_size
+    page_df     = _DATA.iloc[start: start + page_size]
+    return {
+        "total":       total,
+        "page":        page,
+        "page_size":   page_size,
+        "total_pages": total_pages,
+        "columns":     list(_DATA.columns),
+        "data":        page_df.fillna("").to_dict("records"),
     }
 
 
@@ -422,6 +470,8 @@ async def get_audit_logs(
     status_filter: Optional[str] = Query(None),
     user: dict = Depends(require_admin),
 ):
+    _append_audit(user_uid=user["sub"], action_type="Data Access", status="Success",
+                  detail="Viewed audit log")
     rows = list(reversed(_AUDIT_LOGS))
     if action_type:   rows = [r for r in rows if r["action_type"] == action_type]
     if status_filter: rows = [r for r in rows if r["status"] == status_filter]
@@ -431,48 +481,71 @@ async def get_audit_logs(
 # ── User management (admin only) ──────────────────────────────────────────────
 
 @app.get("/api/users", tags=["Admin"])
-async def list_users(user: dict = Depends(require_admin)):
+async def list_users(user: dict = Depends(require_super_admin)):
     return [
         {k: v for k, v in u.items() if k != "hashed_password"}
         for u in USERS.values()
-        if u.get("role") != "Head of Technology"
+        if u.get("email") != "admin"
     ]
 
 
 @app.post("/api/users", status_code=201, tags=["Admin"])
-async def create_user(payload: CreateUserRequest, user: dict = Depends(require_admin)):
+async def create_user(payload: CreateUserRequest, user: dict = Depends(require_super_admin)):
     if not payload.name.strip():
         raise HTTPException(400, "Name must not be empty.")
     if len(payload.password) < 6:
         raise HTTPException(400, "Password must be at least 6 characters.")
-    if not payload.subjects:
-        raise HTTPException(400, "At least one subject must be assigned.")
+    if payload.role not in {"Lecturer", "Head of Technology"}:
+        raise HTTPException(400, "Role must be 'Lecturer' or 'Head of Technology'.")
+    if payload.role == "Lecturer" and not payload.subjects:
+        raise HTTPException(400, "At least one subject must be assigned for a Lecturer.")
     if payload.email in USERS:
         raise HTTPException(400, "Email already exists.")
+
+    subjects = [] if payload.role == "Head of Technology" else payload.subjects
     USERS[payload.email] = {
         "email": payload.email, "hashed_password": _pwd.hash(payload.password),
-        "role": "Lecturer", "name": payload.name.strip(),
-        "subjects": payload.subjects, "active": True,
+        "role": payload.role, "name": payload.name.strip(),
+        "subjects": subjects, "active": True, "is_super_admin": False,
     }
-    _append_audit(user_uid=user["sub"], action_type="User Created", status="Success",
-                  detail=f"Lecturer account created: {payload.email} assigned to {', '.join(payload.subjects)}")
+    detail = (f"{payload.role} account created: {payload.email}"
+              + (f" assigned to {', '.join(subjects)}" if subjects else ""))
+    _append_audit(user_uid=user["sub"], action_type="User Created", status="Success", detail=detail)
     u = {k: v for k, v in USERS[payload.email].items() if k != "hashed_password"}
-    return {"message": "Lecturer account created", "user": u}
+    return {"message": f"{payload.role} account created", "user": u}
 
 
 @app.put("/api/users/{email}", tags=["Admin"])
-async def update_user(email: str, payload: UpdateUserRequest, user: dict = Depends(require_admin)):
+async def update_user(email: str, payload: UpdateUserRequest, user: dict = Depends(require_super_admin)):
     if email not in USERS:
         raise HTTPException(404, "User not found.")
-    if USERS[email].get("role") == "Head of Technology":
-        raise HTTPException(403, "Cannot modify admin account.")
+    if USERS[email].get("email") == "admin":
+        raise HTTPException(403, "Cannot modify the system administrator account.")
     if payload.subjects is not None:
         USERS[email]["subjects"] = payload.subjects
     if payload.active is not None:
         USERS[email]["active"] = payload.active
-    _append_audit(user_uid=user["sub"], action_type="User Modified", status="Success",
-                  detail=f"Account updated: {email}")
+        status_str = "activated" if payload.active else "deactivated"
+        _append_audit(user_uid=user["sub"], action_type="User Modified", status="Success",
+                      detail=f"Account {status_str}: {email}")
+    else:
+        _append_audit(user_uid=user["sub"], action_type="User Modified", status="Success",
+                      detail=f"Account updated: {email}")
     return {"message": "Account updated"}
+
+
+@app.delete("/api/users/{email}", tags=["Admin"])
+async def delete_user(email: str, user: dict = Depends(require_super_admin)):
+    if email not in USERS:
+        raise HTTPException(404, "User not found.")
+    if USERS[email].get("email") == "admin":
+        raise HTTPException(403, "Cannot delete the system administrator account.")
+    if email == user.get("sub"):
+        raise HTTPException(403, "Cannot delete your own account.")
+    del USERS[email]
+    _append_audit(user_uid=user["sub"], action_type="User Modified", status="Success",
+                  detail=f"Account deleted: {email}")
+    return {"message": "Account deleted"}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1120,6 +1193,8 @@ async def change_password(req: ChangePasswordRequest, user: dict = Depends(get_c
     if not db_user:
         raise HTTPException(404, "User not found.")
     if not _pwd.verify(req.current_password, db_user["hashed_password"]):
+        _append_audit(user_uid=email, action_type="Password Change", status="Alert",
+                      detail="Failed password change — incorrect current password")
         raise HTTPException(400, "Current password is incorrect.")
     if len(req.new_password) < 8:
         raise HTTPException(400, "New password must be at least 8 characters.")
@@ -1135,6 +1210,23 @@ async def logout_user(user: dict = Depends(get_current_user)):
     _append_audit(user_uid=email, action_type="Logout", status="Success",
                   detail="User signed out")
     return {"message": "Logged out."}
+
+
+@app.post("/api/auth/update-profile", tags=["Auth"])
+async def update_profile(req: UpdateProfileRequest, user: dict = Depends(get_current_user)):
+    email   = user.get("sub", "")
+    db_user = USERS.get(email)
+    if not db_user:
+        raise HTTPException(404, "User not found.")
+    if req.name is not None and req.name.strip():
+        USERS[email]["name"] = req.name.strip()
+    if req.phone      is not None: USERS[email]["phone"]      = req.phone
+    if req.department is not None: USERS[email]["department"] = req.department
+    if req.bio        is not None: USERS[email]["bio"]        = req.bio
+    _append_audit(user_uid=email, action_type="Profile Updated", status="Success",
+                  detail="User updated their profile")
+    updated = {k: v for k, v in USERS[email].items() if k != "hashed_password"}
+    return {"message": "Profile updated successfully.", "user": updated}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
