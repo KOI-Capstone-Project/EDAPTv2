@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend,
   LineChart, Line, ResponsiveContainer,
@@ -34,6 +34,71 @@ function DifficultyBadge({ level }) {
     <span style={{ ...s.badge, background: colors[level] + '18', color: colors[level] }}>
       {level} Difficulty
     </span>
+  );
+}
+
+function SearchableSelect({ value, onChange, options, placeholder }) {
+  const [open, setOpen] = useState(false);
+  const [q,    setQ]    = useState('');
+  const ref             = useRef(null);
+
+  useEffect(() => {
+    const h = e => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    document.addEventListener('mousedown', h);
+    return () => document.removeEventListener('mousedown', h);
+  }, []);
+
+  const filtered = options.filter(o => o.toLowerCase().includes(q.toLowerCase()));
+
+  return (
+    <div ref={ref} style={{ position: 'relative', minWidth: 160 }}>
+      <button
+        type="button"
+        onClick={() => { setOpen(o => !o); setQ(''); }}
+        style={{
+          ...s.select, display: 'flex', alignItems: 'center',
+          justifyContent: 'space-between', width: '100%', cursor: 'pointer',
+          color: value ? '#1E293B' : '#8BA5B8',
+        }}
+      >
+        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {value || placeholder}
+        </span>
+        <span style={{ fontSize: 10, color: '#8BA5B8', flexShrink: 0, marginLeft: 6 }}>▾</span>
+      </button>
+      {open && (
+        <div style={{ position: 'absolute', top: '100%', left: 0, right: 0, zIndex: 300, background: '#fff', border: '0.5px solid #C5D2DC', borderRadius: 8, boxShadow: '0 4px 12px rgba(0,0,0,0.1)', marginTop: 4 }}>
+          <input
+            autoFocus
+            value={q}
+            onChange={e => setQ(e.target.value)}
+            placeholder="Search…"
+            style={{ width: '100%', padding: '8px 12px', border: 'none', borderBottom: '0.5px solid #F0F4F8', outline: 'none', fontSize: 13, boxSizing: 'border-box' }}
+            onClick={e => e.stopPropagation()}
+          />
+          <div style={{ maxHeight: 200, overflowY: 'auto' }}>
+            <div
+              onClick={() => { onChange(''); setOpen(false); setQ(''); }}
+              style={{ padding: '9px 12px', fontSize: 13, cursor: 'pointer', color: '#8BA5B8' }}
+            >
+              {placeholder}
+            </div>
+            {filtered.map(o => (
+              <div
+                key={o}
+                onClick={() => { onChange(o); setOpen(false); setQ(''); }}
+                style={{ padding: '9px 12px', fontSize: 13, cursor: 'pointer', color: '#1E293B', background: o === value ? '#F0F4F8' : 'transparent' }}
+              >
+                {o}
+              </div>
+            ))}
+            {filtered.length === 0 && (
+              <div style={{ padding: '9px 12px', fontSize: 13, color: '#94A3B8' }}>No matches</div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -119,17 +184,21 @@ export default function SubjectAnalytics() {
         <div style={s.filterRow}>
           <div style={s.filterGroup}>
             <label style={s.filterLabel}>Subject A <span style={{ color: '#DC2626' }}>*</span></label>
-            <select style={s.select} value={subjectA} onChange={e => { setSubjectA(e.target.value); setData(null); }}>
-              <option value="">Select subject…</option>
-              {subjects.map(sv => <option key={sv} value={sv}>{sv}</option>)}
-            </select>
+            <SearchableSelect
+              value={subjectA}
+              onChange={v => { setSubjectA(v); setData(null); }}
+              options={subjects}
+              placeholder="Select subject…"
+            />
           </div>
           <div style={s.filterGroup}>
             <label style={s.filterLabel}>Subject B <span style={{ color: '#94A3B8', fontSize: 11 }}>(compare)</span></label>
-            <select style={s.select} value={subjectB} onChange={e => { setSubjectB(e.target.value); setData(null); }}>
-              <option value="">None</option>
-              {subjects.filter(sv => sv !== subjectA).map(sv => <option key={sv} value={sv}>{sv}</option>)}
-            </select>
+            <SearchableSelect
+              value={subjectB}
+              onChange={v => { setSubjectB(v); setData(null); }}
+              options={subjects.filter(sv => sv !== subjectA)}
+              placeholder="None"
+            />
           </div>
           <div style={s.filterGroup}>
             <label style={s.filterLabel}>Trimester</label>

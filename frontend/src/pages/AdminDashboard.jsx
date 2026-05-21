@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, Cell,
   LineChart, Line, PieChart, Pie, ResponsiveContainer,
@@ -54,6 +54,92 @@ function SummaryCard({ label, value, sub, change, warn, green }) {
         <p style={{ fontSize: 12, marginTop: 4, color: d >= 0 ? '#059669' : '#DC2626', fontWeight: 500 }}>
           {d >= 0 ? '↑' : '↓'} {d >= 0 ? '+' : ''}{d}%
         </p>
+      )}
+    </div>
+  );
+}
+
+// ── Searchable subject dropdown ───────────────────────────────────────────────
+
+function SearchableSelect({ value, onChange, options, placeholder }) {
+  const [open,  setOpen]  = useState(false);
+  const [query, setQuery] = useState('');
+  const ref = useRef(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const close = (e) => { if (ref.current && !ref.current.contains(e.target)) { setOpen(false); setQuery(''); } };
+    document.addEventListener('mousedown', close);
+    return () => document.removeEventListener('mousedown', close);
+  }, [open]);
+
+  const filtered = query
+    ? options.filter(o => o.toLowerCase().includes(query.toLowerCase()))
+    : options;
+
+  return (
+    <div ref={ref} style={{ position: 'relative' }}>
+      <button
+        type="button"
+        onClick={() => { setOpen(v => !v); setQuery(''); }}
+        style={{
+          padding: '9px 32px 9px 12px', background: '#2E6E8E', color: '#fff',
+          border: 'none', borderRadius: 8, fontSize: 13, fontWeight: 500,
+          cursor: 'pointer', minWidth: 150, textAlign: 'left',
+          backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='2.5'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E")`,
+          backgroundRepeat: 'no-repeat', backgroundPosition: 'right 10px center',
+        }}
+      >
+        {value || placeholder}
+      </button>
+      {open && (
+        <div style={{
+          position: 'absolute', top: 'calc(100% + 4px)', left: 0, zIndex: 200,
+          background: '#fff', border: '1px solid #DDE4EA', borderRadius: 8,
+          boxShadow: '0 4px 16px rgba(0,0,0,0.10)', minWidth: 180,
+        }}>
+          <div style={{ padding: '8px 8px 4px' }}>
+            <input
+              autoFocus
+              value={query}
+              onChange={e => setQuery(e.target.value)}
+              placeholder="Search…"
+              style={{
+                width: '100%', padding: '6px 10px', border: '1px solid #E2E8F0',
+                borderRadius: 6, fontSize: 12, color: '#1E293B', outline: 'none',
+                boxSizing: 'border-box', background: '#F8FAFC',
+              }}
+            />
+          </div>
+          <div style={{ maxHeight: 200, overflowY: 'auto' }}>
+            <div
+              onClick={() => { onChange(''); setOpen(false); setQuery(''); }}
+              style={{ padding: '8px 12px', fontSize: 13, cursor: 'pointer', color: '#64748B' }}
+              onMouseEnter={e => e.currentTarget.style.background = '#F0F4F8'}
+              onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
+            >
+              {placeholder}
+            </div>
+            {filtered.map(opt => (
+              <div
+                key={opt}
+                onClick={() => { onChange(opt); setOpen(false); setQuery(''); }}
+                style={{
+                  padding: '8px 12px', fontSize: 13, cursor: 'pointer',
+                  color: '#1E293B', fontWeight: value === opt ? 600 : 400,
+                  background: value === opt ? '#EFF6FF' : 'transparent',
+                }}
+                onMouseEnter={e => { if (value !== opt) e.currentTarget.style.background = '#F0F4F8'; }}
+                onMouseLeave={e => { if (value !== opt) e.currentTarget.style.background = 'transparent'; }}
+              >
+                {opt}
+              </div>
+            ))}
+            {filtered.length === 0 && (
+              <div style={{ padding: '8px 12px', fontSize: 12, color: '#94A3B8' }}>No matches</div>
+            )}
+          </div>
+        </div>
       )}
     </div>
   );
@@ -213,10 +299,12 @@ export default function AdminDashboard() {
           {trimeOptions.map(t => <option key={t} value={t}>{t}</option>)}
         </select>
 
-        <select style={s.select} value={subjF} onChange={e => setSubjF(e.target.value)}>
-          <option value="">All Subjects</option>
-          {subjects.map(s => <option key={s} value={s}>{s}</option>)}
-        </select>
+        <SearchableSelect
+          value={subjF}
+          onChange={setSubjF}
+          options={subjects}
+          placeholder="All Subjects"
+        />
 
         <select style={s.select} value={cgF} onChange={e => setCgF(e.target.value)}>
           <option value="">All Lecturers</option>

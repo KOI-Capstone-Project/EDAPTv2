@@ -1,3 +1,5 @@
+# These models are defined for future PostgreSQL integration.
+# Currently the app uses in-memory storage in main.py.
 """
 Import Base and all models here so Alembic's env.py can find them
 via a single `from app.db.base import Base` import.

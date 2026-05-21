@@ -1,5 +1,6 @@
 import React from 'react';
 import Sidebar from './Sidebar';
+import AIChatbox from './AIChatbox';
 
 export default function Layout({ children }) {
   return (
@@ -10,6 +11,7 @@ export default function Layout({ children }) {
           {children}
         </div>
       </main>
+      <AIChatbox />
     </div>
   );
 }

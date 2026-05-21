@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
   ResponsiveContainer, BarChart, Bar,
@@ -6,6 +6,88 @@ import {
 import api from '../services/api';
 
 const PAGE_SIZE = 50;
+
+function SearchableSelect({ value, onChange, options, placeholder }) {
+  const [open,  setOpen]  = useState(false);
+  const [query, setQuery] = useState('');
+  const ref = useRef(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const close = (e) => { if (ref.current && !ref.current.contains(e.target)) { setOpen(false); setQuery(''); } };
+    document.addEventListener('mousedown', close);
+    return () => document.removeEventListener('mousedown', close);
+  }, [open]);
+
+  const filtered = query
+    ? options.filter(o => o.toLowerCase().includes(query.toLowerCase()))
+    : options;
+
+  return (
+    <div ref={ref} style={{ position: 'relative' }}>
+      <button
+        type="button"
+        onClick={() => { setOpen(v => !v); setQuery(''); }}
+        style={{
+          border: '0.5px solid #C5D2DC', borderRadius: 8, padding: '8px 28px 8px 12px',
+          fontSize: 13, color: value ? '#1E293B' : '#94A3B8', background: '#fff',
+          outline: 'none', cursor: 'pointer', textAlign: 'left', minWidth: 130,
+        }}
+      >
+        {value || placeholder}
+      </button>
+      {open && (
+        <div style={{
+          position: 'absolute', top: 'calc(100% + 4px)', left: 0, zIndex: 200,
+          background: '#fff', border: '1px solid #DDE4EA', borderRadius: 8,
+          boxShadow: '0 4px 16px rgba(0,0,0,0.10)', minWidth: 180,
+        }}>
+          <div style={{ padding: '8px 8px 4px' }}>
+            <input
+              autoFocus
+              value={query}
+              onChange={e => setQuery(e.target.value)}
+              placeholder="Search…"
+              style={{
+                width: '100%', padding: '6px 10px', border: '1px solid #E2E8F0',
+                borderRadius: 6, fontSize: 12, color: '#1E293B', outline: 'none',
+                boxSizing: 'border-box', background: '#F8FAFC',
+              }}
+            />
+          </div>
+          <div style={{ maxHeight: 200, overflowY: 'auto' }}>
+            <div
+              onClick={() => { onChange(''); setOpen(false); setQuery(''); }}
+              style={{ padding: '8px 12px', fontSize: 13, cursor: 'pointer', color: '#64748B' }}
+              onMouseEnter={e => e.currentTarget.style.background = '#F0F4F8'}
+              onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
+            >
+              {placeholder}
+            </div>
+            {filtered.map(opt => (
+              <div
+                key={opt}
+                onClick={() => { onChange(opt); setOpen(false); setQuery(''); }}
+                style={{
+                  padding: '8px 12px', fontSize: 13, cursor: 'pointer',
+                  color: '#1E293B', fontWeight: value === opt ? 600 : 400,
+                  background: value === opt ? '#EFF6FF' : 'transparent',
+                }}
+                onMouseEnter={e => { if (value !== opt) e.currentTarget.style.background = '#F0F4F8'; }}
+                onMouseLeave={e => { if (value !== opt) e.currentTarget.style.background = 'transparent'; }}
+              >
+                {opt}
+              </div>
+            ))}
+            {filtered.length === 0 && (
+              <div style={{ padding: '8px 12px', fontSize: 12, color: '#94A3B8' }}>No matches</div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
 
 function PassBadge({ passed }) {
   return (
@@ -167,19 +249,23 @@ export default function AdminExplorer() {
             value={search}
             onChange={e => setSearch(e.target.value)}
           />
-          <select style={s.select} value={subject} onChange={e => setSubject(e.target.value)}>
-            <option value="">All subjects</option>
-            {filters.subjects.map(sv => <option key={sv} value={sv}>{sv}</option>)}
-          </select>
+          <SearchableSelect
+            value={subject}
+            onChange={setSubject}
+            options={filters.subjects}
+            placeholder="All subjects"
+          />
           <select style={s.select} value={trimester} onChange={e => setTrimester(e.target.value)}>
             <option value="">All trimesters</option>
             {filters.trimesters.map(t => <option key={t} value={t}>{t}</option>)}
           </select>
           {filters.countries.length > 0 && (
-            <select style={s.select} value={country} onChange={e => setCountry(e.target.value)}>
-              <option value="">All countries</option>
-              {filters.countries.map(c => <option key={c} value={c}>{c}</option>)}
-            </select>
+            <SearchableSelect
+              value={country}
+              onChange={setCountry}
+              options={filters.countries}
+              placeholder="All countries"
+            />
           )}
           {filters.genders.length > 0 && (
             <select style={s.select} value={gender} onChange={e => setGender(e.target.value)}>

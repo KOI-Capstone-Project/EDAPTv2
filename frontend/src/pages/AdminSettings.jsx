@@ -60,13 +60,21 @@ export default function AdminSettings() {
   const [pwdMsg,     setPwdMsg]     = useState(null);
   const [pwdLoading, setPwdLoading] = useState(false);
 
-  const pwdErrors = [];
-  if (newPwd && newPwd.length < 8)  pwdErrors.push('New password must be at least 8 characters.');
-  if (confPwd && newPwd !== confPwd) pwdErrors.push('Passwords do not match.');
+  const pwdChecks = [
+    { label: 'At least 10 characters',  met: newPwd.length >= 10 },
+    { label: 'One uppercase letter',     met: /[A-Z]/.test(newPwd) },
+    { label: 'One lowercase letter',     met: /[a-z]/.test(newPwd) },
+    { label: 'One number',              met: /[0-9]/.test(newPwd) },
+    { label: 'One special character',   met: /[^A-Za-z0-9]/.test(newPwd) },
+  ];
+  const pwdStrength   = pwdChecks.filter(c => c.met).length;
+  const strengthLabel = pwdStrength <= 2 ? 'Weak' : pwdStrength <= 4 ? 'Fair' : 'Strong';
+  const strengthColor = pwdStrength <= 2 ? '#DC2626' : pwdStrength <= 4 ? '#D97706' : '#059669';
+  const allPwdMet     = pwdStrength === 5;
 
   const handleChangePassword = async e => {
     e.preventDefault();
-    if (pwdErrors.length) return;
+    if (!allPwdMet || newPwd !== confPwd) return;
     setPwdLoading(true);
     setPwdMsg(null);
     try {
@@ -191,7 +199,25 @@ export default function AdminSettings() {
 
           <PasswordField label="Current Password" value={curPwd} onChange={setCurPwd} show={showCur} onToggle={() => setShowCur(v => !v)} />
           <PasswordField label="New Password"     value={newPwd} onChange={setNewPwd} show={showNew} onToggle={() => setShowNew(v => !v)} />
-          {newPwd && newPwd.length < 8 && <p style={s.inlineErr}>New password must be at least 8 characters.</p>}
+
+          {newPwd && (
+            <div style={{ marginBottom: 14 }}>
+              <div style={{ display: 'flex', gap: 4, marginBottom: 6 }}>
+                {[0,1,2,3,4].map(i => (
+                  <div key={i} style={{ flex: 1, height: 4, borderRadius: 2, background: i < pwdStrength ? strengthColor : '#E2E8F0' }} />
+                ))}
+              </div>
+              <div style={{ fontSize: 11, color: strengthColor, fontWeight: 600, marginBottom: 8 }}>{strengthLabel}</div>
+              {pwdChecks.map((c, i) => (
+                <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+                  <span style={{ width: 14, height: 14, borderRadius: '50%', border: `1.5px solid ${c.met ? '#059669' : '#C5D2DC'}`, background: c.met ? '#059669' : 'transparent', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                    {c.met && <span style={{ color: '#fff', fontSize: 9, fontWeight: 700, lineHeight: 1 }}>✓</span>}
+                  </span>
+                  <span style={{ fontSize: 12, color: c.met ? '#059669' : '#64748B' }}>{c.label}</span>
+                </div>
+              ))}
+            </div>
+          )}
 
           <PasswordField label="Confirm New Password" value={confPwd} onChange={setConfPwd} show={showConf} onToggle={() => setShowConf(v => !v)} />
           {confPwd && newPwd !== confPwd && <p style={s.inlineErr}>Passwords do not match.</p>}
@@ -204,8 +230,8 @@ export default function AdminSettings() {
 
           <button
             type="submit"
-            style={{ ...s.tealBtn, opacity: (pwdLoading || pwdErrors.length > 0 || !curPwd || !newPwd || !confPwd) ? 0.55 : 1 }}
-            disabled={pwdLoading || pwdErrors.length > 0 || !curPwd || !newPwd || !confPwd}
+            style={{ ...s.tealBtn, opacity: (pwdLoading || !curPwd || !newPwd || !confPwd || !allPwdMet || newPwd !== confPwd) ? 0.55 : 1 }}
+            disabled={pwdLoading || !curPwd || !newPwd || !confPwd || !allPwdMet || newPwd !== confPwd}
           >
             {pwdLoading ? 'Updating…' : 'Update Password'}
           </button>

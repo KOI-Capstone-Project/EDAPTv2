@@ -4,6 +4,41 @@ All notable changes to EDAPT v2 are documented here.
 
 ---
 
+## [2026-05-21] — Security Hardening, Head of School Role, and UI Enhancements
+
+### Security
+
+- Default credentials strengthened; all seed accounts now meet the full password policy
+- Consistent password policy enforced across all endpoints: minimum 10 characters, at least one uppercase letter, one lowercase letter, one number, and one special character
+- Email format validation added on login and user creation (frontend and backend)
+- Input field length limits added to all Pydantic models to prevent oversized payloads
+- Backend range validation added to the ML predict endpoint (marks clamped to 0–100)
+- Login brute-force protection added: accounts lock for 15 minutes after 5 failed attempts
+- Logout now revokes the token server-side via an in-memory revocation list
+- Deactivated account check added on login; inactive accounts receive a 403 before a token is issued
+- `require_super_admin` now checks the `is_super_admin` field instead of a hardcoded email string
+- Exception details no longer leaked to the client; internal errors return a generic 500 message
+- File upload validates file content (magic bytes / pandas parse) not just the file extension
+- Login response no longer reveals whether the submitted email exists in the system
+
+### Added
+
+- **Head of School role** — new third role with access to Dashboard, Subject Analytics, Student Analytics, Predictive Reports, and Data Ingestion; `require_head_of_school` FastAPI dependency added; `HOS_NAV` sidebar array and `isHoS` route guard added; default `hos` seed account seeded on startup; `AdminRoute` updated to allow both Head of Technology and Head of School; `HoTOnlyRoute` added for Audit Log and User Management which remain Head of Technology only
+- **Searchable dropdowns** — `SearchableSelect` component added to Admin Dashboard and Subject Analytics; supports outside-click dismiss, case-insensitive filtering, and a "No matches" empty state
+- **Floating AI chatbox** (`AIChatbox.jsx`) — fixed bottom-right panel accessible from all protected pages; Chat tab with message history and typing indicator; Insights tab with subject and trimester selectors, Get Alert, and Deep Analysis; compact 420 px / fullscreen 80 vh toggle; wired into `Layout.jsx`
+- **Lecturer Predictor page** — full predictor UI matching the admin version; reads assigned subjects from the JWT token; hides model name and model accuracy (admin-only fields)
+- **Password requirements checklist** — real-time 5-requirement checklist added below password inputs in Admin Settings and Lecturer Settings, with a strength indicator bar (Weak / Fair / Strong); checklist without strength bar added to the User Management create form
+- **Auto-generate password** now guarantees all five policy requirements by selecting one character from each mandatory group then padding and shuffling with Fisher-Yates
+- **Field-level error messages** in User Management — `createErr` split into `nameErr`, `emailErr`, `passwordErr`, and `subjectsErr`; all errors collected before returning so every failing field is flagged at once
+
+### Removed
+
+- Legacy `Login.js`, `Dashboard.js`, `Explorer.jsx`, `Settings.jsx`, and `Predictions.js` removed from the frontend
+- Unused backend route stubs removed from `main.py`
+- AI Insights removed from `LECTURER_NAV` in `Sidebar.jsx`; `/ai-insights` route and `LecturerAIInsights` import removed from `App.js`
+
+---
+
 ## [Unreleased] — 2026-05-08
 
 ### Added

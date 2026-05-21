@@ -37,6 +37,7 @@ function Spinner() {
 function uidRole(uid) {
   if (!uid) return null;
   if (uid === 'admin' || uid.startsWith('HOT-')) return 'Head of Technology';
+  if (uid === 'hos' || uid.startsWith('HOS-')) return 'Head of School';
   if (uid.startsWith('LEC-') || (uid !== 'unknown' && uid.length > 0)) return 'Lecturer';
   return null;
 }
@@ -144,6 +145,7 @@ export default function AuditLog() {
               <option value="">All Users</option>
               <option value="Lecturer">Lecturer</option>
               <option value="Head of Technology">Head of Technology</option>
+              <option value="Head of School">Head of School</option>
             </select>
           </div>
           <div style={s.filterGroup}>

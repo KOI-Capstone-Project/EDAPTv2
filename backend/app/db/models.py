@@ -14,6 +14,8 @@ Design notes:
   - Every table carries created_at / updated_at audit timestamps.
 """
 
+from __future__ import annotations
+
 from datetime import datetime
 
 from sqlalchemy import (
@@ -26,6 +28,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    JSON,
     SmallInteger,
     String,
     Text,
@@ -623,4 +626,62 @@ class User(AuditMixin, Base):
         nullable=False,
         default=True,
         comment="Set to False to disable login without deleting the account",
+    )
+
+    subjects: list = Column(
+        JSON,
+        nullable=True,
+        default=list,
+        comment="List of subject codes assigned to this lecturer (e.g. ['ICT104', 'ICT201'])",
+    )
+
+
+# ===========================================================================
+# AUDIT LOG TABLE
+# ===========================================================================
+
+
+class AuditLog(Base):
+    """
+    Persistent audit trail for all significant system events.
+
+    Replaces the previous in-memory _AUDIT_LOGS list so events survive
+    server restarts and can be queried with filters.
+    """
+
+    __tablename__ = "audit_logs"
+
+    id: int = Column(Integer, primary_key=True, autoincrement=True)
+
+    timestamp = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+        index=True,
+    )
+
+    user_uid: str = Column(
+        String(254),
+        nullable=False,
+        index=True,
+        comment="Email / identifier of the acting user",
+    )
+
+    action_type: str = Column(
+        String(50),
+        nullable=False,
+        index=True,
+        comment="Event category (e.g. Login, Data Upload, User Created)",
+    )
+
+    status: str = Column(
+        String(20),
+        nullable=False,
+        comment="Outcome label: Success | Alert | Error",
+    )
+
+    detail: str | None = Column(
+        Text,
+        nullable=True,
+        comment="Human-readable description of the event",
     )

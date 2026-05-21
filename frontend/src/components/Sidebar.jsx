@@ -78,8 +78,16 @@ const LECTURER_NAV = [
   { label: 'Dashboard',   icon: <I.Dashboard />,  to: '/dashboard/lecturer' },
   { label: 'Explorer',    icon: <I.Explorer />,   to: '/explorer'           },
   { label: 'Predictor',   icon: <I.Predictor />,  to: '/predictor'          },
-  { label: 'AI Insights', icon: <I.AI />,         to: '/ai-insights'        },
   { label: 'Settings',    icon: <I.Settings />,   to: '/settings'           },
+];
+
+const HOS_NAV = [
+  { label: 'Dashboard',          icon: <I.Dashboard />,  to: '/dashboard/admin'    },
+  { label: 'Subject Analytics',  icon: <I.Explorer />,   to: '/subject-analytics'  },
+  { label: 'Student Analytics',  icon: <I.Explorer />,   to: '/student-analytics'  },
+  { label: 'Predictive Reports', icon: <I.Predictor />,  to: '/predictive-reports' },
+  { label: 'Data Ingestion',     icon: <I.Ingestion />,  to: '/data-ingestion'     },
+  { label: 'Settings',           icon: <I.Settings />,   to: '/settings'           },
 ];
 
 const ADMIN_NAV_BASE = [
@@ -100,11 +108,14 @@ const ADMIN_NAV_SETTINGS = { label: 'Settings', icon: <I.Settings />, to: '/sett
 export default function Sidebar() {
   const [collapsed, setCollapsed] = useState(false);
   const user       = getUser();
-  const isAdmin    = user?.role === 'Head of Technology';
+  const isAdmin      = user?.role === 'Head of Technology';
+  const isHoS        = user?.role === 'Head of School';
   const isSuperAdmin = user?.email === 'admin';
-  const navItems   = isAdmin
+  const navItems     = isAdmin
     ? [...ADMIN_NAV_BASE, ...(isSuperAdmin ? ADMIN_NAV_SUPER : []), ADMIN_NAV_SETTINGS]
-    : LECTURER_NAV;
+    : isHoS
+      ? HOS_NAV
+      : LECTURER_NAV;
 
   const handleLogout = () => {
     api.post('/api/auth/logout').catch(() => {});
