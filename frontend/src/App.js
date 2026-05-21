@@ -13,7 +13,6 @@ import AdminExplorer      from './pages/AdminExplorer';
 import SubjectAnalytics   from './pages/SubjectAnalytics';
 import UserManagement     from './pages/UserManagement';
 import LecturerPredictor  from './pages/LecturerPredictor';
-import LecturerAIInsights from './pages/LecturerAIInsights';
 import LecturerSettings   from './pages/LecturerSettings';
 import AdminSettings      from './pages/AdminSettings';
 import AdminPredictor     from './pages/AdminPredictor';
@@ -34,9 +33,23 @@ function AdminRoute({ children }) {
   try {
     const user = JSON.parse(localStorage.getItem('edapt_user') || 'null');
     if (!user) return <Navigate to="/login" replace />;
-    if (user.role !== 'Head of Technology') {
+    if (user.role !== 'Head of Technology' && user.role !== 'Head of School') {
       return <Navigate to="/dashboard/lecturer" replace />;
     }
+    return children;
+  } catch {
+    return <Navigate to="/login" replace />;
+  }
+}
+
+function HoTOnlyRoute({ children }) {
+  const token = localStorage.getItem('edapt_token');
+  if (!token) return <Navigate to="/login" replace />;
+  try {
+    const user = JSON.parse(localStorage.getItem('edapt_user') || 'null');
+    if (!user) return <Navigate to="/login" replace />;
+    if (user.role === 'Head of School') return <Navigate to="/dashboard/admin" replace />;
+    if (user.role !== 'Head of Technology') return <Navigate to="/dashboard/lecturer" replace />;
     return children;
   } catch {
     return <Navigate to="/login" replace />;
@@ -51,9 +64,15 @@ function AdminProtected({ children }) {
   return <AdminRoute><Layout>{children}</Layout></AdminRoute>;
 }
 
+function HoTOnlyProtected({ children }) {
+  return <HoTOnlyRoute><Layout>{children}</Layout></HoTOnlyRoute>;
+}
+
 function SettingsPage() {
   const user = getUser();
-  return user?.role === 'Head of Technology' ? <AdminSettings /> : <LecturerSettings />;
+  return (user?.role === 'Head of Technology' || user?.role === 'Head of School')
+    ? <AdminSettings />
+    : <LecturerSettings />;
 }
 
 // ── App ───────────────────────────────────────────────────────────────────────
@@ -71,7 +90,6 @@ export default function App() {
       <Route path="/dashboard/lecturer" element={<Protected><LecturerDashboard /></Protected>} />
       <Route path="/explorer"            element={<Protected><LecturerExplorer /></Protected>} />
       <Route path="/predictor"           element={<Protected><LecturerPredictor /></Protected>} />
-      <Route path="/ai-insights"         element={<Protected><LecturerAIInsights /></Protected>} />
 
       {/* Admin dashboard */}
       <Route path="/dashboard/admin" element={
@@ -82,11 +100,11 @@ export default function App() {
 
       {/* Admin-only pages */}
       <Route path="/data-ingestion"     element={<AdminProtected><DataIngestion /></AdminProtected>} />
-      <Route path="/audit-log"          element={<AdminProtected><AuditLog /></AdminProtected>} />
+      <Route path="/audit-log"          element={<HoTOnlyProtected><AuditLog /></HoTOnlyProtected>} />
       <Route path="/subject-analytics"  element={<AdminProtected><SubjectAnalytics /></AdminProtected>} />
       <Route path="/student-analytics"  element={<AdminProtected><AdminExplorer /></AdminProtected>} />
       <Route path="/predictive-reports" element={<AdminProtected><AdminPredictor /></AdminProtected>} />
-      <Route path="/users"              element={<AdminProtected><UserManagement /></AdminProtected>} />
+      <Route path="/users"              element={<HoTOnlyProtected><UserManagement /></HoTOnlyProtected>} />
 
       {/* Shared settings (role-aware) */}
       <Route path="/settings" element={<Protected><SettingsPage /></Protected>} />

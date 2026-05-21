@@ -1,34 +1,45 @@
 """
 EDAPT v2 — FastAPI Backend (self-contained)
 
-Auth: hardcoded USERS dict + bcrypt + JWT.
+Auth: PostgreSQL User table + bcrypt + JWT.
 Data: CSV loaded into _DATA (pandas DataFrame) via POST /api/ingest.
 Dashboard: 8 endpoints that slice _DATA by role + query filters.
 """
 
 import asyncio
 import io
+import logging
 import math
 import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Annotated, Optional
 
 import joblib
 import pandas as pd
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
 from passlib.context import CryptContext
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, StringConstraints, field_validator
+from sqlalchemy import select, desc
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.orm import sessionmaker
+
+from app.db.models import AuditLog, Base, User as UserModel
 
 load_dotenv()
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
 SECRET_KEY           = os.getenv("SECRET_KEY", "edapt-dev-secret-key-change-in-production")
+if SECRET_KEY == "edapt-dev-secret-key-change-in-production":
+    logging.getLogger(__name__).warning(
+        "SECRET_KEY is set to the insecure default dev value — set a strong SECRET_KEY env var before deploying"
+    )
 ALGORITHM            = "HS256"
 TOKEN_EXPIRE_MINUTES = 480
 CORS_ORIGINS         = ["http://localhost:3000", "http://localhost:5173", "http://localhost:80", "http://127.0.0.1:3000", "http://127.0.0.1:5173"]
@@ -72,25 +83,52 @@ except Exception:
 
 _pwd = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
-USERS: dict[str, dict] = {
-    "admin": {
-        "email": "admin", "hashed_password": _pwd.hash("admin"),
-        "role": "Head of Technology", "name": "Ken Emeleus", "subjects": [], "active": True,
-        "is_super_admin": True,
-    },
-    "user": {
-        "email": "user", "hashed_password": _pwd.hash("user"),
-        "role": "Lecturer", "name": "Demo Lecturer",
-        "subjects": ["ICT104", "ICT201", "ICT301"], "active": True,
-        "is_super_admin": False,
-    },
-}
+
+def _validate_password(password: str) -> None:
+    if len(password) < 10:
+        raise HTTPException(400, "Password must be at least 10 characters.")
+    if not any(c.isupper() for c in password):
+        raise HTTPException(400, "Password must contain at least one uppercase letter.")
+    if not any(c.islower() for c in password):
+        raise HTTPException(400, "Password must contain at least one lowercase letter.")
+    if not any(c.isdigit() for c in password):
+        raise HTTPException(400, "Password must contain at least one number.")
+
+
+_REVOKED_TOKENS: set[str] = set()
+
+_FAILED_LOGINS: dict[str, list] = {}
+_MAX_ATTEMPTS    = 5
+_LOCKOUT_MINUTES = 15
+
+
+def _check_lockout(email: str) -> None:
+    cutoff  = datetime.now(timezone.utc) - timedelta(minutes=_LOCKOUT_MINUTES)
+    recent  = [t for t in _FAILED_LOGINS.get(email, []) if t > cutoff]
+    _FAILED_LOGINS[email] = recent
+    if len(recent) >= _MAX_ATTEMPTS:
+        wait = _LOCKOUT_MINUTES - int((datetime.now(timezone.utc) - min(recent)).total_seconds() / 60)
+        raise HTTPException(
+            status_code=429,
+            detail=f"Too many failed attempts. Try again in {max(1, wait)} minute(s).",
+        )
+
+
+def _record_failed_attempt(email: str) -> None:
+    _FAILED_LOGINS.setdefault(email, []).append(datetime.now(timezone.utc))
+
 
 # ── In-memory data store ──────────────────────────────────────────────────────
 
+# Global shared state — all roles read from this single DataFrame. Role filtering is applied
+# per request in _role_filter. Head of Technology and Head of School see all rows.
+# Lecturers see only rows matching their assigned subjects.
 _DATA: Optional[pd.DataFrame] = pd.DataFrame()
 
 # ── Startup data load ─────────────────────────────────────────────────────────
+# This loads the bundled development dataset automatically on server start so the
+# demo works without a manual upload. The /api/ingest endpoint handles runtime
+# uploads and overwrites _DATA; both paths intentionally coexist.
 
 _DATA_PATH = Path(__file__).parent.parent.parent / "data" / "Capstone_data_20260324.csv"
 try:
@@ -110,31 +148,73 @@ except FileNotFoundError:
 except Exception as _e:
     print(f"[EDAPT] ERROR loading startup data: {_e}")
 
-# ── Audit log ─────────────────────────────────────────────────────────────────
+# ── Database setup ────────────────────────────────────────────────────────────
 
-_AUDIT_LOGS: list[dict] = [
-    {"event_id": 1001, "timestamp": "2026-04-24 09:00", "user_uid": "admin",   "action_type": "Login",         "status": "Success", "detail": "Successful login"},
-    {"event_id": 1002, "timestamp": "2026-04-24 09:15", "user_uid": "user",    "action_type": "Login",         "status": "Success", "detail": "Successful login"},
-    {"event_id": 1003, "timestamp": "2026-04-24 09:30", "user_uid": "unknown", "action_type": "Login Failed",  "status": "Alert",   "detail": "Invalid credentials"},
-    {"event_id": 1004, "timestamp": "2026-04-24 10:00", "user_uid": "admin",   "action_type": "Data Upload",   "status": "Success", "detail": "327523 rows ingested"},
-    {"event_id": 1005, "timestamp": "2026-04-24 10:30", "user_uid": "user",    "action_type": "Data Access",   "status": "Success", "detail": "Viewed ICT104 dashboard"},
-    {"event_id": 1006, "timestamp": "2026-04-24 11:00", "user_uid": "unknown", "action_type": "Access Denied", "status": "Alert",   "detail": "Unauthorized access attempt"},
-]
+_DB_URL = os.getenv(
+    "DATABASE_URL",
+    "postgresql+asyncpg://sangamgurung@localhost:5432/edapt",
+)
+_engine = create_async_engine(_DB_URL, echo=False, pool_pre_ping=True)
+_AsyncSession = sessionmaker(_engine, class_=AsyncSession, expire_on_commit=False)
 
 
-def _next_event_id() -> int:
-    return (_AUDIT_LOGS[-1]["event_id"] + 1) if _AUDIT_LOGS else 1001
+async def get_db():
+    async with _AsyncSession() as session:
+        try:
+            yield session
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
 
 
-def _append_audit(*, user_uid: str, action_type: str, status: str, detail: str) -> None:
-    _AUDIT_LOGS.append({
-        "event_id":    _next_event_id(),
-        "timestamp":   datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M"),
-        "user_uid":    user_uid,
-        "action_type": action_type,
-        "status":      status,
-        "detail":      detail,
-    })
+async def _append_audit_db(
+    db: AsyncSession,
+    *,
+    user_uid: str,
+    action_type: str,
+    status: str,
+    detail: str,
+) -> None:
+    db.add(AuditLog(user_uid=user_uid, action_type=action_type, status=status, detail=detail))
+    await db.commit()
+
+
+async def _seed_default_users() -> None:
+    async with _AsyncSession() as db:
+        result = await db.execute(select(UserModel))
+        if result.scalars().first() is not None:
+            return
+        defaults = [
+            UserModel(
+                email="admin",
+                name="Ken Emeleus",
+                hashed_password=_pwd.hash("Admin@2025!"),
+                role="Head of Technology",
+                is_active=True,
+                subjects=[],
+            ),
+            UserModel(
+                email="user",
+                name="Demo Lecturer",
+                hashed_password=_pwd.hash("Lect@2025!"),
+                role="Lecturer",
+                is_active=True,
+                subjects=["ICT104", "ICT201", "ICT301"],
+            ),
+            UserModel(
+                email="hos",
+                name="Demo Head of School",
+                hashed_password=_pwd.hash("HoS@2025!"),
+                role="Head of School",
+                is_active=True,
+                subjects=[],
+            ),
+        ]
+        for u in defaults:
+            db.add(u)
+        await db.commit()
+        print("[EDAPT] Default users seeded")
 
 # ── Dashboard constants ───────────────────────────────────────────────────────
 
@@ -170,7 +250,7 @@ def _prev_period(period: str) -> Optional[str]:
 
 
 def _role_filter(df: pd.DataFrame, user: dict) -> pd.DataFrame:
-    """Restrict rows to the lecturer's subjects (admin sees everything)."""
+    """Restrict rows to the lecturer's subjects. Head of Technology and Head of School see all rows."""
     if user.get("role") == "Lecturer":
         subjects = user.get("subjects", [])
         if subjects and "SUBJECTCODE" in df.columns:
@@ -209,34 +289,48 @@ def _safe(val) -> Optional[float]:
 
 # ── Pydantic models ───────────────────────────────────────────────────────────
 
-class LoginRequest(BaseModel):
-    email:    str
-    password: str
+# Strict email pattern: localpart@domain.extension (extension ≥ 2 chars)
+_EMAIL_REGEX = r'^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z0-9]{2,}$'
 
+# OTP email verification to be implemented in production with SMTP integration.
+class LoginRequest(BaseModel):
+    # Accepts both email addresses and plain staff IDs (e.g. "admin").
+    # Pattern blocks unsafe characters without requiring full email format.
+    email:    str = Field(..., max_length=254, pattern=r'^[a-zA-Z0-9._%+@\-]+$')
+    password: str = Field(..., max_length=128)
+
+# OTP email verification to be implemented in production with SMTP integration.
 class CreateUserRequest(BaseModel):
-    email:    str
+    email:    str = Field(..., max_length=254, pattern=_EMAIL_REGEX)
     password: str
-    name:     str
+    name:     Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
     role:     str = "Lecturer"
     subjects: list[str] = []
 
+    @field_validator('email', mode='before')
+    @classmethod
+    def normalise_email(cls, v):
+        if isinstance(v, str):
+            return v.lower().strip()
+        return v
+
 class PredictRequest(BaseModel):
     subject:      str
-    assess1_mark: float
-    assess2_mark: Optional[float] = None
+    assess1_mark: float = Field(..., ge=0.0, le=100.0)
+    assess2_mark: Optional[float] = Field(None, ge=0.0, le=100.0)
 
 class GeminiAlertRequest(BaseModel):
-    subject:   Optional[str] = None
-    trimester: Optional[str] = None
+    subject:   Optional[str] = Field(None, max_length=20)
+    trimester: Optional[str] = Field(None, max_length=10)
 
 class GeminiAnalyseRequest(BaseModel):
-    subject:   str
-    trimester: Optional[str] = None
+    subject:   str = Field(..., max_length=20)
+    trimester: Optional[str] = Field(None, max_length=10)
 
 class GeminiAskRequest(BaseModel):
-    question:  str
-    subject:   Optional[str] = None
-    trimester: Optional[str] = None
+    question:  str = Field(..., max_length=500)
+    subject:   Optional[str] = Field(None, max_length=20)
+    trimester: Optional[str] = Field(None, max_length=10)
 
 class ChangePasswordRequest(BaseModel):
     current_password: str
@@ -253,7 +347,7 @@ class UpdateProfileRequest(BaseModel):
     bio:        Optional[str] = None
 
 class GeminiInstitutionAskRequest(BaseModel):
-    question: str
+    question: str = Field(..., max_length=500)
 
 # ── JWT helpers ───────────────────────────────────────────────────────────────
 
@@ -270,6 +364,15 @@ def _decode_token(token: str) -> dict:
 
 app = FastAPI(title="EDAPT v2 API", version="2.0.0")
 
+
+@app.on_event("startup")
+async def _startup():
+    async with _engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    await _seed_default_users()
+    print("[EDAPT] Database ready")
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
@@ -283,6 +386,12 @@ _oauth2 = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
 # ── Auth dependencies ─────────────────────────────────────────────────────────
 
 async def get_current_user(token: str = Depends(_oauth2)) -> dict:
+    if token in _REVOKED_TOKENS:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Session expired. Please log in again.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     try:
         payload = _decode_token(token)
         if "sub" not in payload:
@@ -302,8 +411,14 @@ async def require_admin(user: dict = Depends(get_current_user)) -> dict:
     return user
 
 
+async def require_head_of_school(user: dict = Depends(get_current_user)) -> dict:
+    if user.get("role") not in {"Head of Technology", "Head of School"}:
+        raise HTTPException(status_code=403, detail="Only Head of Technology or Head of School can access this feature.")
+    return user
+
+
 async def require_super_admin(user: dict = Depends(get_current_user)) -> dict:
-    if user.get("sub") != "admin":
+    if user.get("is_super_admin") is not True:
         raise HTTPException(status_code=403, detail="Only the system administrator can access this feature.")
     return user
 
@@ -329,18 +444,42 @@ async def api_health():
 # ── Auth ──────────────────────────────────────────────────────────────────────
 
 @app.post("/api/auth/login", tags=["Auth"])
-async def login(req: LoginRequest):
-    user = USERS.get(req.email)
-    if not user or not _pwd.verify(req.password, user["hashed_password"]):
-        _append_audit(user_uid=req.email, action_type="Login Failed", status="Alert", detail="Invalid credentials")
+async def login(req: LoginRequest, db: AsyncSession = Depends(get_db)):
+    _check_lockout(req.email)
+    result = await db.execute(select(UserModel).where(UserModel.email == req.email))
+    db_user = result.scalar_one_or_none()
+
+    if not db_user or not _pwd.verify(req.password, db_user.hashed_password):
+        _record_failed_attempt(req.email)
+        await _append_audit_db(db, user_uid=req.email, action_type="Login Failed",
+                               status="Alert", detail="Invalid credentials")
         raise HTTPException(status_code=401, detail="Invalid email or password")
 
-    is_super_admin = user.get("is_super_admin", user["email"] == "admin")
-    token = _create_token({"sub": user["email"], "role": user["role"], "name": user["name"], "subjects": user["subjects"], "is_super_admin": is_super_admin})
-    _append_audit(user_uid=user["email"], action_type="Login", status="Success", detail="Successful login")
+    if not db_user.is_active:
+        raise HTTPException(status_code=403, detail="Account is deactivated. Contact your administrator.")
+
+    _FAILED_LOGINS.pop(req.email, None)
+    subjects       = db_user.subjects or []
+    is_super_admin = db_user.email == "admin"
+    token = _create_token({
+        "sub":            db_user.email,
+        "role":           db_user.role,
+        "name":           db_user.name,
+        "subjects":       subjects,
+        "is_super_admin": is_super_admin,
+    })
+    await _append_audit_db(db, user_uid=db_user.email, action_type="Login",
+                           status="Success", detail=f"Successful login as {db_user.role}")
     return {
-        "access_token": token, "token_type": "bearer",
-        "user": {"email": user["email"], "name": user["name"], "role": user["role"], "subjects": user["subjects"], "is_super_admin": is_super_admin},
+        "access_token": token,
+        "token_type":   "bearer",
+        "user": {
+            "email":          db_user.email,
+            "name":           db_user.name,
+            "role":           db_user.role,
+            "subjects":       subjects,
+            "is_super_admin": is_super_admin,
+        },
     }
 
 
@@ -348,7 +487,7 @@ async def login(req: LoginRequest):
 
 @app.get("/api/data", tags=["Data"])
 async def get_data(user: dict = Depends(get_current_user)):
-    if _DATA is None:
+    if _DATA is None or _DATA.empty:
         return {"columns": [], "rows": [], "total": 0, "filtered": 0}
     df = _role_filter(_DATA.copy(), user)
     return {"columns": list(df.columns), "rows": df.head(1000).fillna("").to_dict("records"), "total": len(df), "filtered": min(len(df), 1000)}
@@ -356,7 +495,7 @@ async def get_data(user: dict = Depends(get_current_user)):
 
 @app.get("/api/summary", tags=["Data"])
 async def get_summary(user: dict = Depends(get_current_user)):
-    if _DATA is None:
+    if _DATA is None or _DATA.empty:
         return {"data": []}
     df = _role_filter(_DATA.copy(), user)
     if "SUBJECTCODE" not in df.columns:
@@ -385,26 +524,42 @@ async def get_filters(user: dict = Depends(get_current_user)):
 # ── Ingest (admin only) ───────────────────────────────────────────────────────
 
 @app.post("/api/ingest", tags=["Ingest"])
-async def ingest_dataset(file: UploadFile = File(...), user: dict = Depends(require_admin)):
+async def ingest_dataset(
+    file: UploadFile = File(...),
+    user: dict = Depends(require_head_of_school),
+    db:   AsyncSession = Depends(get_db),
+):
     global _DATA
     ext = (file.filename or "").rsplit(".", 1)[-1].lower()
     if ext != "csv":
-        _append_audit(user_uid=user["sub"], action_type="Data Upload", status="Alert",
-                      detail=f"Rejected upload: unsupported file type '.{ext}'")
+        await _append_audit_db(db, user_uid=user["sub"], action_type="Data Upload",
+                               status="Alert", detail=f"Rejected upload: unsupported file type '.{ext}'")
         raise HTTPException(400, "Unsupported file type. Only .csv files are accepted.")
 
     content = await file.read()
     if len(content) > 50 * 1024 * 1024:
-        _append_audit(user_uid=user["sub"], action_type="Data Upload", status="Alert",
-                      detail=f"Rejected upload: file exceeds 50 MB limit")
+        await _append_audit_db(db, user_uid=user["sub"], action_type="Data Upload",
+                               status="Alert", detail="Rejected upload: file exceeds 50 MB limit")
         raise HTTPException(400, "File exceeds the 50 MB limit.")
+
+    if len(content) == 0:
+        await _append_audit_db(db, user_uid=user["sub"], action_type="Data Upload",
+                               status="Alert", detail="Rejected upload: file is empty")
+        raise HTTPException(400, "Uploaded file is empty.")
+
+    head = content[:2000]
+    _BINARY_SIGS = (b"PK", b"%PDF", b"\x89PNG", b"\xff\xd8", b"\x42\x4d")
+    if any(head.startswith(sig) for sig in _BINARY_SIGS) or b"," not in head:
+        await _append_audit_db(db, user_uid=user["sub"], action_type="Data Upload",
+                               status="Alert", detail="Rejected upload: file does not appear to be a valid CSV")
+        raise HTTPException(400, "File does not appear to be a valid CSV.")
 
     try:
         df = pd.read_csv(io.BytesIO(content))
     except Exception as exc:
-        _append_audit(user_uid=user["sub"], action_type="Data Upload", status="Error",
-                      detail=f"Failed to parse CSV: {exc}")
-        raise HTTPException(422, f"Could not parse CSV file: {exc}")
+        await _append_audit_db(db, user_uid=user["sub"], action_type="Data Upload",
+                               status="Error", detail=f"Failed to parse CSV: {exc}")
+        raise HTTPException(422, "The uploaded file could not be parsed as a valid CSV.")
 
     df.columns = [c.strip() for c in df.columns]
 
@@ -416,8 +571,8 @@ async def ingest_dataset(file: UploadFile = File(...), user: dict = Depends(requ
     ]
     missing = [c for c in REQUIRED_COLS if c not in df.columns]
     if missing:
-        _append_audit(user_uid=user["sub"], action_type="Data Upload", status="Alert",
-                      detail=f"Rejected upload: missing column '{missing[0]}'")
+        await _append_audit_db(db, user_uid=user["sub"], action_type="Data Upload",
+                               status="Alert", detail=f"Rejected upload: missing column '{missing[0]}'")
         raise HTTPException(400, f"Missing required column: {missing[0]}")
 
     if "STUDYPERIOD" in df.columns:
@@ -430,8 +585,8 @@ async def ingest_dataset(file: UploadFile = File(...), user: dict = Depends(requ
     df["PASSED"] = df["MARKPERCENT"] >= 50
     _DATA = df
 
-    _append_audit(user_uid=user["sub"], action_type="Data Upload", status="Success",
-                  detail=f"{len(df):,} rows ingested from {file.filename}")
+    await _append_audit_db(db, user_uid=user["sub"], action_type="Data Upload",
+                           status="Success", detail=f"{len(df):,} rows ingested from {file.filename}")
     return {
         "row_count": len(df),
         "columns":   list(df.columns),
@@ -443,7 +598,7 @@ async def ingest_dataset(file: UploadFile = File(...), user: dict = Depends(requ
 async def ingest_preview(
     page:      int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=500),
-    user: dict = Depends(require_admin),
+    user: dict = Depends(require_head_of_school),
 ):
     global _DATA
     if _DATA is None or _DATA.empty:
@@ -469,82 +624,149 @@ async def get_audit_logs(
     action_type:   Optional[str] = Query(None),
     status_filter: Optional[str] = Query(None),
     user: dict = Depends(require_admin),
+    db:   AsyncSession = Depends(get_db),
 ):
-    _append_audit(user_uid=user["sub"], action_type="Data Access", status="Success",
-                  detail="Viewed audit log")
-    rows = list(reversed(_AUDIT_LOGS))
-    if action_type:   rows = [r for r in rows if r["action_type"] == action_type]
-    if status_filter: rows = [r for r in rows if r["status"] == status_filter]
-    return {"total": len(_AUDIT_LOGS), "count": len(rows), "data": rows}
+    await _append_audit_db(db, user_uid=user["sub"], action_type="Data Access",
+                           status="Success", detail="Viewed audit log")
+    query = select(AuditLog).order_by(desc(AuditLog.id))
+    if action_type:   query = query.where(AuditLog.action_type == action_type)
+    if status_filter: query = query.where(AuditLog.status == status_filter)
+    result = await db.execute(query)
+    logs   = result.scalars().all()
+
+    # Resolve each user_uid to its current role in one batch query so the
+    # frontend never has to infer role from UID patterns (which fails for
+    # real email addresses like principal@koi.edu.au).
+    uids = {log.user_uid for log in logs}
+    role_rows = await db.execute(
+        select(UserModel.email, UserModel.role).where(UserModel.email.in_(uids))
+    )
+    role_map: dict[str, str] = {email: role for email, role in role_rows.all()}
+
+    data = [
+        {
+            "event_id":    log.id,
+            "timestamp":   log.timestamp.strftime("%Y-%m-%d %H:%M") if log.timestamp else "",
+            "user_uid":    log.user_uid,
+            "role":        role_map.get(log.user_uid),
+            "action_type": log.action_type,
+            "status":      log.status,
+            "detail":      log.detail,
+        }
+        for log in logs
+    ]
+    return {"total": len(data), "count": len(data), "data": data}
 
 
 # ── User management (admin only) ──────────────────────────────────────────────
 
 @app.get("/api/users", tags=["Admin"])
-async def list_users(user: dict = Depends(require_super_admin)):
+async def list_users(
+    user: dict = Depends(require_super_admin),
+    db:   AsyncSession = Depends(get_db),
+):
+    result = await db.execute(select(UserModel).where(UserModel.email != "admin"))
+    users  = result.scalars().all()
     return [
-        {k: v for k, v in u.items() if k != "hashed_password"}
-        for u in USERS.values()
-        if u.get("email") != "admin"
+        {
+            "email":    u.email,
+            "name":     u.name,
+            "role":     u.role,
+            "subjects": u.subjects or [],
+            "active":   u.is_active,
+        }
+        for u in users
     ]
 
 
 @app.post("/api/users", status_code=201, tags=["Admin"])
-async def create_user(payload: CreateUserRequest, user: dict = Depends(require_super_admin)):
+async def create_user(
+    payload: CreateUserRequest,
+    user: dict = Depends(require_super_admin),
+    db:   AsyncSession = Depends(get_db),
+):
+    domain = payload.email.split('@')[1]
+    if '.' not in domain:
+        raise HTTPException(400, "Please enter a valid institutional email address.")
     if not payload.name.strip():
         raise HTTPException(400, "Name must not be empty.")
-    if len(payload.password) < 6:
-        raise HTTPException(400, "Password must be at least 6 characters.")
-    if payload.role not in {"Lecturer", "Head of Technology"}:
-        raise HTTPException(400, "Role must be 'Lecturer' or 'Head of Technology'.")
+    _validate_password(payload.password)
+    if payload.role not in {"Lecturer", "Head of Technology", "Head of School"}:
+        raise HTTPException(400, "Role must be 'Lecturer', 'Head of Technology', or 'Head of School'.")
     if payload.role == "Lecturer" and not payload.subjects:
         raise HTTPException(400, "At least one subject must be assigned for a Lecturer.")
-    if payload.email in USERS:
+
+    existing = await db.execute(select(UserModel).where(UserModel.email == payload.email))
+    if existing.scalar_one_or_none():
         raise HTTPException(400, "Email already exists.")
 
-    subjects = [] if payload.role == "Head of Technology" else payload.subjects
-    USERS[payload.email] = {
-        "email": payload.email, "hashed_password": _pwd.hash(payload.password),
-        "role": payload.role, "name": payload.name.strip(),
-        "subjects": subjects, "active": True, "is_super_admin": False,
-    }
+    subjects = [] if payload.role in {"Head of Technology", "Head of School"} else payload.subjects
+    new_user = UserModel(
+        email=payload.email,
+        name=payload.name.strip(),
+        hashed_password=_pwd.hash(payload.password),
+        role=payload.role,
+        is_active=True,
+        subjects=subjects,
+    )
+    db.add(new_user)
+    await db.flush()  # get the id without committing yet
+
     detail = (f"{payload.role} account created: {payload.email}"
               + (f" assigned to {', '.join(subjects)}" if subjects else ""))
-    _append_audit(user_uid=user["sub"], action_type="User Created", status="Success", detail=detail)
-    u = {k: v for k, v in USERS[payload.email].items() if k != "hashed_password"}
-    return {"message": f"{payload.role} account created", "user": u}
+    await _append_audit_db(db, user_uid=user["sub"], action_type="User Created",
+                           status="Success", detail=detail)
+    return {
+        "message": f"{payload.role} account created",
+        "user":    {"email": payload.email, "name": payload.name, "role": payload.role, "subjects": subjects},
+    }
 
 
 @app.put("/api/users/{email}", tags=["Admin"])
-async def update_user(email: str, payload: UpdateUserRequest, user: dict = Depends(require_super_admin)):
-    if email not in USERS:
+async def update_user(
+    email:   str,
+    payload: UpdateUserRequest,
+    user: dict = Depends(require_super_admin),
+    db:   AsyncSession = Depends(get_db),
+):
+    result  = await db.execute(select(UserModel).where(UserModel.email == email))
+    db_user = result.scalar_one_or_none()
+    if not db_user:
         raise HTTPException(404, "User not found.")
-    if USERS[email].get("email") == "admin":
+    if db_user.email == "admin":
         raise HTTPException(403, "Cannot modify the system administrator account.")
+
     if payload.subjects is not None:
-        USERS[email]["subjects"] = payload.subjects
+        db_user.subjects = payload.subjects
     if payload.active is not None:
-        USERS[email]["active"] = payload.active
+        db_user.is_active = payload.active
         status_str = "activated" if payload.active else "deactivated"
-        _append_audit(user_uid=user["sub"], action_type="User Modified", status="Success",
-                      detail=f"Account {status_str}: {email}")
+        await _append_audit_db(db, user_uid=user["sub"], action_type="User Modified",
+                               status="Success", detail=f"Account {status_str}: {email}")
     else:
-        _append_audit(user_uid=user["sub"], action_type="User Modified", status="Success",
-                      detail=f"Account updated: {email}")
+        await _append_audit_db(db, user_uid=user["sub"], action_type="User Modified",
+                               status="Success", detail=f"Account updated: {email}")
     return {"message": "Account updated"}
 
 
 @app.delete("/api/users/{email}", tags=["Admin"])
-async def delete_user(email: str, user: dict = Depends(require_super_admin)):
-    if email not in USERS:
+async def delete_user(
+    email: str,
+    user: dict = Depends(require_super_admin),
+    db:   AsyncSession = Depends(get_db),
+):
+    result  = await db.execute(select(UserModel).where(UserModel.email == email))
+    db_user = result.scalar_one_or_none()
+    if not db_user:
         raise HTTPException(404, "User not found.")
-    if USERS[email].get("email") == "admin":
+    if db_user.email == "admin":
         raise HTTPException(403, "Cannot delete the system administrator account.")
     if email == user.get("sub"):
         raise HTTPException(403, "Cannot delete your own account.")
-    del USERS[email]
-    _append_audit(user_uid=user["sub"], action_type="User Modified", status="Success",
-                  detail=f"Account deleted: {email}")
+
+    await db.delete(db_user)
+    await _append_audit_db(db, user_uid=user["sub"], action_type="User Modified",
+                           status="Success", detail=f"Account deleted: {email}")
     return {"message": "Account deleted"}
 
 
@@ -563,7 +785,7 @@ async def dashboard_summary(
     empty = {"total_students": 0, "total_subjects": 0, "avg_mark": 0.0,
              "avg_mark_prev": None, "pass_rate": 0.0, "pass_rate_prev": None,
              "at_risk_count": 0, "countries_count": 0}
-    if _DATA is None:
+    if _DATA is None or _DATA.empty:
         return empty
 
     df = _query_filter(_role_filter(_DATA.copy(), user), subject, trimester, year, classgroup)
@@ -573,7 +795,7 @@ async def dashboard_summary(
 
     avg_mark  = _safe(df["MARKPERCENT"].mean())
     pass_rate = _safe((df["MARKPERCENT"] >= 50).mean() * 100)
-    countries = int(df["COUNTRY_MASKED"].nunique()) if user.get("role") == "Head of Technology" and "COUNTRY_MASKED" in df.columns else 0
+    countries = int(df["COUNTRY_MASKED"].nunique()) if user.get("role") in {"Head of Technology", "Head of School"} and "COUNTRY_MASKED" in df.columns else 0
 
     # Previous trimester change (only meaningful when a specific trimester is selected)
     avg_mark_prev = pass_rate_prev = None
@@ -606,7 +828,7 @@ async def grade_distribution(
     classgroup: Optional[str] = Query(None),
     user: dict = Depends(get_current_user),
 ):
-    if _DATA is None:
+    if _DATA is None or _DATA.empty:
         return {"data": [{"band": b, "count": 0} for b, _, _ in GRADE_BANDS]}
 
     df = _query_filter(_role_filter(_DATA.copy(), user), subject, trimester, year, classgroup)
@@ -625,7 +847,7 @@ async def performance_trend(
     classgroup: Optional[str] = Query(None),
     user: dict = Depends(get_current_user),
 ):
-    if _DATA is None:
+    if _DATA is None or _DATA.empty:
         return {"data": [{"period": p, "institution_avg": None, "subject_avg": None} for p in PERIODS_ORDER]}
 
     df_full = _DATA.dropna(subset=["MARKPERCENT"])
@@ -680,7 +902,7 @@ async def pass_fail(
     classgroup: Optional[str] = Query(None),
     user: dict = Depends(get_current_user),
 ):
-    if _DATA is None:
+    if _DATA is None or _DATA.empty:
         return {"pass_count": 0, "fail_count": 0, "pass_rate": 0.0}
 
     df = _query_filter(_role_filter(_DATA.copy(), user), subject, trimester, year, classgroup)
@@ -701,7 +923,7 @@ async def pass_fail(
 async def international_performance(
     trimester: Optional[str] = Query(None),
     year:      Optional[str] = Query(None),
-    user: dict = Depends(require_admin),
+    user: dict = Depends(require_head_of_school),
 ):
     if _DATA is None or "COUNTRY_MASKED" not in _DATA.columns:
         return {"data": []}
@@ -716,7 +938,7 @@ async def international_performance(
 
 
 @app.get("/api/dashboard/difficulty-index", tags=["Dashboard"])
-async def difficulty_index(user: dict = Depends(require_admin)):
+async def difficulty_index(user: dict = Depends(require_head_of_school)):
     if _DATA is None or "SUBJECTCODE" not in _DATA.columns:
         return {"data": []}
 
@@ -732,7 +954,7 @@ async def difficulty_index(user: dict = Depends(require_admin)):
 @app.get("/api/dashboard/classgroups", tags=["Dashboard"])
 async def get_classgroups(
     subject: Optional[str] = Query(None),
-    user: dict = Depends(require_admin),
+    user: dict = Depends(require_head_of_school),
 ):
     if _DATA is None or "CLASSGROUP" not in _DATA.columns:
         return {"classgroups": []}
@@ -745,9 +967,6 @@ async def get_classgroups(
 # ─────────────────────────────────────────────────────────────────────────────
 # EXPLORER ENDPOINTS
 # ─────────────────────────────────────────────────────────────────────────────
-
-from fastapi.responses import StreamingResponse
-
 
 def _str_val(val) -> str:
     """Convert a pandas cell value to str, coercing NaN → empty string."""
@@ -828,11 +1047,12 @@ async def explorer_records(
     gender:          Optional[str] = Query(None),
     age_group:       Optional[str] = Query(None),
     user: dict = Depends(get_current_user),
+    db:   AsyncSession = Depends(get_db),
 ):
-    if _DATA is None:
+    if _DATA is None or _DATA.empty:
         return {"total": 0, "page": page, "page_size": page_size, "total_pages": 0, "data": []}
 
-    is_admin = user.get("role") == "Head of Technology"
+    is_admin = user.get("role") in {"Head of Technology", "Head of School"}
     df = _role_filter(_DATA.copy(), user)
     df = _explorer_filter(df, subject, assessment_type, passed, trimester,
                           search, country, gender, age_group, is_admin)
@@ -842,6 +1062,9 @@ async def explorer_records(
     start       = (page - 1) * page_size
     page_df     = df.iloc[start : start + page_size]
 
+    if any([subject, assessment_type, passed, trimester, search, country, gender, age_group]):
+        await _append_audit_db(db, user_uid=user["sub"], action_type="Data Access",
+                               status="Success", detail="Explorer records viewed")
     return {
         "total":       total,
         "page":        page,
@@ -853,9 +1076,9 @@ async def explorer_records(
 
 @app.get("/api/explorer/filters", tags=["Explorer"])
 async def explorer_filters(user: dict = Depends(get_current_user)):
-    is_admin = user.get("role") == "Head of Technology"
+    is_admin = user.get("role") in {"Head of Technology", "Head of School"}
 
-    if _DATA is None:
+    if _DATA is None or _DATA.empty:
         return {
             "subjects": user.get("subjects", []) if not is_admin else [],
             "assessment_types": [], "trimesters": [],
@@ -897,7 +1120,7 @@ async def explorer_student(
     if _DATA is None or "STUDENTID_MASKED" not in _DATA.columns:
         raise HTTPException(404, "Student not found")
 
-    is_admin = user.get("role") == "Head of Technology"
+    is_admin = user.get("role") in {"Head of Technology", "Head of School"}
     df = _role_filter(_DATA.copy(), user)
     df = df[df["STUDENTID_MASKED"].astype(str) == str(student_id)]
     if subject and "SUBJECTCODE" in df.columns:
@@ -955,9 +1178,10 @@ async def explorer_export(
     country:         Optional[str] = Query(None),
     gender:          Optional[str] = Query(None),
     age_group:       Optional[str] = Query(None),
-    user: dict = Depends(require_admin),
+    user: dict = Depends(require_head_of_school),
+    db:   AsyncSession = Depends(get_db),
 ):
-    if _DATA is None:
+    if _DATA is None or _DATA.empty:
         raise HTTPException(404, "No data loaded")
 
     df = _explorer_filter(
@@ -972,8 +1196,8 @@ async def explorer_export(
     ] if v]
     filter_str = ", ".join(filters_used) or "none"
 
-    _append_audit(
-        user_uid=user["sub"], action_type="Export", status="Success",
+    await _append_audit_db(
+        db, user_uid=user["sub"], action_type="Export", status="Success",
         detail=f"Exported {len(df):,} records with filters: {filter_str}",
     )
 
@@ -1015,12 +1239,12 @@ async def _gemini_call(model, prompt: str) -> tuple[str, int]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 @app.post("/api/predict", tags=["ML"])
-async def predict_outcome(req: PredictRequest, user: dict = Depends(get_current_user)):
+async def predict_outcome(req: PredictRequest, user: dict = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     if _MODEL is None:
         raise HTTPException(503, "ML model not loaded. Run backend/app/ml/train_model.py first.")
 
-    is_admin   = user.get("role") == "Head of Technology"
-    subj_list  = user.get("subjects", [])
+    is_admin  = user.get("role") in {"Head of Technology", "Head of School"}
+    subj_list = user.get("subjects", [])
 
     # Lecturer must own the subject
     if not is_admin and req.subject not in subj_list:
@@ -1070,6 +1294,8 @@ async def predict_outcome(req: PredictRequest, user: dict = Depends(get_current_
     if is_admin:
         result["model_name"]     = _MODEL_NAME
         result["model_accuracy"] = _MODEL_ACCURACY
+    await _append_audit_db(db, user_uid=user["sub"], action_type="Prediction Run",
+                           status="Success", detail=f"Predicted {req.subject}: {pct}% pass probability")
     return result
 
 
@@ -1079,7 +1305,7 @@ async def predict_outcome(req: PredictRequest, user: dict = Depends(get_current_
 
 def _subject_stats(subject: Optional[str], trimester: Optional[str], user: dict) -> dict:
     """Build summary stats for a subject/trimester scope."""
-    if _DATA is None:
+    if _DATA is None or _DATA.empty:
         return {}
     df = _role_filter(_DATA.copy(), user)
     df = df.dropna(subset=["MARKPERCENT"])
@@ -1135,7 +1361,7 @@ def _subject_stats(subject: Optional[str], trimester: Optional[str], user: dict)
 
 
 @app.post("/api/gemini/alert", tags=["Gemini"])
-async def gemini_alert(req: GeminiAlertRequest, user: dict = Depends(get_current_user)):
+async def gemini_alert(req: GeminiAlertRequest, user: dict = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     stats = _subject_stats(req.subject, req.trimester, user)
     if not stats:
         return {"alert": "", "tokens_used": 0}
@@ -1148,11 +1374,13 @@ async def gemini_alert(req: GeminiAlertRequest, user: dict = Depends(get_current
         "Write ONE alert sentence for a lecturer. Be specific. Mention the subject name and the change."
     )
     alert, tokens = await _gemini_call(_flash_model, prompt)
+    await _append_audit_db(db, user_uid=user["sub"], action_type="AI Request",
+                           status="Success", detail=f"Gemini alert requested for {req.subject or 'all subjects'}")
     return {"alert": alert, "tokens_used": tokens}
 
 
 @app.post("/api/gemini/analyse", tags=["Gemini"])
-async def gemini_analyse(req: GeminiAnalyseRequest, user: dict = Depends(get_current_user)):
+async def gemini_analyse(req: GeminiAnalyseRequest, user: dict = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     stats = _subject_stats(req.subject, req.trimester, user)
     if not stats:
         return {"analysis": "No data available for analysis.", "tokens_used": 0, "model": "none"}
@@ -1164,11 +1392,13 @@ async def gemini_analyse(req: GeminiAnalyseRequest, user: dict = Depends(get_cur
         "Be factual. Use the exact numbers provided. Recommend one action."
     )
     analysis, tokens = await _gemini_call(_pro_model, prompt)
+    await _append_audit_db(db, user_uid=user["sub"], action_type="AI Request",
+                           status="Success", detail=f"Gemini analysis requested for {req.subject}")
     return {"analysis": analysis, "tokens_used": tokens, "model": "gemini-1.5-pro"}
 
 
 @app.post("/api/gemini/ask", tags=["Gemini"])
-async def gemini_ask(req: GeminiAskRequest, user: dict = Depends(get_current_user)):
+async def gemini_ask(req: GeminiAskRequest, user: dict = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     stats = _subject_stats(req.subject, req.trimester, user)
     context = stats if stats else {"note": "No data loaded yet."}
 
@@ -1179,6 +1409,8 @@ async def gemini_ask(req: GeminiAskRequest, user: dict = Depends(get_current_use
         "Answer in 2-3 sentences using the data provided. Be specific and actionable."
     )
     answer, tokens = await _gemini_call(_pro_model, prompt)
+    await _append_audit_db(db, user_uid=user["sub"], action_type="AI Request",
+                           status="Success", detail=f"Gemini question asked about {req.subject or 'institution'}")
     return {"answer": answer, "tokens_used": tokens, "model": "gemini-1.5-pro"}
 
 
@@ -1187,46 +1419,59 @@ async def gemini_ask(req: GeminiAskRequest, user: dict = Depends(get_current_use
 # ─────────────────────────────────────────────────────────────────────────────
 
 @app.post("/api/auth/change-password", tags=["Auth"])
-async def change_password(req: ChangePasswordRequest, user: dict = Depends(get_current_user)):
-    email    = user.get("sub", "")
-    db_user  = USERS.get(email)
+async def change_password(
+    req:  ChangePasswordRequest,
+    user: dict = Depends(get_current_user),
+    db:   AsyncSession = Depends(get_db),
+):
+    email  = user.get("sub", "")
+    result = await db.execute(select(UserModel).where(UserModel.email == email))
+    db_user = result.scalar_one_or_none()
     if not db_user:
         raise HTTPException(404, "User not found.")
-    if not _pwd.verify(req.current_password, db_user["hashed_password"]):
-        _append_audit(user_uid=email, action_type="Password Change", status="Alert",
-                      detail="Failed password change — incorrect current password")
+    if not _pwd.verify(req.current_password, db_user.hashed_password):
+        await _append_audit_db(db, user_uid=email, action_type="Password Change",
+                               status="Alert", detail="Failed — incorrect current password")
         raise HTTPException(400, "Current password is incorrect.")
-    if len(req.new_password) < 8:
-        raise HTTPException(400, "New password must be at least 8 characters.")
-    USERS[email]["hashed_password"] = _pwd.hash(req.new_password)
-    _append_audit(user_uid=email, action_type="Password Change", status="Success",
-                  detail="User changed their password")
+    _validate_password(req.new_password)
+    db_user.hashed_password = _pwd.hash(req.new_password)
+    await _append_audit_db(db, user_uid=email, action_type="Password Change",
+                           status="Success", detail="User changed their password")
     return {"message": "Password updated successfully."}
 
 
 @app.post("/api/auth/logout", tags=["Auth"])
-async def logout_user(user: dict = Depends(get_current_user)):
+async def logout_user(
+    token: str  = Depends(_oauth2),
+    user: dict  = Depends(get_current_user),
+    db:   AsyncSession = Depends(get_db),
+):
+    _REVOKED_TOKENS.add(token)
     email = user.get("sub", "unknown")
-    _append_audit(user_uid=email, action_type="Logout", status="Success",
-                  detail="User signed out")
+    await _append_audit_db(db, user_uid=email, action_type="Logout",
+                           status="Success", detail="User signed out")
     return {"message": "Logged out."}
 
 
 @app.post("/api/auth/update-profile", tags=["Auth"])
-async def update_profile(req: UpdateProfileRequest, user: dict = Depends(get_current_user)):
-    email   = user.get("sub", "")
-    db_user = USERS.get(email)
+async def update_profile(
+    req:  UpdateProfileRequest,
+    user: dict = Depends(get_current_user),
+    db:   AsyncSession = Depends(get_db),
+):
+    email  = user.get("sub", "")
+    result = await db.execute(select(UserModel).where(UserModel.email == email))
+    db_user = result.scalar_one_or_none()
     if not db_user:
         raise HTTPException(404, "User not found.")
     if req.name is not None and req.name.strip():
-        USERS[email]["name"] = req.name.strip()
-    if req.phone      is not None: USERS[email]["phone"]      = req.phone
-    if req.department is not None: USERS[email]["department"] = req.department
-    if req.bio        is not None: USERS[email]["bio"]        = req.bio
-    _append_audit(user_uid=email, action_type="Profile Updated", status="Success",
-                  detail="User updated their profile")
-    updated = {k: v for k, v in USERS[email].items() if k != "hashed_password"}
-    return {"message": "Profile updated successfully.", "user": updated}
+        db_user.name = req.name.strip()
+    await _append_audit_db(db, user_uid=email, action_type="Profile Updated",
+                           status="Success", detail="User updated their profile")
+    return {
+        "message": "Profile updated successfully.",
+        "user": {"email": db_user.email, "name": db_user.name, "role": db_user.role},
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1329,7 +1574,7 @@ def _calc_subject_analytics(subject: str, trimester: Optional[str]) -> dict:
 
 
 @app.get("/api/subjects/list", tags=["Subjects"])
-async def subjects_list(user: dict = Depends(require_admin)):
+async def subjects_list(user: dict = Depends(require_head_of_school)):
     if _DATA is None or "SUBJECTCODE" not in _DATA.columns:
         return []
     return sorted(_DATA["SUBJECTCODE"].dropna().unique().tolist())
@@ -1340,7 +1585,7 @@ async def subjects_analytics(
     subject_a: str           = Query(...),
     subject_b: Optional[str] = Query(None),
     trimester: Optional[str] = Query(None),
-    user: dict = Depends(require_admin),
+    user: dict = Depends(require_head_of_school),
 ):
     stats_a = _calc_subject_analytics(subject_a, trimester)
     if not stats_a:
@@ -1354,7 +1599,7 @@ async def subjects_analytics(
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _institution_stats() -> dict:
-    if _DATA is None:
+    if _DATA is None or _DATA.empty:
         return {}
     df = _DATA.dropna(subset=["MARKPERCENT"]).copy()
     if df.empty:
@@ -1423,7 +1668,7 @@ def _institution_stats() -> dict:
 
 
 @app.post("/api/gemini/institution-alert", tags=["Gemini"])
-async def gemini_institution_alert(user: dict = Depends(require_admin)):
+async def gemini_institution_alert(user: dict = Depends(require_head_of_school), db: AsyncSession = Depends(get_db)):
     stats = _institution_stats()
     if not stats:
         return {"alert": "", "tokens_used": 0}
@@ -1436,11 +1681,13 @@ async def gemini_institution_alert(user: dict = Depends(require_admin)):
         "Write ONE alert sentence for the Head of Technology. Name specific subjects. Be direct."
     )
     alert, tokens = await _gemini_call(_flash_model, prompt)
+    await _append_audit_db(db, user_uid=user["sub"], action_type="AI Request",
+                           status="Success", detail="Institution alert requested")
     return {"alert": alert, "tokens_used": tokens}
 
 
 @app.post("/api/gemini/institution-analyse", tags=["Gemini"])
-async def gemini_institution_analyse(user: dict = Depends(require_admin)):
+async def gemini_institution_analyse(user: dict = Depends(require_head_of_school), db: AsyncSession = Depends(get_db)):
     stats = _institution_stats()
     if not stats:
         return {"analysis": "No data available for analysis.", "tokens_used": 0, "model": "none"}
@@ -1451,11 +1698,13 @@ async def gemini_institution_analyse(user: dict = Depends(require_admin)):
         "Be factual, use exact numbers, recommend two specific actions."
     )
     analysis, tokens = await _gemini_call(_pro_model, prompt)
+    await _append_audit_db(db, user_uid=user["sub"], action_type="AI Request",
+                           status="Success", detail="Institution analysis requested")
     return {"analysis": analysis, "tokens_used": tokens, "model": "gemini-1.5-pro"}
 
 
 @app.post("/api/gemini/institution-ask", tags=["Gemini"])
-async def gemini_institution_ask(req: GeminiInstitutionAskRequest, user: dict = Depends(require_admin)):
+async def gemini_institution_ask(req: GeminiInstitutionAskRequest, user: dict = Depends(require_head_of_school), db: AsyncSession = Depends(get_db)):
     stats = _institution_stats()
     context = stats if stats else {"note": "No data loaded yet."}
     prompt = (
@@ -1465,9 +1714,11 @@ async def gemini_institution_ask(req: GeminiInstitutionAskRequest, user: dict = 
         "Answer in 2-3 sentences using the data. Be specific."
     )
     answer, tokens = await _gemini_call(_pro_model, prompt)
+    await _append_audit_db(db, user_uid=user["sub"], action_type="AI Request",
+                           status="Success", detail="Institution question asked")
     return {"answer": answer, "tokens_used": tokens}
 
 
 @app.get("/api/gemini/token-log", tags=["Gemini"])
-async def gemini_token_log(user: dict = Depends(require_admin)):
+async def gemini_token_log(user: dict = Depends(require_head_of_school)):
     return {"data": list(reversed(_GEMINI_TOKEN_LOG)), "total": len(_GEMINI_TOKEN_LOG)}

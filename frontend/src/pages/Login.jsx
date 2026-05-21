@@ -26,6 +26,18 @@ const icons = [
   <svg key="set" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>,
 ];
 
+function isValidEmail(email) {
+  if (!email || email.length > 254) return false;
+  const at = email.indexOf('@');
+  if (at <= 0 || email.indexOf('@', at + 1) !== -1) return false;
+  const local = email.slice(0, at);
+  const rest  = email.slice(at + 1);
+  if (!/^[a-zA-Z0-9._%+-]+$/.test(local)) return false;
+  const dot = rest.lastIndexOf('.');
+  if (dot <= 0) return false;
+  return rest.slice(dot + 1).length >= 2;
+}
+
 export default function Login() {
   const navigate = useNavigate();
 
@@ -35,11 +47,22 @@ export default function Login() {
     }
   }, [navigate]);
 
-  const [email,        setEmail]        = useState('');
-  const [password,     setPassword]     = useState('');
-  const [showPassword, setShowPassword] = useState(false);
-  const [loading,      setLoading]      = useState(false);
-  const [error,        setError]        = useState(null);
+  const [email,            setEmail]            = useState('');
+  const [password,         setPassword]         = useState('');
+  const [showPassword,     setShowPassword]     = useState(false);
+  const [loading,          setLoading]          = useState(false);
+  const [error,            setError]            = useState(null);
+  const [emailBlurWarning, setEmailBlurWarning] = useState(null);
+
+  const handleEmailBlur = () => {
+    if (!email) { setEmailBlurWarning(null); return; }
+    // Only warn if the input looks like a mistyped email (has @ but fails format check)
+    if (email.includes('@') && !isValidEmail(email)) {
+      setEmailBlurWarning("This doesn't look like a valid email address.");
+    } else {
+      setEmailBlurWarning(null);
+    }
+  };
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -51,7 +74,7 @@ export default function Login() {
       localStorage.setItem('edapt_token', res.data.access_token);
       localStorage.setItem('edapt_user',  JSON.stringify(res.data.user));
 
-      if (res.data.user.role === 'Head of Technology') {
+      if (['Head of Technology', 'Head of School'].includes(res.data.user.role)) {
         navigate('/dashboard/admin');
       } else {
         navigate('/dashboard/lecturer');
@@ -107,11 +130,17 @@ export default function Login() {
                 type="text"
                 style={s.input}
                 value={email}
-                onChange={e => { setEmail(e.target.value); setError(null); }}
+                onChange={e => { setEmail(e.target.value); setError(null); setEmailBlurWarning(null); }}
+                onBlur={handleEmailBlur}
                 placeholder="e.g. admin or you@koi.edu.au"
                 autoComplete="username"
                 required
               />
+              {emailBlurWarning && (
+                <span style={{ fontSize: 11, color: '#B45309', marginTop: 3, display: 'block' }}>
+                  ⚠ {emailBlurWarning}
+                </span>
+              )}
             </div>
 
             <div style={s.field}>
@@ -286,8 +315,8 @@ const s = {
 
   errorBanner: {
     display: 'flex', alignItems: 'center', gap: 8,
-    background: 'rgba(220,38,38,0.07)',
-    border: '1px solid rgba(220,38,38,0.2)',
+    background: '#FEF2F2',
+    border: '1px solid #FECACA',
     color: '#DC2626', borderRadius: 8,
     padding: '10px 14px', fontSize: 13, fontWeight: 500,
   },

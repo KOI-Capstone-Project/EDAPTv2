@@ -12,7 +12,6 @@ export const getUserInitials = () => {
   return name.split(' ').map(n => n[0] || '').join('').toUpperCase().slice(0, 2);
 };
 
-export const isAdmin    = () => getUser()?.role === 'Head of Technology';
-export const isLecturer = () => getUser()?.role === 'Lecturer';
+export const isAdmin = () => ['Head of Technology', 'Head of School'].includes(getUser()?.role);
 
 export const logout = () => { localStorage.clear(); window.location.href = '/login'; };

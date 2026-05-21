@@ -5,11 +5,36 @@ import api from '../services/api';
 const ROLE_BADGE = {
   'Lecturer':          { bg: '#EEEDFE', color: '#534AB7', border: '#C5C2F5' },
   'Head of Technology':{ bg: '#1A2E40', color: '#fff',    border: '#1A2E40' },
+  'Head of School':    { bg: '#D1FAE5', color: '#065F46', border: '#6EE7B7' },
 };
 
+function isValidEmail(email) {
+  if (!email || email.length > 254) return false;
+  const at = email.indexOf('@');
+  if (at <= 0 || email.indexOf('@', at + 1) !== -1) return false;
+  const local  = email.slice(0, at);
+  const rest   = email.slice(at + 1);
+  if (!/^[a-zA-Z0-9._%+-]+$/.test(local)) return false;
+  const dot = rest.lastIndexOf('.');
+  if (dot <= 0) return false;
+  const ext = rest.slice(dot + 1);
+  return ext.length >= 2;
+}
+
 const genPassword = () => {
-  const chars = 'ABCDEFGHJKMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789!@#$';
-  return Array.from({ length: 8 }, () => chars[Math.floor(Math.random() * chars.length)]).join('');
+  const upper   = 'ABCDEFGHJKMNPQRSTUVWXYZ';
+  const lower   = 'abcdefghjkmnpqrstuvwxyz';
+  const digits  = '23456789';
+  const special = '!@#$%^&*';
+  const all     = upper + lower + digits + special;
+  const rand    = src => src[Math.floor(Math.random() * src.length)];
+  const chars   = [rand(upper), rand(lower), rand(digits), rand(special)];
+  for (let i = 0; i < 6; i++) chars.push(rand(all));
+  for (let i = chars.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [chars[i], chars[j]] = [chars[j], chars[i]];
+  }
+  return chars.join('');
 };
 
 function Spinner({ cols = 6 }) {
@@ -103,7 +128,10 @@ export default function UserManagement() {
   const [editMsg,      setEditMsg]      = useState('');
   const [showCreate,   setShowCreate]   = useState(false);
   const [createMsg,    setCreateMsg]    = useState('');
-  const [createErr,    setCreateErr]    = useState('');
+  const [nameErr,      setNameErr]      = useState('');
+  const [emailErr,     setEmailErr]     = useState('');
+  const [passwordErr,  setPasswordErr]  = useState('');
+  const [subjectsErr,  setSubjectsErr]  = useState('');
   const [creating,     setCreating]     = useState(false);
 
   const [form, setForm]   = useState({ name: '', email: '', password: '', role: 'Lecturer', subjects: [] });
@@ -161,12 +189,13 @@ export default function UserManagement() {
   };
 
   const handleCreate = async () => {
-    setCreateErr('');
-    if (!form.name.trim())        return setCreateErr('Full name is required.');
-    if (!form.email.trim())       return setCreateErr('Email is required.');
-    if (form.password.length < 6) return setCreateErr('Password must be at least 6 characters.');
-    if (form.role === 'Lecturer' && !form.subjects.length)
-      return setCreateErr('At least one subject must be selected for a Lecturer.');
+    setNameErr(''); setEmailErr(''); setPasswordErr(''); setSubjectsErr('');
+    let hasErr = false;
+    if (!form.name.trim())         { setNameErr('Full name is required.'); hasErr = true; }
+    if (!isValidEmail(form.email)) { setEmailErr('Please enter a valid email address (e.g. john.smith@koi.edu.au).'); hasErr = true; }
+    if (form.password.length < 10) { setPasswordErr('Password must be at least 10 characters.'); hasErr = true; }
+    if (form.role === 'Lecturer' && !form.subjects.length) { setSubjectsErr('At least one subject must be selected for a Lecturer.'); hasErr = true; }
+    if (hasErr) return;
 
     setCreating(true);
     try {
@@ -181,7 +210,7 @@ export default function UserManagement() {
       setForm({ name: '', email: '', password: '', role: 'Lecturer', subjects: [] });
       setTimeout(() => { setShowCreate(false); setCreateMsg(''); }, 3000);
     } catch (err) {
-      setCreateErr(err.response?.data?.detail || 'Failed to create account.');
+      setEmailErr(err.response?.data?.detail || 'Failed to create account.');
     } finally {
       setCreating(false);
     }
@@ -199,6 +228,8 @@ export default function UserManagement() {
     );
   };
 
+  const canCreate = isValidEmail(form.email) && Boolean(form.name.trim()) && form.password.length > 0;
+
   if (!isSuperAdmin) return null;
 
   return (
@@ -211,7 +242,7 @@ export default function UserManagement() {
           <h1 style={s.pageTitle}>User Management</h1>
           <p style={s.pageSub}>Create and manage user accounts</p>
         </div>
-        <button style={s.createBtn} onClick={() => { setShowCreate(o => !o); setCreateErr(''); setCreateMsg(''); }}>
+        <button style={s.createBtn} onClick={() => { setShowCreate(o => !o); setNameErr(''); setEmailErr(''); setPasswordErr(''); setSubjectsErr(''); setCreateMsg(''); }}>
           {showCreate ? '✕ Cancel' : '+ Create New User'}
         </button>
       </div>
@@ -224,11 +255,28 @@ export default function UserManagement() {
           <div style={s.formGrid}>
             <div style={s.formField}>
               <label style={s.label}>Full Name *</label>
-              <input style={s.input} value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} placeholder="Dr. Jane Smith" />
+              <input style={s.input} value={form.name} onChange={e => { setForm(f => ({ ...f, name: e.target.value })); setNameErr(''); }} placeholder="Dr. Jane Smith" />
+              {nameErr && <span style={s.fieldErr}>{nameErr}</span>}
             </div>
             <div style={s.formField}>
-              <label style={s.label}>Email / Staff ID *</label>
-              <input style={s.input} value={form.email} onChange={e => setForm(f => ({ ...f, email: e.target.value }))} placeholder="jane.smith" />
+              <label style={s.label}>Email *</label>
+              <div style={{ position: 'relative' }}>
+                <input
+                  style={{ ...s.input, paddingRight: isValidEmail(form.email) ? 32 : undefined }}
+                  value={form.email}
+                  onChange={e => { setForm(f => ({ ...f, email: e.target.value })); setEmailErr(''); }}
+                  placeholder="e.g. john.smith@koi.edu.au"
+                />
+                {isValidEmail(form.email) && (
+                  <span style={{ position: 'absolute', right: 10, top: '50%', transform: 'translateY(-50%)', color: '#059669', fontWeight: 700, fontSize: 14, pointerEvents: 'none' }}>✓</span>
+                )}
+              </div>
+              {form.email && !isValidEmail(form.email) && (
+                <span style={{ fontSize: 11, color: '#DC2626', marginTop: 3, display: 'block' }}>
+                  Enter a valid email (e.g. john.smith@koi.edu.au)
+                </span>
+              )}
+              {emailErr && <span style={s.fieldErr}>{emailErr}</span>}
             </div>
             <div style={s.formField}>
               <label style={s.label}>Role *</label>
@@ -239,6 +287,7 @@ export default function UserManagement() {
               >
                 <option value="Lecturer">Lecturer</option>
                 <option value="Head of Technology">Head of Technology</option>
+                <option value="Head of School">Head of School</option>
               </select>
             </div>
             <div style={{ ...s.formField, gridColumn: '1 / -1' }}>
@@ -249,8 +298,8 @@ export default function UserManagement() {
                     type={showPwd ? 'text' : 'password'}
                     style={{ ...s.input, paddingRight: 40 }}
                     value={form.password}
-                    onChange={e => setForm(f => ({ ...f, password: e.target.value }))}
-                    placeholder="Min 6 characters"
+                    onChange={e => { setForm(f => ({ ...f, password: e.target.value })); setPasswordErr(''); }}
+                    placeholder="Min 10 characters"
                   />
                   <button type="button" onClick={() => setShowPwd(v => !v)}
                     style={{ position: 'absolute', right: 10, top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', cursor: 'pointer', fontSize: 14 }}>
@@ -261,6 +310,25 @@ export default function UserManagement() {
                   Auto-generate
                 </button>
               </div>
+              {form.password && (
+                <div style={{ marginTop: 8 }}>
+                  {[
+                    { label: 'At least 10 characters',  met: form.password.length >= 10 },
+                    { label: 'One uppercase letter',     met: /[A-Z]/.test(form.password) },
+                    { label: 'One lowercase letter',     met: /[a-z]/.test(form.password) },
+                    { label: 'One number',              met: /[0-9]/.test(form.password) },
+                    { label: 'One special character',   met: /[^A-Za-z0-9]/.test(form.password) },
+                  ].map((c, i) => (
+                    <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 3 }}>
+                      <span style={{ width: 13, height: 13, borderRadius: '50%', border: `1.5px solid ${c.met ? '#059669' : '#C5D2DC'}`, background: c.met ? '#059669' : 'transparent', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                        {c.met && <span style={{ color: '#fff', fontSize: 8, fontWeight: 700, lineHeight: 1 }}>✓</span>}
+                      </span>
+                      <span style={{ fontSize: 11, color: c.met ? '#059669' : '#64748B' }}>{c.label}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {passwordErr && <span style={s.fieldErr}>{passwordErr}</span>}
             </div>
           </div>
 
@@ -269,21 +337,28 @@ export default function UserManagement() {
               <label style={s.label}>Assigned Subjects * <span style={{ color: '#8BA5B8', fontWeight: 400 }}>(required for Lecturer)</span></label>
               <SubjectMultiSelect
                 value={form.subjects}
-                onChange={v => setForm(f => ({ ...f, subjects: v }))}
+                onChange={v => { setForm(f => ({ ...f, subjects: v })); setSubjectsErr(''); }}
                 allSubjects={allSubjects}
                 placeholder="Select subjects…"
               />
+              {subjectsErr && <span style={s.fieldErr}>{subjectsErr}</span>}
             </div>
           )}
 
-          {createErr && <div style={s.errMsg}>{createErr}</div>}
+          {form.role === 'Head of School' && (
+            <div style={{ marginTop: 16 }}>
+              <label style={s.label}>Assigned Subjects</label>
+              <input style={{ ...s.input, background: '#F0FDF4', color: '#065F46', border: '0.5px solid #6EE7B7' }} value="All subjects auto-assigned" disabled />
+            </div>
+          )}
+
           {createMsg && <div style={s.successMsg}>{createMsg}</div>}
 
           <div style={{ display: 'flex', gap: 12, marginTop: 16 }}>
-            <button style={{ ...s.createBtn, opacity: creating ? 0.6 : 1 }} disabled={creating} onClick={handleCreate}>
+            <button style={{ ...s.createBtn, opacity: (creating || !canCreate) ? 0.6 : 1 }} disabled={creating || !canCreate} onClick={handleCreate}>
               {creating ? 'Creating…' : 'Create Account'}
             </button>
-            <button style={s.cancelLink} onClick={() => { setShowCreate(false); setCreateErr(''); setCreateMsg(''); }}>Cancel</button>
+            <button style={s.cancelLink} onClick={() => { setShowCreate(false); setNameErr(''); setEmailErr(''); setPasswordErr(''); setSubjectsErr(''); setCreateMsg(''); }}>Cancel</button>
           </div>
         </div>
       )}
@@ -433,7 +508,7 @@ const s = {
     fontSize: 12, fontWeight: 500, cursor: 'pointer', whiteSpace: 'nowrap',
   },
 
-  errMsg:     { background: '#FCEBEB', border: '0.5px solid #F09595', color: '#A32D2D', borderRadius: 8, padding: '10px 16px', fontSize: 13, marginTop: 12 },
+  fieldErr:   { fontSize: 11, color: '#DC2626', marginTop: 3, display: 'block' },
   successMsg: { background: '#E1F5EE', border: '0.5px solid #5DCAA5', color: '#0F6E56', borderRadius: 8, padding: '10px 16px', fontSize: 13, marginTop: 12 },
 
   roleBadge: { display: 'inline-block', padding: '3px 10px', borderRadius: 20, border: '0.5px solid', fontSize: 12, fontWeight: 500, whiteSpace: 'nowrap' },

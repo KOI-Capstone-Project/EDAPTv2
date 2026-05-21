@@ -17,6 +17,8 @@ EDAPT v2 is a role-based academic analytics platform. It lets **Lecturers** expl
 | Frontend    | React 18 · React Router v6 · Recharts · Axios   |
 | Styling     | Inline styles (no CSS framework)                 |
 
+> Note: The app currently uses in-memory storage. The PostgreSQL service in docker-compose.yml is configured for future database integration.
+
 > **No database required.** All student data is loaded from a CSV/XLSX file into an in-memory pandas DataFrame at runtime. User accounts are stored in memory and reset on server restart.
 
 ---
@@ -157,9 +159,7 @@ App available at: `http://localhost:3000`
 
 ## Default Login
 
-| Email   | Password  | Role                 |
-|---------|-----------|----------------------|
-| `admin` | `admin123`| Head of Technology (super-admin) |
+See `.env.example` for default credentials.
 
 Use **User Management** (super-admin only) to create additional accounts for lecturers or other admin users.
 
