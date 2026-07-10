@@ -1,3 +1,4 @@
+// Audit log viewer for Head of Technology: filterable table of all system events.
 import { useState, useMemo, useEffect, useRef, useCallback } from 'react';
 import api from '../services/api';
 

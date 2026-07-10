@@ -1,7 +1,9 @@
+// Staff sign-in page with session-expired banner, email validation, and forgot-password link.
 import { useState, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import api from '../services/api';
-import { getToken, isAdmin } from '../utils/auth';
+import { getToken, isAdmin, STORAGE_TOKEN_KEY, STORAGE_USER_KEY } from '../utils/auth';
+import { SESSION_EXPIRED_KEY } from '../api/client';
 
 const EyeOpen = () => (
   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -53,6 +55,14 @@ export default function Login() {
   const [loading,          setLoading]          = useState(false);
   const [error,            setError]            = useState(null);
   const [emailBlurWarning, setEmailBlurWarning] = useState(null);
+  const [sessionExpired,   setSessionExpired]   = useState(false);
+
+  useEffect(() => {
+    if (sessionStorage.getItem(SESSION_EXPIRED_KEY) === '1') {
+      setSessionExpired(true);
+      sessionStorage.removeItem(SESSION_EXPIRED_KEY);
+    }
+  }, []);
 
   const handleEmailBlur = () => {
     if (!email) { setEmailBlurWarning(null); return; }
@@ -71,8 +81,8 @@ export default function Login() {
 
     try {
       const res = await api.post('/api/auth/login', { email, password });
-      localStorage.setItem('edapt_token', res.data.access_token);
-      localStorage.setItem('edapt_user',  JSON.stringify(res.data.user));
+      localStorage.setItem(STORAGE_TOKEN_KEY, res.data.access_token);
+      localStorage.setItem(STORAGE_USER_KEY,  JSON.stringify(res.data.user));
 
       if (['Head of Technology', 'Head of School'].includes(res.data.user.role)) {
         navigate('/dashboard/admin');
@@ -122,6 +132,12 @@ export default function Login() {
           <p style={s.cardTitle}>Staff Sign In</p>
           <p style={s.cardSub}>Enter your credentials to continue</p>
 
+          {sessionExpired && (
+            <div style={s.sessionBanner} role="alert">
+              ⚠ Your session has expired. Please sign in again.
+            </div>
+          )}
+
           <form onSubmit={handleSubmit} style={s.form}>
 
             <div style={s.field}>
@@ -164,6 +180,9 @@ export default function Login() {
                 >
                   {showPassword ? <EyeOpen /> : <EyeClosed />}
                 </button>
+              </div>
+              <div style={{ textAlign: 'right', marginTop: 4 }}>
+                <Link to="/forgot-password" style={s.forgotLink}>Forgot password?</Link>
               </div>
             </div>
 
@@ -313,6 +332,17 @@ const s = {
     color: '#94A3B8', display: 'flex', alignItems: 'center', padding: 2,
   },
 
+  sessionBanner: {
+    background: '#FFFBEB',
+    border: '1px solid #FCD34D',
+    color: '#92400E',
+    borderRadius: 8,
+    padding: '10px 14px',
+    fontSize: 13,
+    fontWeight: 500,
+    marginBottom: 4,
+  },
+
   errorBanner: {
     display: 'flex', alignItems: 'center', gap: 8,
     background: '#FEF2F2',
@@ -333,5 +363,11 @@ const s = {
     cursor: 'pointer',
     transition: 'opacity 0.15s',
     marginTop: 4,
+  },
+
+  forgotLink: {
+    fontSize: 12,
+    color: '#2E6E8E',
+    textDecoration: 'none',
   },
 };

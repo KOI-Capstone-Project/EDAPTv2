@@ -1,3 +1,4 @@
+// Fallback page shown when a route is unavailable for the current role.
 import { useNavigate } from 'react-router-dom';
 
 export default function PageUnavailable({ role = 'lecturer' }) {

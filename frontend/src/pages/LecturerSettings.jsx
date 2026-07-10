@@ -1,3 +1,4 @@
+// Lecturer settings: profile editor and password change.
 import { useState, useRef } from 'react';
 import { getUser, getUserName, getUserInitials } from '../utils/auth';
 import api from '../services/api';

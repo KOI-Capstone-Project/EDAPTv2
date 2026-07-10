@@ -1,3 +1,4 @@
+// Lecturer student explorer: searchable, paginated assessment record table.
 import { useState, useEffect, useCallback } from 'react';
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,

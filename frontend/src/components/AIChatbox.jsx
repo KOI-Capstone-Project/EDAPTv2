@@ -1,3 +1,4 @@
+// Floating AI assistant widget with Chat and Insights tabs powered by Gemini.
 import { useState, useRef, useEffect } from 'react';
 import { getUser } from '../utils/auth';
 import api from '../services/api';

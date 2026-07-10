@@ -1,3 +1,4 @@
+// Lecturer AI insights page wrapping the GeminiPanel for per-subject analysis.
 import { useState, useEffect } from 'react';
 import GeminiPanel from '../components/GeminiPanel';
 import api from '../services/api';

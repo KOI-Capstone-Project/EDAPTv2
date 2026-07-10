@@ -1,3 +1,4 @@
+// Role-aware navigation sidebar with user avatar, nav links, and logout button.
 import { useState } from 'react';
 import { NavLink } from 'react-router-dom';
 import { getUser, getUserName, getUserInitials } from '../utils/auth';

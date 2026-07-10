@@ -1,0 +1,130 @@
+SUBJECTCODE,RELIABILITY_CATEGORY,TOTAL_PERIODS,CLEAN_PERIODS,CLEAN_PERCENTAGE,RECOMMENDATION
+ACC200,FULLY_CLEAN,8,8,100.0,Safe for prediction — no warning required
+ACC203,FULLY_CLEAN,8,8,100.0,Safe for prediction — no warning required
+ACC301,FULLY_CLEAN,8,8,100.0,Safe for prediction — no warning required
+ACC303,FULLY_CLEAN,8,8,100.0,Safe for prediction — no warning required
+ACC700,FULLY_CLEAN,9,9,100.0,Safe for prediction — no warning required
+ACC703,FULLY_CLEAN,8,8,100.0,Safe for prediction — no warning required
+ACC704,FULLY_CLEAN,9,9,100.0,Safe for prediction — no warning required
+ACC706,FULLY_CLEAN,8,8,100.0,Safe for prediction — no warning required
+ACC707,FULLY_CLEAN,8,8,100.0,Safe for prediction — no warning required
+ACC708,FULLY_CLEAN,8,8,100.0,Safe for prediction — no warning required
+BUS100,FULLY_CLEAN,9,9,100.0,Safe for prediction — no warning required
+BUS101,FULLY_CLEAN,8,8,100.0,Safe for prediction — no warning required
+BUS105,FULLY_CLEAN,9,9,100.0,Safe for prediction — no warning required
+BUS200,FULLY_CLEAN,8,8,100.0,Safe for prediction — no warning required
+BUS300,FULLY_CLEAN,8,8,100.0,Safe for prediction — no warning required
+BUS700,FULLY_CLEAN,9,9,100.0,Safe for prediction — no warning required
+BUS702,FULLY_CLEAN,8,8,100.0,Safe for prediction — no warning required
+BUS709,FULLY_CLEAN,9,9,100.0,Safe for prediction — no warning required
+ECO100,FULLY_CLEAN,8,8,100.0,Safe for prediction — no warning required
+FIN200,FULLY_CLEAN,8,8,100.0,Safe for prediction — no warning required
+FIN201,FULLY_CLEAN,8,8,100.0,Safe for prediction — no warning required
+FIN203,FULLY_CLEAN,8,8,100.0,Safe for prediction — no warning required
+FIN300,FULLY_CLEAN,2,2,100.0,Safe for prediction — no warning required
+FIN700,FULLY_CLEAN,8,8,100.0,Safe for prediction — no warning required
+ICT201,FULLY_CLEAN,8,8,100.0,Safe for prediction — no warning required
+ICT203,FULLY_CLEAN,8,8,100.0,Safe for prediction — no warning required
+ICT205,FULLY_CLEAN,8,8,100.0,Safe for prediction — no warning required
+ICT275,FULLY_CLEAN,8,8,100.0,Safe for prediction — no warning required
+ICT304,FULLY_CLEAN,8,8,100.0,Safe for prediction — no warning required
+ICT371,FULLY_CLEAN,8,8,100.0,Safe for prediction — no warning required
+ICT700,FULLY_CLEAN,8,8,100.0,Safe for prediction — no warning required
+ICT710,FULLY_CLEAN,9,9,100.0,Safe for prediction — no warning required
+ICT711,FULLY_CLEAN,8,8,100.0,Safe for prediction — no warning required
+ICT712,FULLY_CLEAN,9,9,100.0,Safe for prediction — no warning required
+ICT723,FULLY_CLEAN,8,8,100.0,Safe for prediction — no warning required
+ICT729,FULLY_CLEAN,8,8,100.0,Safe for prediction — no warning required
+ICT734,FULLY_CLEAN,1,1,100.0,Safe for prediction — no warning required
+ICT750,FULLY_CLEAN,7,7,100.0,Safe for prediction — no warning required
+ICT762,FULLY_CLEAN,6,6,100.0,Safe for prediction — no warning required
+MBA902,FULLY_CLEAN,7,7,100.0,Safe for prediction — no warning required
+MBA908,FULLY_CLEAN,5,5,100.0,Safe for prediction — no warning required
+MBA911,FULLY_CLEAN,4,4,100.0,Safe for prediction — no warning required
+MGT200,FULLY_CLEAN,8,8,100.0,Safe for prediction — no warning required
+MGT203,FULLY_CLEAN,8,8,100.0,Safe for prediction — no warning required
+MGT300,FULLY_CLEAN,8,8,100.0,Safe for prediction — no warning required
+MGT302,FULLY_CLEAN,8,8,100.0,Safe for prediction — no warning required
+MGT700,FULLY_CLEAN,8,8,100.0,Safe for prediction — no warning required
+TSL700,FULLY_CLEAN,8,8,100.0,Safe for prediction — no warning required
+TSL701,FULLY_CLEAN,1,1,100.0,Safe for prediction — no warning required
+TSL702,FULLY_CLEAN,7,7,100.0,Safe for prediction — no warning required
+TSL703,FULLY_CLEAN,2,2,100.0,Safe for prediction — no warning required
+TSL705,FULLY_CLEAN,7,7,100.0,Safe for prediction — no warning required
+TSL711,FULLY_CLEAN,3,3,100.0,Safe for prediction — no warning required
+TSL712,FULLY_CLEAN,4,4,100.0,Safe for prediction — no warning required
+TSL713,FULLY_CLEAN,8,8,100.0,Safe for prediction — no warning required
+TSL715,FULLY_CLEAN,8,8,100.0,Safe for prediction — no warning required
+TSL719,FULLY_CLEAN,7,7,100.0,Safe for prediction — no warning required
+TSL721,FULLY_CLEAN,1,1,100.0,Safe for prediction — no warning required
+BUS104,MOSTLY_CLEAN,8,6,75.0,Safe for prediction — show yellow warning on incomplete periods
+ICT101,MOSTLY_CLEAN,9,7,77.8,Safe for prediction — show yellow warning on incomplete periods
+ICT200,MOSTLY_CLEAN,8,6,75.0,Safe for prediction — show yellow warning on incomplete periods
+ICT301,MOSTLY_CLEAN,8,7,87.5,Safe for prediction — show yellow warning on incomplete periods
+ICT302,MOSTLY_CLEAN,8,7,87.5,Safe for prediction — show yellow warning on incomplete periods
+ICT703,MOSTLY_CLEAN,8,7,87.5,Safe for prediction — show yellow warning on incomplete periods
+ICT724,MOSTLY_CLEAN,9,8,88.9,Safe for prediction — show yellow warning on incomplete periods
+ACC100,UNRELIABLE,9,3,33.3,Exclude from prediction or show red warning — insufficient assessment data
+ACC101,UNRELIABLE,8,3,37.5,Exclude from prediction or show red warning — insufficient assessment data
+ACC201,UNRELIABLE,8,3,37.5,Exclude from prediction or show red warning — insufficient assessment data
+ACC202,UNRELIABLE,8,3,37.5,Exclude from prediction or show red warning — insufficient assessment data
+ACC204,UNRELIABLE,8,5,62.5,Exclude from prediction or show red warning — insufficient assessment data
+ACC300,UNRELIABLE,8,3,37.5,Exclude from prediction or show red warning — insufficient assessment data
+ACC701,UNRELIABLE,9,6,66.7,Exclude from prediction or show red warning — insufficient assessment data
+ACC702,UNRELIABLE,8,5,62.5,Exclude from prediction or show red warning — insufficient assessment data
+ACC705,UNRELIABLE,8,5,62.5,Exclude from prediction or show red warning — insufficient assessment data
+BUS302,UNRELIABLE,8,3,37.5,Exclude from prediction or show red warning — insufficient assessment data
+BUS303,UNRELIABLE,8,0,0.0,Exclude from prediction or show red warning — insufficient assessment data
+BUS304,UNRELIABLE,8,2,25.0,Exclude from prediction or show red warning — insufficient assessment data
+BUS707,UNRELIABLE,9,0,0.0,Exclude from prediction or show red warning — insufficient assessment data
+BUS708,UNRELIABLE,9,5,55.6,Exclude from prediction or show red warning — insufficient assessment data
+BUS710,UNRELIABLE,8,0,0.0,Exclude from prediction or show red warning — insufficient assessment data
+ICT100,UNRELIABLE,9,6,66.7,Exclude from prediction or show red warning — insufficient assessment data
+ICT102,UNRELIABLE,9,1,11.1,Exclude from prediction or show red warning — insufficient assessment data
+ICT103,UNRELIABLE,9,5,55.6,Exclude from prediction or show red warning — insufficient assessment data
+ICT104,UNRELIABLE,9,6,66.7,Exclude from prediction or show red warning — insufficient assessment data
+ICT106,UNRELIABLE,9,3,33.3,Exclude from prediction or show red warning — insufficient assessment data
+ICT204,UNRELIABLE,8,0,0.0,Exclude from prediction or show red warning — insufficient assessment data
+ICT272,UNRELIABLE,8,4,50.0,Exclude from prediction or show red warning — insufficient assessment data
+ICT274,UNRELIABLE,8,1,12.5,Exclude from prediction or show red warning — insufficient assessment data
+ICT303,UNRELIABLE,8,5,62.5,Exclude from prediction or show red warning — insufficient assessment data
+ICT370,UNRELIABLE,8,0,0.0,Exclude from prediction or show red warning — insufficient assessment data
+ICT372,UNRELIABLE,8,4,50.0,Exclude from prediction or show red warning — insufficient assessment data
+ICT373,UNRELIABLE,8,0,0.0,Exclude from prediction or show red warning — insufficient assessment data
+ICT701,UNRELIABLE,8,5,62.5,Exclude from prediction or show red warning — insufficient assessment data
+ICT702,UNRELIABLE,8,0,0.0,Exclude from prediction or show red warning — insufficient assessment data
+ICT713,UNRELIABLE,9,6,66.7,Exclude from prediction or show red warning — insufficient assessment data
+ICT722,UNRELIABLE,8,3,37.5,Exclude from prediction or show red warning — insufficient assessment data
+ICT725,UNRELIABLE,8,1,12.5,Exclude from prediction or show red warning — insufficient assessment data
+ICT726,UNRELIABLE,8,5,62.5,Exclude from prediction or show red warning — insufficient assessment data
+ICT728,UNRELIABLE,8,0,0.0,Exclude from prediction or show red warning — insufficient assessment data
+ICT730,UNRELIABLE,5,0,0.0,Exclude from prediction or show red warning — insufficient assessment data
+ICT731,UNRELIABLE,8,5,62.5,Exclude from prediction or show red warning — insufficient assessment data
+ICT732,UNRELIABLE,8,0,0.0,Exclude from prediction or show red warning — insufficient assessment data
+ICT733,UNRELIABLE,7,4,57.1,Exclude from prediction or show red warning — insufficient assessment data
+ICT740,UNRELIABLE,8,0,0.0,Exclude from prediction or show red warning — insufficient assessment data
+ICT741,UNRELIABLE,8,0,0.0,Exclude from prediction or show red warning — insufficient assessment data
+ICT742,UNRELIABLE,8,5,62.5,Exclude from prediction or show red warning — insufficient assessment data
+ICT743,UNRELIABLE,8,3,37.5,Exclude from prediction or show red warning — insufficient assessment data
+ICT751,UNRELIABLE,7,0,0.0,Exclude from prediction or show red warning — insufficient assessment data
+ICT752,UNRELIABLE,5,0,0.0,Exclude from prediction or show red warning — insufficient assessment data
+ICT753,UNRELIABLE,6,0,0.0,Exclude from prediction or show red warning — insufficient assessment data
+ICT761,UNRELIABLE,7,2,28.6,Exclude from prediction or show red warning — insufficient assessment data
+ICT772,UNRELIABLE,5,0,0.0,Exclude from prediction or show red warning — insufficient assessment data
+MBA901,UNRELIABLE,7,0,0.0,Exclude from prediction or show red warning — insufficient assessment data
+MBA903,UNRELIABLE,7,0,0.0,Exclude from prediction or show red warning — insufficient assessment data
+MBA904,UNRELIABLE,6,0,0.0,Exclude from prediction or show red warning — insufficient assessment data
+MBA905,UNRELIABLE,6,0,0.0,Exclude from prediction or show red warning — insufficient assessment data
+MBA906,UNRELIABLE,6,0,0.0,Exclude from prediction or show red warning — insufficient assessment data
+MBA907,UNRELIABLE,5,0,0.0,Exclude from prediction or show red warning — insufficient assessment data
+MBA909,UNRELIABLE,5,0,0.0,Exclude from prediction or show red warning — insufficient assessment data
+MBA910,UNRELIABLE,5,0,0.0,Exclude from prediction or show red warning — insufficient assessment data
+MBA912,UNRELIABLE,5,0,0.0,Exclude from prediction or show red warning — insufficient assessment data
+MGT100,UNRELIABLE,8,2,25.0,Exclude from prediction or show red warning — insufficient assessment data
+MGT201,UNRELIABLE,4,0,0.0,Exclude from prediction or show red warning — insufficient assessment data
+TSL704,UNRELIABLE,6,4,66.7,Exclude from prediction or show red warning — insufficient assessment data
+TSL709,UNRELIABLE,3,0,0.0,Exclude from prediction or show red warning — insufficient assessment data
+TSL716,UNRELIABLE,3,0,0.0,Exclude from prediction or show red warning — insufficient assessment data
+TSL717,UNRELIABLE,2,1,50.0,Exclude from prediction or show red warning — insufficient assessment data
+TSL718,UNRELIABLE,8,0,0.0,Exclude from prediction or show red warning — insufficient assessment data
+TSL720,UNRELIABLE,7,0,0.0,Exclude from prediction or show red warning — insufficient assessment data

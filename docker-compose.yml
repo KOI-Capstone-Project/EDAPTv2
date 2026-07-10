@@ -41,10 +41,13 @@ services:
     restart: unless-stopped
     env_file: .env
     environment:
-      DATABASE_URL: ${DATABASE_URL}
-      ENVIRONMENT:  development
+      DATABASE_URL:      ${DATABASE_URL}
+      ENVIRONMENT:       development
+      GEMINI_API_KEY:    ${GEMINI_API_KEY}
+      PYTHONUNBUFFERED:  "1"
     volumes:
       - ./backend:/app          # hot-reload: source mounted into container
+      - ./data:/data:ro         # CSV datasets for startup auto-load
     ports:
       - "8000:8000"
     depends_on:

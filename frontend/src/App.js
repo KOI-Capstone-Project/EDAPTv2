@@ -1,9 +1,13 @@
+// EDAPT v2 Frontend — route configuration and auth guards.
+// Protected routes require valid JWT token. Public routes: /login and /forgot-password only.
+
 import { Routes, Route, Navigate } from 'react-router-dom';
 import Layout from './components/Layout';
 import ErrorBoundary from './components/ErrorBoundary';
 
 // Pages
 import Login              from './pages/Login';
+import ForgotPassword     from './pages/ForgotPassword';
 import LecturerDashboard  from './pages/LecturerDashboard';
 import AdminDashboard     from './pages/AdminDashboard';
 import DataIngestion      from './pages/DataIngestion';
@@ -81,7 +85,8 @@ export default function App() {
   return (
     <Routes>
       {/* Public */}
-      <Route path="/login" element={<Login />} />
+      <Route path="/login"           element={<Login />} />
+      <Route path="/forgot-password" element={<ForgotPassword />} />
 
       {/* Root → login */}
       <Route path="/" element={<Navigate to="/login" replace />} />
