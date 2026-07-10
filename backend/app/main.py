@@ -1,3 +1,6 @@
+# EDAPT v2 Backend — King's Own Institute Capstone 2026.
+# For production deployment see SECURITY.md for known limitations and required infrastructure changes.
+
 """
 EDAPT v2 — FastAPI Backend (self-contained)
 
@@ -7,12 +10,16 @@ Dashboard: 8 endpoints that slice _DATA by role + query filters.
 """
 
 import asyncio
+from datetime import datetime, timedelta, timezone
+from email.mime.text import MIMEText
 import io
+import json
 import logging
 import math
 import os
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import secrets
+import smtplib
 from typing import Annotated, Optional
 
 import joblib
@@ -25,7 +32,7 @@ from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 from pydantic import BaseModel, Field, StringConstraints, field_validator
-from sqlalchemy import select, desc
+from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -33,58 +40,109 @@ from app.db.models import AuditLog, Base, User as UserModel
 
 load_dotenv()
 
-# ── Config ────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# Constants
+# ─────────────────────────────────────────────────────────────────────────────
 
-SECRET_KEY           = os.getenv("SECRET_KEY", "edapt-dev-secret-key-change-in-production")
+SECRET_KEY:           str       = os.getenv("SECRET_KEY", "edapt-dev-secret-key-change-in-production")
 if SECRET_KEY == "edapt-dev-secret-key-change-in-production":
     logging.getLogger(__name__).warning(
-        "SECRET_KEY is set to the insecure default dev value — set a strong SECRET_KEY env var before deploying"
+        "SECRET_KEY is set to the insecure default dev value — "
+        "set a strong SECRET_KEY env var before deploying"
     )
-ALGORITHM            = "HS256"
-TOKEN_EXPIRE_MINUTES = 480
-CORS_ORIGINS         = ["http://localhost:3000", "http://localhost:5173", "http://localhost:80", "http://127.0.0.1:3000", "http://127.0.0.1:5173"]
+ALGORITHM:            str       = "HS256"
+TOKEN_EXPIRE_MINUTES: int       = 480
+CORS_ORIGINS:         list[str] = [
+    "http://localhost:3000",    "http://localhost:5173",
+    "http://localhost:80",      "http://127.0.0.1:3000",
+    "http://127.0.0.1:5173",
+]
+GMAIL_SENDER:         str       = os.getenv("GMAIL_SENDER", "")
+GMAIL_APP_PASSWORD:   str       = os.getenv("GMAIL_APP_PASSWORD", "")
+MAX_ATTEMPTS:         int       = 5
+LOCKOUT_MINUTES:      int       = 15
+OTP_EXPIRY_MINUTES:   int       = 10
+MAX_UPLOAD_BYTES:     int       = 50 * 1024 * 1024
 
 # ── ML model (loaded once at startup) ────────────────────────────────────────
 
-_ML_DIR  = Path(__file__).parent / "ml"
-_MODEL   = None
-_SUBJ_DIFFICULTY: dict = {}
-_MODEL_NAME     = "Random Forest"
-_MODEL_ACCURACY = 0.0
-_MEDIAN_ASSESS2 = 60.0
+_ML_DIR:         Path            = Path(__file__).parent / "ml"
+_MODEL_NAME:      str            = "Random Forest"
+_MODEL_ACCURACY:  float          = 0.0
+_SAFE_SUBJECTS:   list[str]      = []
 
 try:
-    _MODEL            = joblib.load(_ML_DIR / "best_model.pkl")
-    _SUBJ_DIFFICULTY  = joblib.load(_ML_DIR / "subject_difficulty.pkl")
-    _meta             = joblib.load(_ML_DIR / "model_meta.pkl")
-    _MODEL_NAME       = _meta.get("name", "Random Forest")
-    _MODEL_ACCURACY   = _meta.get("accuracy", 0.0)
-    _MEDIAN_ASSESS2   = _meta.get("median_assess2", 60.0)
-except Exception:
-    pass  # model not yet trained — /api/predict returns 503
+    _model_package    = joblib.load(_ML_DIR / "best_model.pkl")
+    _MODEL_NAME       = _model_package.get("model_name", "Random Forest")
+    _MODEL_ACCURACY   = _model_package.get("accuracy", 0.0)
+    _SAFE_SUBJECTS    = _model_package.get("safe_subjects", [])
+    print(f"[EDAPT] ML model loaded: {_MODEL_NAME} (accuracy {_MODEL_ACCURACY:.4f}, "
+          f"{len(_SAFE_SUBJECTS)} safe subjects)")
+except Exception as _e:
+    print(f"[EDAPT] WARNING: ML model not loaded — {_e}. Run train_model.py first.")
+
+# ── Subject reliability (loaded once at startup) ─────────────────────────────
+
+_RELIABILITY_PATH = Path(__file__).parent.parent.parent / "data" / "subject_reliability.json"
+_SUBJECT_RELIABILITY: dict = {"fully_clean": [], "mostly_clean": [], "unreliable": []}
+
+try:
+    with open(_RELIABILITY_PATH) as _f:
+        _SUBJECT_RELIABILITY = json.load(_f)
+except Exception as _e:
+    print(f"[EDAPT] WARNING: subject_reliability.json not loaded — {_e}")
+
+
+def _subject_reliability_category(subject: str) -> str:
+    """Classify a subject as fully_clean / mostly_clean / unreliable per subject_reliability.json.
+
+    Subjects absent from all three lists default to unreliable — no evidence of
+    data quality means predictions should not be served for them.
+    """
+    if subject in _SUBJECT_RELIABILITY.get("fully_clean", []):
+        return "fully_clean"
+    if subject in _SUBJECT_RELIABILITY.get("mostly_clean", []):
+        return "mostly_clean"
+    return "unreliable"
 
 # ── Gemini ────────────────────────────────────────────────────────────────────
 
-_flash_model = None
-_pro_model   = None
+class ResourceExhausted(Exception):
+    """Fallback stand-in used if google.api_core is unavailable at import time."""
+
+_flash_model               = None
+_pro_model                 = None
 _GEMINI_TOKEN_LOG: list[dict] = []
 
 try:
     import google.generativeai as _genai
+    from google.api_core.exceptions import ResourceExhausted
     _gemini_key = os.getenv("GEMINI_API_KEY", "")
     if _gemini_key and "your-gemini" not in _gemini_key:
         _genai.configure(api_key=_gemini_key)
         _flash_model = _genai.GenerativeModel("gemini-1.5-flash")
         _pro_model   = _genai.GenerativeModel("gemini-1.5-pro")
-except Exception:
-    pass  # Gemini unavailable — endpoints return fallback text
+        print("[EDAPT] Gemini API configured successfully")
+    else:
+        print("[EDAPT] WARNING: Gemini API key not configured")
+except Exception as _e:
+    print(f"[EDAPT] WARNING: Gemini API key not configured — {_e}")
 
-# ── Auth ──────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# In-Memory State
+# ─────────────────────────────────────────────────────────────────────────────
 
-_pwd = CryptContext(schemes=["bcrypt"], deprecated="auto")
+_pwd             = CryptContext(schemes=["bcrypt"], deprecated="auto")
+_REVOKED_TOKENS: set[str]        = set()
+_OTP_STORE:      dict[str, dict] = {}   # email → {otp, expires_at}
+_FAILED_LOGINS:  dict[str, list] = {}
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Password and Security Helpers
+# ─────────────────────────────────────────────────────────────────────────────
 
 def _validate_password(password: str) -> None:
+    """Enforce the 5-part password policy; raises HTTPException(400) on failure."""
     if len(password) < 10:
         raise HTTPException(400, "Password must be at least 10 characters.")
     if not any(c.isupper() for c in password):
@@ -93,21 +151,19 @@ def _validate_password(password: str) -> None:
         raise HTTPException(400, "Password must contain at least one lowercase letter.")
     if not any(c.isdigit() for c in password):
         raise HTTPException(400, "Password must contain at least one number.")
-
-
-_REVOKED_TOKENS: set[str] = set()
-
-_FAILED_LOGINS: dict[str, list] = {}
-_MAX_ATTEMPTS    = 5
-_LOCKOUT_MINUTES = 15
+    if not any(not c.isalnum() for c in password):
+        raise HTTPException(400, "Password must contain at least one special character.")
 
 
 def _check_lockout(email: str) -> None:
-    cutoff  = datetime.now(timezone.utc) - timedelta(minutes=_LOCKOUT_MINUTES)
-    recent  = [t for t in _FAILED_LOGINS.get(email, []) if t > cutoff]
+    """Raise HTTP 429 if the account has hit MAX_ATTEMPTS failures within LOCKOUT_MINUTES."""
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=LOCKOUT_MINUTES)
+    recent = [t for t in _FAILED_LOGINS.get(email, []) if t > cutoff]
     _FAILED_LOGINS[email] = recent
-    if len(recent) >= _MAX_ATTEMPTS:
-        wait = _LOCKOUT_MINUTES - int((datetime.now(timezone.utc) - min(recent)).total_seconds() / 60)
+    if len(recent) >= MAX_ATTEMPTS:
+        wait = LOCKOUT_MINUTES - int(
+            (datetime.now(timezone.utc) - min(recent)).total_seconds() / 60
+        )
         raise HTTPException(
             status_code=429,
             detail=f"Too many failed attempts. Try again in {max(1, wait)} minute(s).",
@@ -115,21 +171,62 @@ def _check_lockout(email: str) -> None:
 
 
 def _record_failed_attempt(email: str) -> None:
+    """Append a timestamped failed-login entry for the given email."""
     _FAILED_LOGINS.setdefault(email, []).append(datetime.now(timezone.utc))
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Email and OTP Helpers
+# ─────────────────────────────────────────────────────────────────────────────
 
-# ── In-memory data store ──────────────────────────────────────────────────────
+def _send_otp_email(to_email: str, otp: str) -> None:
+    """Send OTP via Gmail SMTP. Raises RuntimeError if email service is not configured."""
+    if not GMAIL_SENDER or not GMAIL_APP_PASSWORD:
+        raise RuntimeError("Email service not configured")
+    msg = MIMEText(
+        f"Your EDAPT password reset code is: {otp}\n\n"
+        f"This code expires in {OTP_EXPIRY_MINUTES} minutes.\n\n"
+        "If you did not request a password reset, you can ignore this email.",
+        "plain",
+    )
+    msg["Subject"] = "EDAPT — Password Reset Code"
+    msg["From"]    = GMAIL_SENDER
+    msg["To"]      = to_email
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+        server.login(GMAIL_SENDER, GMAIL_APP_PASSWORD)
+        server.sendmail(GMAIL_SENDER, to_email, msg.as_string())
 
-# Global shared state — all roles read from this single DataFrame. Role filtering is applied
-# per request in _role_filter. Head of Technology and Head of School see all rows.
-# Lecturers see only rows matching their assigned subjects.
+
+def _generate_otp(email: str) -> str:
+    """Generate a 6-digit OTP, store it in _OTP_STORE keyed by email, and return the code."""
+    otp = "".join(secrets.choice("0123456789") for _ in range(6))
+    _OTP_STORE[email] = {
+        "otp":        otp,
+        "expires_at": datetime.now(timezone.utc) + timedelta(minutes=OTP_EXPIRY_MINUTES),
+    }
+    return otp
+
+
+def _verify_otp(email: str, code: str) -> bool:
+    """Verify a submitted OTP code. Deletes the entry on success; returns False on failure."""
+    entry = _OTP_STORE.get(email)
+    if not entry:
+        return False
+    if datetime.now(timezone.utc) >= entry["expires_at"]:
+        return False
+    if not secrets.compare_digest(entry["otp"], code):
+        return False
+    del _OTP_STORE[email]
+    return True
+
+# ── Data store ────────────────────────────────────────────────────────────────
+
+# Global shared state — all roles read from this single DataFrame. Role filtering is
+# applied per request in _role_filter. Head of Technology and Head of School see all
+# rows; Lecturers see only rows matching their assigned subjects.
 _DATA: Optional[pd.DataFrame] = pd.DataFrame()
 
-# ── Startup data load ─────────────────────────────────────────────────────────
-# This loads the bundled development dataset automatically on server start so the
-# demo works without a manual upload. The /api/ingest endpoint handles runtime
-# uploads and overwrites _DATA; both paths intentionally coexist.
-
+# Load the bundled development dataset on server start so the demo works without a
+# manual upload. The /api/ingest endpoint handles runtime uploads and overwrites _DATA.
 _DATA_PATH = Path(__file__).parent.parent.parent / "data" / "Capstone_data_20260324.csv"
 try:
     _df = pd.read_csv(_DATA_PATH)
@@ -144,7 +241,7 @@ try:
     _DATA = _df
     print(f"[EDAPT] Startup data loaded: {len(_DATA):,} rows, {len(_DATA.columns)} columns")
 except FileNotFoundError:
-    print(f"[EDAPT] No startup CSV found at {_DATA_PATH} — upload via /api/ingest")
+    print(f"[EDAPT] ERROR: startup CSV not found at {_DATA_PATH} — upload a dataset via /api/ingest")
 except Exception as _e:
     print(f"[EDAPT] ERROR loading startup data: {_e}")
 
@@ -154,11 +251,12 @@ _DB_URL = os.getenv(
     "DATABASE_URL",
     "postgresql+asyncpg://sangamgurung@localhost:5432/edapt",
 )
-_engine = create_async_engine(_DB_URL, echo=False, pool_pre_ping=True)
+_engine       = create_async_engine(_DB_URL, echo=False, pool_pre_ping=True)
 _AsyncSession = sessionmaker(_engine, class_=AsyncSession, expire_on_commit=False)
 
 
 async def get_db():
+    """Yield an async database session with automatic commit/rollback."""
     async with _AsyncSession() as session:
         try:
             yield session
@@ -176,11 +274,13 @@ async def _append_audit_db(
     status: str,
     detail: str,
 ) -> None:
+    """Write a single audit-log row to PostgreSQL and commit immediately."""
     db.add(AuditLog(user_uid=user_uid, action_type=action_type, status=status, detail=detail))
     await db.commit()
 
 
 async def _seed_default_users() -> None:
+    """Insert the three default demo accounts if the users table is empty."""
     async with _AsyncSession() as db:
         result = await db.execute(select(UserModel))
         if result.scalars().first() is not None:
@@ -192,6 +292,7 @@ async def _seed_default_users() -> None:
                 hashed_password=_pwd.hash("Admin@2025!"),
                 role="Head of Technology",
                 is_active=True,
+                is_super_admin=True,
                 subjects=[],
             ),
             UserModel(
@@ -200,6 +301,7 @@ async def _seed_default_users() -> None:
                 hashed_password=_pwd.hash("Lect@2025!"),
                 role="Lecturer",
                 is_active=True,
+                is_super_admin=False,
                 subjects=["ICT104", "ICT201", "ICT301"],
             ),
             UserModel(
@@ -208,6 +310,7 @@ async def _seed_default_users() -> None:
                 hashed_password=_pwd.hash("HoS@2025!"),
                 role="Head of School",
                 is_active=True,
+                is_super_admin=False,
                 subjects=[],
             ),
         ]
@@ -242,6 +345,7 @@ YEAR_TO_PERIODS = {
 # ── Dashboard helpers ─────────────────────────────────────────────────────────
 
 def _prev_period(period: str) -> Optional[str]:
+    """Return the period immediately before the given one, or None if it is the earliest."""
     try:
         idx = PERIODS_ORDER.index(str(period))
         return PERIODS_ORDER[idx - 1] if idx > 0 else None
@@ -260,9 +364,9 @@ def _role_filter(df: pd.DataFrame, user: dict) -> pd.DataFrame:
 
 def _query_filter(
     df: pd.DataFrame,
-    subject: Optional[str] = None,
-    trimester: Optional[str] = None,
-    year: Optional[str] = None,
+    subject:    Optional[str] = None,
+    trimester:  Optional[str] = None,
+    year:       Optional[str] = None,
     classgroup: Optional[str] = None,
 ) -> pd.DataFrame:
     """Apply URL query-param filters on top of role filtering."""
@@ -287,24 +391,41 @@ def _safe(val) -> Optional[float]:
     except (TypeError, ValueError):
         return None
 
-# ── Pydantic models ───────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# JWT Helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _create_token(payload: dict) -> str:
+    """Encode a JWT with an expiry field appended to the payload."""
+    data = payload.copy()
+    data["exp"] = datetime.now(timezone.utc) + timedelta(minutes=TOKEN_EXPIRE_MINUTES)
+    return jwt.encode(data, SECRET_KEY, algorithm=ALGORITHM)
+
+
+def _decode_token(token: str) -> dict:
+    """Decode and verify a JWT; raises JWTError on invalid or expired tokens."""
+    return jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Pydantic Models
+# ─────────────────────────────────────────────────────────────────────────────
 
 # Strict email pattern: localpart@domain.extension (extension ≥ 2 chars)
 _EMAIL_REGEX = r'^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z0-9]{2,}$'
 
-# OTP email verification to be implemented in production with SMTP integration.
+
 class LoginRequest(BaseModel):
     # Accepts both email addresses and plain staff IDs (e.g. "admin").
     # Pattern blocks unsafe characters without requiring full email format.
     email:    str = Field(..., max_length=254, pattern=r'^[a-zA-Z0-9._%+@\-]+$')
     password: str = Field(..., max_length=128)
 
-# OTP email verification to be implemented in production with SMTP integration.
+
 class CreateUserRequest(BaseModel):
     email:    str = Field(..., max_length=254, pattern=_EMAIL_REGEX)
     password: str
     name:     Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
-    role:     str = "Lecturer"
+    role:     str       = "Lecturer"
     subjects: list[str] = []
 
     @field_validator('email', mode='before')
@@ -314,31 +435,56 @@ class CreateUserRequest(BaseModel):
             return v.lower().strip()
         return v
 
+
+class _AssessmentEntry(BaseModel):
+    type:         str
+    mark_percent: float = Field(..., ge=0.0, le=100.0)
+    weighting:    float = Field(..., ge=0.0, le=100.0)
+
+
 class PredictRequest(BaseModel):
-    subject:      str
-    assess1_mark: float = Field(..., ge=0.0, le=100.0)
-    assess2_mark: Optional[float] = Field(None, ge=0.0, le=100.0)
+    subject:                 str   = Field(..., min_length=1, max_length=20)
+    study_period:            str   = Field(..., min_length=1, max_length=10)
+    trimester_num:           float
+    assess1_mark:            float = Field(..., ge=0.0, le=100.0)
+    assess1_weight:          float = Field(..., ge=0.0, le=100.0)
+    assess1_contribution:    float = Field(..., ge=0.0, le=100.0)
+    assess2_mark:            float = Field(0.0,  ge=0.0, le=100.0)
+    assess2_weight:          float = Field(0.0,  ge=0.0, le=100.0)
+    assess2_contribution:    float = Field(0.0,  ge=0.0, le=100.0)
+    partial_weighted_score:  float = Field(..., ge=0.0, le=100.0)
+    partial_weight_coverage: float = Field(..., ge=0.0, le=1.0)
+    num_assessments:         int   = Field(..., ge=1)
+    total_weight_recorded:   float = Field(..., ge=0.0, le=100.0)
+    weight_complete:         bool  = True
+    assessments_used:        list[_AssessmentEntry]
+
 
 class GeminiAlertRequest(BaseModel):
     subject:   Optional[str] = Field(None, max_length=20)
     trimester: Optional[str] = Field(None, max_length=10)
 
+
 class GeminiAnalyseRequest(BaseModel):
-    subject:   str = Field(..., max_length=20)
+    subject:   str           = Field(..., max_length=20)
     trimester: Optional[str] = Field(None, max_length=10)
 
+
 class GeminiAskRequest(BaseModel):
-    question:  str = Field(..., max_length=500)
+    question:  str           = Field(..., max_length=500)
     subject:   Optional[str] = Field(None, max_length=20)
     trimester: Optional[str] = Field(None, max_length=10)
+
 
 class ChangePasswordRequest(BaseModel):
     current_password: str
     new_password:     str
 
+
 class UpdateUserRequest(BaseModel):
     subjects: Optional[list[str]] = None
     active:   Optional[bool]      = None
+
 
 class UpdateProfileRequest(BaseModel):
     name:       Optional[str] = None
@@ -346,32 +492,42 @@ class UpdateProfileRequest(BaseModel):
     department: Optional[str] = None
     bio:        Optional[str] = None
 
+
 class GeminiInstitutionAskRequest(BaseModel):
     question: str = Field(..., max_length=500)
 
-# ── JWT helpers ───────────────────────────────────────────────────────────────
 
-def _create_token(payload: dict) -> str:
-    data = payload.copy()
-    data["exp"] = datetime.now(timezone.utc) + timedelta(minutes=TOKEN_EXPIRE_MINUTES)
-    return jwt.encode(data, SECRET_KEY, algorithm=ALGORITHM)
+class ForgotPasswordRequest(BaseModel):
+    email: str = Field(..., max_length=254, pattern=_EMAIL_REGEX)
 
 
-def _decode_token(token: str) -> dict:
-    return jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+class ResetPasswordRequest(BaseModel):
+    email:        str = Field(..., max_length=254, pattern=_EMAIL_REGEX)
+    otp:          str = Field(..., min_length=6, max_length=6)
+    new_password: str
 
-# ── FastAPI app ───────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# FastAPI App
+# ─────────────────────────────────────────────────────────────────────────────
 
 app = FastAPI(title="EDAPT v2 API", version="2.0.0")
 
 
 @app.on_event("startup")
 async def _startup():
+    """Create database tables and seed default users on first run."""
     async with _engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     await _seed_default_users()
     print("[EDAPT] Database ready")
+    if GMAIL_SENDER and GMAIL_APP_PASSWORD:
+        print("[EDAPT] Email service configured")
+    else:
+        print("[EDAPT] WARNING: Email service not configured — forgot password will not work")
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Middleware
+# ─────────────────────────────────────────────────────────────────────────────
 
 app.add_middleware(
     CORSMiddleware,
@@ -383,9 +539,12 @@ app.add_middleware(
 
 _oauth2 = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
 
-# ── Auth dependencies ─────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# Role Dependencies
+# ─────────────────────────────────────────────────────────────────────────────
 
 async def get_current_user(token: str = Depends(_oauth2)) -> dict:
+    """Decode JWT and return the payload dict; raises 401 if revoked or invalid."""
     if token in _REVOKED_TOKENS:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -406,47 +565,53 @@ async def get_current_user(token: str = Depends(_oauth2)) -> dict:
 
 
 async def require_admin(user: dict = Depends(get_current_user)) -> dict:
+    """Restrict access to Head of Technology only."""
     if user.get("role") != "Head of Technology":
-        raise HTTPException(status_code=403, detail="Only Head of Technology can access this feature.")
+        raise HTTPException(403, "Only Head of Technology can access this feature.")
     return user
 
 
 async def require_head_of_school(user: dict = Depends(get_current_user)) -> dict:
+    """Restrict access to Head of Technology or Head of School."""
     if user.get("role") not in {"Head of Technology", "Head of School"}:
-        raise HTTPException(status_code=403, detail="Only Head of Technology or Head of School can access this feature.")
+        raise HTTPException(
+            403, "Only Head of Technology or Head of School can access this feature."
+        )
     return user
 
 
 async def require_super_admin(user: dict = Depends(get_current_user)) -> dict:
+    """Restrict access to the system administrator (is_super_admin=True in JWT)."""
     if user.get("is_super_admin") is not True:
-        raise HTTPException(status_code=403, detail="Only the system administrator can access this feature.")
+        raise HTTPException(403, "Only the system administrator can access this feature.")
     return user
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ROUTES
+# Auth Routes
 # ─────────────────────────────────────────────────────────────────────────────
 
 @app.get("/health", tags=["Health"])
 async def health():
+    """Basic liveness probe."""
     return {"status": "ok", "version": "2.0.0"}
 
 
 @app.get("/api/health", tags=["Health"])
 async def api_health():
+    """Extended health check that includes row count of the loaded dataset."""
     return {
-        "status": "ok",
+        "status":  "ok",
         "version": "2.0.0",
-        "rows": len(_DATA) if _DATA is not None else 0,
+        "rows":    len(_DATA) if _DATA is not None else 0,
         "message": "EDAPT API running",
     }
 
 
-# ── Auth ──────────────────────────────────────────────────────────────────────
-
 @app.post("/api/auth/login", tags=["Auth"])
 async def login(req: LoginRequest, db: AsyncSession = Depends(get_db)):
+    """Authenticate a staff member and return a signed JWT."""
     _check_lockout(req.email)
-    result = await db.execute(select(UserModel).where(UserModel.email == req.email))
+    result  = await db.execute(select(UserModel).where(UserModel.email == req.email))
     db_user = result.scalar_one_or_none()
 
     if not db_user or not _pwd.verify(req.password, db_user.hashed_password):
@@ -456,11 +621,13 @@ async def login(req: LoginRequest, db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=401, detail="Invalid email or password")
 
     if not db_user.is_active:
-        raise HTTPException(status_code=403, detail="Account is deactivated. Contact your administrator.")
+        raise HTTPException(
+            status_code=403, detail="Account is deactivated. Contact your administrator."
+        )
 
     _FAILED_LOGINS.pop(req.email, None)
     subjects       = db_user.subjects or []
-    is_super_admin = db_user.email == "admin"
+    is_super_admin = bool(db_user.is_super_admin)
     token = _create_token({
         "sub":            db_user.email,
         "role":           db_user.role,
@@ -483,26 +650,144 @@ async def login(req: LoginRequest, db: AsyncSession = Depends(get_db)):
     }
 
 
-# ── Generic data ──────────────────────────────────────────────────────────────
+@app.post("/api/auth/forgot-password", tags=["Auth"])
+async def forgot_password(req: ForgotPasswordRequest, db: AsyncSession = Depends(get_db)):
+    """Send a 6-digit OTP to the registered email; returns dev_otp when SMTP is unconfigured."""
+    # Always respond with the same message to avoid user enumeration
+    result  = await db.execute(select(UserModel).where(UserModel.email == req.email))
+    db_user = result.scalar_one_or_none()
+    if not db_user or not db_user.is_active:
+        return {"message": "If an account exists for that email, a reset code has been sent."}
+
+    otp = _generate_otp(req.email)
+
+    try:
+        _send_otp_email(req.email, otp)
+        await _append_audit_db(db, user_uid=req.email, action_type="Password Reset Requested",
+                               status="Success", detail="OTP sent to registered email")
+    except RuntimeError:
+        # Email service not configured — return OTP in response for dev/demo only
+        await _append_audit_db(db, user_uid=req.email, action_type="Password Reset Requested",
+                               status="Warning", detail="OTP generated but email service not configured")
+        return {"message": "Email service not configured. For demo use this code.", "dev_otp": otp}
+    except Exception:
+        await _append_audit_db(db, user_uid=req.email, action_type="Password Reset Requested",
+                               status="Error", detail="Failed to send OTP email")
+        raise HTTPException(500, "Failed to send reset email. Please try again later.")
+
+    return {"message": "If an account exists for that email, a reset code has been sent."}
+
+
+@app.post("/api/auth/reset-password", tags=["Auth"])
+async def reset_password(req: ResetPasswordRequest, db: AsyncSession = Depends(get_db)):
+    """Verify OTP and update the user's password."""
+    if not _verify_otp(req.email, req.otp):
+        raise HTTPException(400, "Invalid or expired reset code.")
+
+    _validate_password(req.new_password)
+
+    result  = await db.execute(select(UserModel).where(UserModel.email == req.email))
+    db_user = result.scalar_one_or_none()
+    if not db_user:
+        raise HTTPException(404, "Account not found.")
+
+    db_user.hashed_password = _pwd.hash(req.new_password)
+    await _append_audit_db(db, user_uid=req.email, action_type="Password Reset",
+                           status="Success", detail="Password successfully reset via OTP")
+    return {"message": "Password reset successfully. You can now log in."}
+
+
+@app.post("/api/auth/change-password", tags=["Auth"])
+async def change_password(
+    req:  ChangePasswordRequest,
+    user: dict = Depends(get_current_user),
+    db:   AsyncSession = Depends(get_db),
+):
+    """Allow an authenticated user to change their own password."""
+    email   = user.get("sub", "")
+    result  = await db.execute(select(UserModel).where(UserModel.email == email))
+    db_user = result.scalar_one_or_none()
+    if not db_user:
+        raise HTTPException(404, "User not found.")
+    if not _pwd.verify(req.current_password, db_user.hashed_password):
+        await _append_audit_db(db, user_uid=email, action_type="Password Change",
+                               status="Alert", detail="Failed — incorrect current password")
+        raise HTTPException(400, "Current password is incorrect.")
+    _validate_password(req.new_password)
+    db_user.hashed_password = _pwd.hash(req.new_password)
+    await _append_audit_db(db, user_uid=email, action_type="Password Change",
+                           status="Success", detail="User changed their password")
+    return {"message": "Password updated successfully."}
+
+
+@app.post("/api/auth/logout", tags=["Auth"])
+async def logout_user(
+    token: str  = Depends(_oauth2),
+    user: dict  = Depends(get_current_user),
+    db:   AsyncSession = Depends(get_db),
+):
+    """Revoke the current JWT and write a logout audit event."""
+    _REVOKED_TOKENS.add(token)
+    email = user.get("sub", "unknown")
+    await _append_audit_db(db, user_uid=email, action_type="Logout",
+                           status="Success", detail="User signed out")
+    return {"message": "Logged out."}
+
+
+@app.post("/api/auth/update-profile", tags=["Auth"])
+async def update_profile(
+    req:  UpdateProfileRequest,
+    user: dict = Depends(get_current_user),
+    db:   AsyncSession = Depends(get_db),
+):
+    """Update the display name (and future profile fields) for the authenticated user."""
+    email   = user.get("sub", "")
+    result  = await db.execute(select(UserModel).where(UserModel.email == email))
+    db_user = result.scalar_one_or_none()
+    if not db_user:
+        raise HTTPException(404, "User not found.")
+    if req.name is not None and req.name.strip():
+        db_user.name = req.name.strip()
+    await _append_audit_db(db, user_uid=email, action_type="Profile Updated",
+                           status="Success", detail="User updated their profile")
+    return {
+        "message": "Profile updated successfully.",
+        "user": {"email": db_user.email, "name": db_user.name, "role": db_user.role},
+    }
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Ingest Routes
+# ─────────────────────────────────────────────────────────────────────────────
 
 @app.get("/api/data", tags=["Data"])
 async def get_data(user: dict = Depends(get_current_user)):
+    """Return up to 1,000 rows from the loaded dataset, filtered by role."""
     if _DATA is None or _DATA.empty:
         return {"columns": [], "rows": [], "total": 0, "filtered": 0}
     df = _role_filter(_DATA.copy(), user)
-    return {"columns": list(df.columns), "rows": df.head(1000).fillna("").to_dict("records"), "total": len(df), "filtered": min(len(df), 1000)}
+    return {
+        "columns":  list(df.columns),
+        "rows":     df.head(1000).fillna("").to_dict("records"),
+        "total":    len(df),
+        "filtered": min(len(df), 1000),
+    }
 
 
 @app.get("/api/summary", tags=["Data"])
 async def get_summary(user: dict = Depends(get_current_user)):
+    """Return per-subject row counts and average marks for the current user scope."""
     if _DATA is None or _DATA.empty:
         return {"data": []}
     df = _role_filter(_DATA.copy(), user)
     if "SUBJECTCODE" not in df.columns:
         return {"data": []}
-    mark_col = next((c for c in df.columns if "PCT" in c.upper() or "PERCENT" in c.upper() or "MARKPERCENT" in c.upper()), None)
+    mark_col = next(
+        (c for c in df.columns if "PCT" in c.upper() or "PERCENT" in c.upper()
+         or "MARKPERCENT" in c.upper()),
+        None,
+    )
     grouped = df.groupby("SUBJECTCODE")
-    result = []
+    result  = []
     for code, grp in grouped:
         entry: dict = {"subject_code": code, "row_count": len(grp)}
         if mark_col:
@@ -514,14 +799,19 @@ async def get_summary(user: dict = Depends(get_current_user)):
 
 @app.get("/api/filters", tags=["Data"])
 async def get_filters(user: dict = Depends(get_current_user)):
+    """Return subjects visible to the requesting user and all available study periods."""
+    periods: list[str] = []
+    if _DATA is not None and "STUDYPERIOD" in _DATA.columns:
+        periods = sorted(
+            _DATA["STUDYPERIOD"].dropna().unique().tolist(),
+            key=lambda x: float(x),
+        )
     if user.get("role") == "Lecturer":
-        return {"subjects": user.get("subjects", [])}
+        return {"subjects": user.get("subjects", []), "periods": periods}
     if _DATA is not None and "SUBJECTCODE" in _DATA.columns:
-        return {"subjects": sorted(_DATA["SUBJECTCODE"].dropna().unique().tolist())}
-    return {"subjects": []}
+        return {"subjects": sorted(_DATA["SUBJECTCODE"].dropna().unique().tolist()), "periods": periods}
+    return {"subjects": [], "periods": periods}
 
-
-# ── Ingest (admin only) ───────────────────────────────────────────────────────
 
 @app.post("/api/ingest", tags=["Ingest"])
 async def ingest_dataset(
@@ -529,15 +819,17 @@ async def ingest_dataset(
     user: dict = Depends(require_head_of_school),
     db:   AsyncSession = Depends(get_db),
 ):
+    """Accept a CSV upload, validate it, and replace the in-memory dataset."""
     global _DATA
     ext = (file.filename or "").rsplit(".", 1)[-1].lower()
     if ext != "csv":
         await _append_audit_db(db, user_uid=user["sub"], action_type="Data Upload",
-                               status="Alert", detail=f"Rejected upload: unsupported file type '.{ext}'")
+                               status="Alert",
+                               detail=f"Rejected upload: unsupported file type '.{ext}'")
         raise HTTPException(400, "Unsupported file type. Only .csv files are accepted.")
 
     content = await file.read()
-    if len(content) > 50 * 1024 * 1024:
+    if len(content) > MAX_UPLOAD_BYTES:
         await _append_audit_db(db, user_uid=user["sub"], action_type="Data Upload",
                                status="Alert", detail="Rejected upload: file exceeds 50 MB limit")
         raise HTTPException(400, "File exceeds the 50 MB limit.")
@@ -547,11 +839,12 @@ async def ingest_dataset(
                                status="Alert", detail="Rejected upload: file is empty")
         raise HTTPException(400, "Uploaded file is empty.")
 
-    head = content[:2000]
-    _BINARY_SIGS = (b"PK", b"%PDF", b"\x89PNG", b"\xff\xd8", b"\x42\x4d")
+    head            = content[:2000]
+    _BINARY_SIGS    = (b"PK", b"%PDF", b"\x89PNG", b"\xff\xd8", b"\x42\x4d")
     if any(head.startswith(sig) for sig in _BINARY_SIGS) or b"," not in head:
         await _append_audit_db(db, user_uid=user["sub"], action_type="Data Upload",
-                               status="Alert", detail="Rejected upload: file does not appear to be a valid CSV")
+                               status="Alert",
+                               detail="Rejected upload: file does not appear to be a valid CSV")
         raise HTTPException(400, "File does not appear to be a valid CSV.")
 
     try:
@@ -572,7 +865,8 @@ async def ingest_dataset(
     missing = [c for c in REQUIRED_COLS if c not in df.columns]
     if missing:
         await _append_audit_db(db, user_uid=user["sub"], action_type="Data Upload",
-                               status="Alert", detail=f"Rejected upload: missing column '{missing[0]}'")
+                               status="Alert",
+                               detail=f"Rejected upload: missing column '{missing[0]}'")
         raise HTTPException(400, f"Missing required column: {missing[0]}")
 
     if "STUDYPERIOD" in df.columns:
@@ -586,7 +880,8 @@ async def ingest_dataset(
     _DATA = df
 
     await _append_audit_db(db, user_uid=user["sub"], action_type="Data Upload",
-                           status="Success", detail=f"{len(df):,} rows ingested from {file.filename}")
+                           status="Success",
+                           detail=f"{len(df):,} rows ingested from {file.filename}")
     return {
         "row_count": len(df),
         "columns":   list(df.columns),
@@ -600,9 +895,12 @@ async def ingest_preview(
     page_size: int = Query(50, ge=1, le=500),
     user: dict = Depends(require_head_of_school),
 ):
-    global _DATA
+    """Return a paginated slice of the currently loaded dataset."""
     if _DATA is None or _DATA.empty:
-        return {"total": 0, "page": page, "page_size": page_size, "total_pages": 0, "columns": [], "data": []}
+        return {
+            "total": 0, "page": page, "page_size": page_size,
+            "total_pages": 0, "columns": [], "data": [],
+        }
     total       = len(_DATA)
     total_pages = math.ceil(total / page_size) if total > 0 else 0
     start       = (page - 1) * page_size
@@ -616,175 +914,24 @@ async def ingest_preview(
         "data":        page_df.fillna("").to_dict("records"),
     }
 
-
-# ── Audit log (admin only) ────────────────────────────────────────────────────
-
-@app.get("/api/audit-logs", tags=["Audit"])
-async def get_audit_logs(
-    action_type:   Optional[str] = Query(None),
-    status_filter: Optional[str] = Query(None),
-    user: dict = Depends(require_admin),
-    db:   AsyncSession = Depends(get_db),
-):
-    await _append_audit_db(db, user_uid=user["sub"], action_type="Data Access",
-                           status="Success", detail="Viewed audit log")
-    query = select(AuditLog).order_by(desc(AuditLog.id))
-    if action_type:   query = query.where(AuditLog.action_type == action_type)
-    if status_filter: query = query.where(AuditLog.status == status_filter)
-    result = await db.execute(query)
-    logs   = result.scalars().all()
-
-    # Resolve each user_uid to its current role in one batch query so the
-    # frontend never has to infer role from UID patterns (which fails for
-    # real email addresses like principal@koi.edu.au).
-    uids = {log.user_uid for log in logs}
-    role_rows = await db.execute(
-        select(UserModel.email, UserModel.role).where(UserModel.email.in_(uids))
-    )
-    role_map: dict[str, str] = {email: role for email, role in role_rows.all()}
-
-    data = [
-        {
-            "event_id":    log.id,
-            "timestamp":   log.timestamp.strftime("%Y-%m-%d %H:%M") if log.timestamp else "",
-            "user_uid":    log.user_uid,
-            "role":        role_map.get(log.user_uid),
-            "action_type": log.action_type,
-            "status":      log.status,
-            "detail":      log.detail,
-        }
-        for log in logs
-    ]
-    return {"total": len(data), "count": len(data), "data": data}
-
-
-# ── User management (admin only) ──────────────────────────────────────────────
-
-@app.get("/api/users", tags=["Admin"])
-async def list_users(
-    user: dict = Depends(require_super_admin),
-    db:   AsyncSession = Depends(get_db),
-):
-    result = await db.execute(select(UserModel).where(UserModel.email != "admin"))
-    users  = result.scalars().all()
-    return [
-        {
-            "email":    u.email,
-            "name":     u.name,
-            "role":     u.role,
-            "subjects": u.subjects or [],
-            "active":   u.is_active,
-        }
-        for u in users
-    ]
-
-
-@app.post("/api/users", status_code=201, tags=["Admin"])
-async def create_user(
-    payload: CreateUserRequest,
-    user: dict = Depends(require_super_admin),
-    db:   AsyncSession = Depends(get_db),
-):
-    domain = payload.email.split('@')[1]
-    if '.' not in domain:
-        raise HTTPException(400, "Please enter a valid institutional email address.")
-    if not payload.name.strip():
-        raise HTTPException(400, "Name must not be empty.")
-    _validate_password(payload.password)
-    if payload.role not in {"Lecturer", "Head of Technology", "Head of School"}:
-        raise HTTPException(400, "Role must be 'Lecturer', 'Head of Technology', or 'Head of School'.")
-    if payload.role == "Lecturer" and not payload.subjects:
-        raise HTTPException(400, "At least one subject must be assigned for a Lecturer.")
-
-    existing = await db.execute(select(UserModel).where(UserModel.email == payload.email))
-    if existing.scalar_one_or_none():
-        raise HTTPException(400, "Email already exists.")
-
-    subjects = [] if payload.role in {"Head of Technology", "Head of School"} else payload.subjects
-    new_user = UserModel(
-        email=payload.email,
-        name=payload.name.strip(),
-        hashed_password=_pwd.hash(payload.password),
-        role=payload.role,
-        is_active=True,
-        subjects=subjects,
-    )
-    db.add(new_user)
-    await db.flush()  # get the id without committing yet
-
-    detail = (f"{payload.role} account created: {payload.email}"
-              + (f" assigned to {', '.join(subjects)}" if subjects else ""))
-    await _append_audit_db(db, user_uid=user["sub"], action_type="User Created",
-                           status="Success", detail=detail)
-    return {
-        "message": f"{payload.role} account created",
-        "user":    {"email": payload.email, "name": payload.name, "role": payload.role, "subjects": subjects},
-    }
-
-
-@app.put("/api/users/{email}", tags=["Admin"])
-async def update_user(
-    email:   str,
-    payload: UpdateUserRequest,
-    user: dict = Depends(require_super_admin),
-    db:   AsyncSession = Depends(get_db),
-):
-    result  = await db.execute(select(UserModel).where(UserModel.email == email))
-    db_user = result.scalar_one_or_none()
-    if not db_user:
-        raise HTTPException(404, "User not found.")
-    if db_user.email == "admin":
-        raise HTTPException(403, "Cannot modify the system administrator account.")
-
-    if payload.subjects is not None:
-        db_user.subjects = payload.subjects
-    if payload.active is not None:
-        db_user.is_active = payload.active
-        status_str = "activated" if payload.active else "deactivated"
-        await _append_audit_db(db, user_uid=user["sub"], action_type="User Modified",
-                               status="Success", detail=f"Account {status_str}: {email}")
-    else:
-        await _append_audit_db(db, user_uid=user["sub"], action_type="User Modified",
-                               status="Success", detail=f"Account updated: {email}")
-    return {"message": "Account updated"}
-
-
-@app.delete("/api/users/{email}", tags=["Admin"])
-async def delete_user(
-    email: str,
-    user: dict = Depends(require_super_admin),
-    db:   AsyncSession = Depends(get_db),
-):
-    result  = await db.execute(select(UserModel).where(UserModel.email == email))
-    db_user = result.scalar_one_or_none()
-    if not db_user:
-        raise HTTPException(404, "User not found.")
-    if db_user.email == "admin":
-        raise HTTPException(403, "Cannot delete the system administrator account.")
-    if email == user.get("sub"):
-        raise HTTPException(403, "Cannot delete your own account.")
-
-    await db.delete(db_user)
-    await _append_audit_db(db, user_uid=user["sub"], action_type="User Modified",
-                           status="Success", detail=f"Account deleted: {email}")
-    return {"message": "Account deleted"}
-
-
 # ─────────────────────────────────────────────────────────────────────────────
-# DASHBOARD ENDPOINTS
+# Dashboard Routes
 # ─────────────────────────────────────────────────────────────────────────────
 
 @app.get("/api/dashboard/summary", tags=["Dashboard"])
 async def dashboard_summary(
-    subject:   Optional[str] = Query(None),
-    trimester: Optional[str] = Query(None),
-    year:      Optional[str] = Query(None),
+    subject:    Optional[str] = Query(None),
+    trimester:  Optional[str] = Query(None),
+    year:       Optional[str] = Query(None),
     classgroup: Optional[str] = Query(None),
     user: dict = Depends(get_current_user),
 ):
-    empty = {"total_students": 0, "total_subjects": 0, "avg_mark": 0.0,
-             "avg_mark_prev": None, "pass_rate": 0.0, "pass_rate_prev": None,
-             "at_risk_count": 0, "countries_count": 0}
+    """Return KPI summary metrics for the selected scope and role."""
+    empty = {
+        "total_students": 0, "total_subjects": 0, "avg_mark": 0.0,
+        "avg_mark_prev": None, "pass_rate": 0.0, "pass_rate_prev": None,
+        "at_risk_count": 0, "countries_count": 0,
+    }
     if _DATA is None or _DATA.empty:
         return empty
 
@@ -795,25 +942,32 @@ async def dashboard_summary(
 
     avg_mark  = _safe(df["MARKPERCENT"].mean())
     pass_rate = _safe((df["MARKPERCENT"] >= 50).mean() * 100)
-    countries = int(df["COUNTRY_MASKED"].nunique()) if user.get("role") in {"Head of Technology", "Head of School"} and "COUNTRY_MASKED" in df.columns else 0
+    countries = (
+        int(df["COUNTRY_MASKED"].nunique())
+        if user.get("role") in {"Head of Technology", "Head of School"}
+        and "COUNTRY_MASKED" in df.columns
+        else 0
+    )
 
     # Previous trimester change (only meaningful when a specific trimester is selected)
     avg_mark_prev = pass_rate_prev = None
     if trimester:
         prev = _prev_period(trimester)
         if prev:
-            df_p = _query_filter(_role_filter(_DATA.copy(), user), subject, prev, None, classgroup)
+            df_p = _query_filter(
+                _role_filter(_DATA.copy(), user), subject, prev, None, classgroup
+            )
             df_p = df_p.dropna(subset=["MARKPERCENT"])
             if not df_p.empty:
-                avg_mark_prev = _safe(df_p["MARKPERCENT"].mean())
+                avg_mark_prev  = _safe(df_p["MARKPERCENT"].mean())
                 pass_rate_prev = _safe((df_p["MARKPERCENT"] >= 50).mean() * 100)
 
     return {
         "total_students":  int(df["STUDENTID_MASKED"].nunique()) if "STUDENTID_MASKED" in df.columns else 0,
-        "total_subjects":  int(df["SUBJECTCODE"].nunique()) if "SUBJECTCODE" in df.columns else 0,
-        "avg_mark":        round(avg_mark, 1)  if avg_mark  is not None else 0.0,
-        "avg_mark_prev":   round(avg_mark_prev, 1) if avg_mark_prev is not None else None,
-        "pass_rate":       round(pass_rate, 1) if pass_rate is not None else 0.0,
+        "total_subjects":  int(df["SUBJECTCODE"].nunique())      if "SUBJECTCODE"      in df.columns else 0,
+        "avg_mark":        round(avg_mark,       1) if avg_mark       is not None else 0.0,
+        "avg_mark_prev":   round(avg_mark_prev,  1) if avg_mark_prev  is not None else None,
+        "pass_rate":       round(pass_rate,      1) if pass_rate      is not None else 0.0,
         "pass_rate_prev":  round(pass_rate_prev, 1) if pass_rate_prev is not None else None,
         "at_risk_count":   int((df["MARKPERCENT"] < 50).sum()),
         "countries_count": countries,
@@ -822,12 +976,13 @@ async def dashboard_summary(
 
 @app.get("/api/dashboard/grade-distribution", tags=["Dashboard"])
 async def grade_distribution(
-    subject:   Optional[str] = Query(None),
-    trimester: Optional[str] = Query(None),
-    year:      Optional[str] = Query(None),
+    subject:    Optional[str] = Query(None),
+    trimester:  Optional[str] = Query(None),
+    year:       Optional[str] = Query(None),
     classgroup: Optional[str] = Query(None),
     user: dict = Depends(get_current_user),
 ):
+    """Return count of students in each 10-point grade band."""
     if _DATA is None or _DATA.empty:
         return {"data": [{"band": b, "count": 0} for b, _, _ in GRADE_BANDS]}
 
@@ -847,8 +1002,14 @@ async def performance_trend(
     classgroup: Optional[str] = Query(None),
     user: dict = Depends(get_current_user),
 ):
+    """Return per-period average marks for both institution-wide and the selected subject."""
     if _DATA is None or _DATA.empty:
-        return {"data": [{"period": p, "institution_avg": None, "subject_avg": None} for p in PERIODS_ORDER]}
+        return {
+            "data": [
+                {"period": p, "institution_avg": None, "subject_avg": None}
+                for p in PERIODS_ORDER
+            ]
+        }
 
     df_full = _DATA.dropna(subset=["MARKPERCENT"])
     df_role = _role_filter(_DATA.copy(), user)
@@ -866,7 +1027,7 @@ async def performance_trend(
         inst = _safe(inst_mean.get(period))
         subj = _safe(subj_mean.get(period))
         result.append({
-            "period": period,
+            "period":          period,
             "institution_avg": round(inst, 1) if inst is not None else None,
             "subject_avg":     round(subj, 1) if subj is not None else None,
         })
@@ -875,12 +1036,13 @@ async def performance_trend(
 
 @app.get("/api/dashboard/assessment-comparison", tags=["Dashboard"])
 async def assessment_comparison(
-    subject:   Optional[str] = Query(None),
-    trimester: Optional[str] = Query(None),
-    year:      Optional[str] = Query(None),
+    subject:    Optional[str] = Query(None),
+    trimester:  Optional[str] = Query(None),
+    year:       Optional[str] = Query(None),
     classgroup: Optional[str] = Query(None),
     user: dict = Depends(get_current_user),
 ):
+    """Return average mark and pass rate grouped by assessment type."""
     if _DATA is None or "ASSESSMENTTYPECODE" not in _DATA.columns:
         return {"data": []}
 
@@ -890,18 +1052,22 @@ async def assessment_comparison(
     grp   = df.groupby("ASSESSMENTTYPECODE")["MARKPERCENT"]
     avg_s = grp.mean().round(1)
     pr_s  = grp.apply(lambda x: round((x >= 50).mean() * 100, 1))
-    items = [{"type": t, "avg_mark": float(avg_s[t]), "pass_rate": float(pr_s[t])} for t in avg_s.index]
+    items = [
+        {"type": t, "avg_mark": float(avg_s[t]), "pass_rate": float(pr_s[t])}
+        for t in avg_s.index
+    ]
     return {"data": items, "items": items}
 
 
 @app.get("/api/dashboard/pass-fail", tags=["Dashboard"])
 async def pass_fail(
-    subject:   Optional[str] = Query(None),
-    trimester: Optional[str] = Query(None),
-    year:      Optional[str] = Query(None),
+    subject:    Optional[str] = Query(None),
+    trimester:  Optional[str] = Query(None),
+    year:       Optional[str] = Query(None),
     classgroup: Optional[str] = Query(None),
     user: dict = Depends(get_current_user),
 ):
+    """Return raw pass/fail counts and pass rate percentage."""
     if _DATA is None or _DATA.empty:
         return {"pass_count": 0, "fail_count": 0, "pass_rate": 0.0}
 
@@ -910,7 +1076,7 @@ async def pass_fail(
 
     pass_count = int((df["MARKPERCENT"] >= 50).sum())
     fail_count = int((df["MARKPERCENT"] <  50).sum())
-    total = pass_count + fail_count
+    total      = pass_count + fail_count
     return {
         "pass_count": pass_count,
         "fail_count": fail_count,
@@ -925,6 +1091,7 @@ async def international_performance(
     year:      Optional[str] = Query(None),
     user: dict = Depends(require_head_of_school),
 ):
+    """Return average mark per country of origin (admin only)."""
     if _DATA is None or "COUNTRY_MASKED" not in _DATA.columns:
         return {"data": []}
 
@@ -939,11 +1106,11 @@ async def international_performance(
 
 @app.get("/api/dashboard/difficulty-index", tags=["Dashboard"])
 async def difficulty_index(user: dict = Depends(require_head_of_school)):
+    """Return failure rate per subject sorted descending (admin only)."""
     if _DATA is None or "SUBJECTCODE" not in _DATA.columns:
         return {"data": []}
 
-    df = _DATA.dropna(subset=["MARKPERCENT"])
-    df = df.copy()
+    df = _DATA.dropna(subset=["MARKPERCENT"]).copy()
     df["_fail"] = (df["MARKPERCENT"] < 50).astype(int)
     result = df.groupby("SUBJECTCODE")["_fail"].mean().mul(100).round(1).reset_index()
     result.columns = ["subject", "failure_rate"]
@@ -956,6 +1123,7 @@ async def get_classgroups(
     subject: Optional[str] = Query(None),
     user: dict = Depends(require_head_of_school),
 ):
+    """Return the distinct class-group values for the given subject."""
     if _DATA is None or "CLASSGROUP" not in _DATA.columns:
         return {"classgroups": []}
     df = _DATA.copy()
@@ -963,9 +1131,8 @@ async def get_classgroups(
         df = df[df["SUBJECTCODE"] == subject]
     return {"classgroups": sorted(df["CLASSGROUP"].dropna().unique().tolist())}
 
-
 # ─────────────────────────────────────────────────────────────────────────────
-# EXPLORER ENDPOINTS
+# Explorer Routes
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _str_val(val) -> str:
@@ -976,7 +1143,7 @@ def _str_val(val) -> str:
 
 
 def _explorer_filter(
-    df: pd.DataFrame,
+    df:              pd.DataFrame,
     subject:         Optional[str] = None,
     assessment_type: Optional[str] = None,
     passed:          Optional[str] = None,
@@ -985,8 +1152,9 @@ def _explorer_filter(
     country:         Optional[str] = None,
     gender:          Optional[str] = None,
     age_group:       Optional[str] = None,
-    is_admin:        bool = False,
+    is_admin:        bool           = False,
 ) -> pd.DataFrame:
+    """Apply Explorer-specific filters including admin-only demographic filters."""
     if "MARKPERCENT" in df.columns:
         df = df.dropna(subset=["MARKPERCENT"])
     if subject and "SUBJECTCODE" in df.columns:
@@ -1012,6 +1180,7 @@ def _explorer_filter(
 
 
 def _row_to_record(row: dict, is_admin: bool) -> dict:
+    """Convert a raw DataFrame row dict to the Explorer API record shape."""
     mp = row.get("MARKPERCENT")
     try:
         passed = bool(float(mp) >= 50) if mp is not None else False
@@ -1049,18 +1218,21 @@ async def explorer_records(
     user: dict = Depends(get_current_user),
     db:   AsyncSession = Depends(get_db),
 ):
+    """Return a paginated, filtered list of student assessment records."""
     if _DATA is None or _DATA.empty:
         return {"total": 0, "page": page, "page_size": page_size, "total_pages": 0, "data": []}
 
     is_admin = user.get("role") in {"Head of Technology", "Head of School"}
     df = _role_filter(_DATA.copy(), user)
-    df = _explorer_filter(df, subject, assessment_type, passed, trimester,
-                          search, country, gender, age_group, is_admin)
+    df = _explorer_filter(
+        df, subject, assessment_type, passed, trimester,
+        search, country, gender, age_group, is_admin,
+    )
 
     total       = len(df)
     total_pages = math.ceil(total / page_size) if total > 0 else 0
     start       = (page - 1) * page_size
-    page_df     = df.iloc[start : start + page_size]
+    page_df     = df.iloc[start: start + page_size]
 
     if any([subject, assessment_type, passed, trimester, search, country, gender, age_group]):
         await _append_audit_db(db, user_uid=user["sub"], action_type="Data Access",
@@ -1076,30 +1248,43 @@ async def explorer_records(
 
 @app.get("/api/explorer/filters", tags=["Explorer"])
 async def explorer_filters(user: dict = Depends(get_current_user)):
+    """Return available filter values for subjects, trimesters, and demographic options."""
     is_admin = user.get("role") in {"Head of Technology", "Head of School"}
 
     if _DATA is None or _DATA.empty:
         return {
-            "subjects": user.get("subjects", []) if not is_admin else [],
+            "subjects":         user.get("subjects", []) if not is_admin else [],
             "assessment_types": [], "trimesters": [],
-            "countries": [], "genders": [], "age_groups": [],
+            "countries":        [], "genders":    [], "age_groups": [],
         }
 
     df_role = _role_filter(_DATA.copy(), user)
 
-    subjects = sorted(df_role["SUBJECTCODE"].dropna().unique().tolist()) \
+    subjects = (
+        sorted(df_role["SUBJECTCODE"].dropna().unique().tolist())
         if "SUBJECTCODE" in df_role.columns else []
-    assessment_types = sorted(df_role["ASSESSMENTTYPECODE"].dropna().unique().tolist()) \
+    )
+    assessment_types = (
+        sorted(df_role["ASSESSMENTTYPECODE"].dropna().unique().tolist())
         if "ASSESSMENTTYPECODE" in df_role.columns else []
-    trimesters = [p for p in PERIODS_ORDER
-                  if "STUDYPERIOD" in df_role.columns and p in df_role["STUDYPERIOD"].values]
+    )
+    trimesters = [
+        p for p in PERIODS_ORDER
+        if "STUDYPERIOD" in df_role.columns and p in df_role["STUDYPERIOD"].values
+    ]
 
-    countries  = sorted(_DATA["COUNTRY_MASKED"].dropna().unique().tolist()) \
+    countries  = (
+        sorted(_DATA["COUNTRY_MASKED"].dropna().unique().tolist())
         if is_admin and "COUNTRY_MASKED" in _DATA.columns else []
-    genders    = sorted(_DATA["GENDERCODE"].dropna().unique().tolist()) \
+    )
+    genders    = (
+        sorted(_DATA["GENDERCODE"].dropna().unique().tolist())
         if is_admin and "GENDERCODE" in _DATA.columns else []
-    age_groups = sorted(_DATA["AGEGROUP"].dropna().unique().tolist()) \
+    )
+    age_groups = (
+        sorted(_DATA["AGEGROUP"].dropna().unique().tolist())
         if is_admin and "AGEGROUP" in _DATA.columns else []
+    )
 
     return {
         "subjects":         subjects,
@@ -1117,6 +1302,7 @@ async def explorer_student(
     subject:    Optional[str] = Query(None),
     user: dict = Depends(get_current_user),
 ):
+    """Return full assessment history, trend, and peer comparison for a single student."""
     if _DATA is None or "STUDENTID_MASKED" not in _DATA.columns:
         raise HTTPException(404, "Student not found")
 
@@ -1130,7 +1316,7 @@ async def explorer_student(
     if df.empty:
         raise HTTPException(404, "Student not found or not in your scope")
 
-    avg_mark      = _safe(df["MARKPERCENT"].mean())
+    avg_mark       = _safe(df["MARKPERCENT"].mean())
     overall_passed = bool(float(avg_mark) >= 50) if avg_mark is not None else False
     records        = [_row_to_record(r, is_admin) for r in df.to_dict("records")]
 
@@ -1142,7 +1328,9 @@ async def explorer_student(
     ]
 
     # Peer comparison
-    subject_codes = df["SUBJECTCODE"].dropna().unique().tolist() if "SUBJECTCODE" in df.columns else []
+    subject_codes = (
+        df["SUBJECTCODE"].dropna().unique().tolist() if "SUBJECTCODE" in df.columns else []
+    )
     df_class = _role_filter(_DATA.copy(), user)
     if subject_codes and "SUBJECTCODE" in df_class.columns:
         df_class = df_class[df_class["SUBJECTCODE"].isin(subject_codes)]
@@ -1181,6 +1369,7 @@ async def explorer_export(
     user: dict = Depends(require_head_of_school),
     db:   AsyncSession = Depends(get_db),
 ):
+    """Stream a filtered dataset as a CSV download and write an export audit event."""
     if _DATA is None or _DATA.empty:
         raise HTTPException(404, "No data loaded")
 
@@ -1191,8 +1380,9 @@ async def explorer_export(
 
     filters_used = [f"{k}={v}" for k, v in [
         ("subject", subject), ("assessment_type", assessment_type),
-        ("passed", passed),   ("trimester", trimester),
-        ("country", country), ("gender", gender), ("age_group", age_group),
+        ("passed",  passed),  ("trimester",       trimester),
+        ("country", country), ("gender",           gender),
+        ("age_group", age_group),
     ] if v]
     filter_str = ", ".join(filters_used) or "none"
 
@@ -1201,7 +1391,7 @@ async def explorer_export(
         detail=f"Exported {len(df):,} records with filters: {filter_str}",
     )
 
-    buf = io.StringIO()
+    buf   = io.StringIO()
     df.to_csv(buf, index=False)
     buf.seek(0)
     fname = f"edapt_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
@@ -1211,9 +1401,8 @@ async def explorer_export(
         headers={"Content-Disposition": f"attachment; filename={fname}"},
     )
 
-
 # ─────────────────────────────────────────────────────────────────────────────
-# GEMINI HELPER
+# Predict Routes
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def _gemini_call(model, prompt: str) -> tuple[str, int]:
@@ -1222,85 +1411,84 @@ async def _gemini_call(model, prompt: str) -> tuple[str, int]:
         return "AI insight unavailable.", 0
     try:
         response = await asyncio.to_thread(model.generate_content, prompt)
-        text   = response.text.strip()
-        tokens = getattr(getattr(response, "usage_metadata", None), "total_token_count", 0)
+        text     = response.text.strip()
+        tokens   = getattr(getattr(response, "usage_metadata", None), "total_token_count", 0)
         _GEMINI_TOKEN_LOG.append({
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "tokens": int(tokens),
-            "model": getattr(model, "model_name", "unknown"),
+            "tokens":    int(tokens),
+            "model":     getattr(model, "model_name", "unknown"),
         })
         return text, int(tokens)
-    except Exception:
+    except ResourceExhausted:
+        return "Gemini rate limit reached. Please wait 60 seconds before requesting another insight.", 0
+    except Exception as _e:
+        if "429" in str(_e) or "rate limit" in str(_e).lower() or "quota" in str(_e).lower():
+            return "Gemini rate limit reached. Please wait 60 seconds before requesting another insight.", 0
         return "AI insight unavailable.", 0
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# PREDICTOR ENDPOINT
-# ─────────────────────────────────────────────────────────────────────────────
-
 @app.post("/api/predict", tags=["ML"])
-async def predict_outcome(req: PredictRequest, user: dict = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
-    if _MODEL is None:
-        raise HTTPException(503, "ML model not loaded. Run backend/app/ml/train_model.py first.")
+async def predict_outcome(
+    req:  PredictRequest,
+    user: dict = Depends(get_current_user),
+    db:   AsyncSession = Depends(get_db),
+):
+    """Run the ML ensemble and return a pass-probability prediction."""
+    from app.ml.predictor import predict as ml_predict
 
     is_admin  = user.get("role") in {"Head of Technology", "Head of School"}
     subj_list = user.get("subjects", [])
 
-    # Lecturer must own the subject
     if not is_admin and req.subject not in subj_list:
         raise HTTPException(403, "You are not assigned to that subject.")
 
-    assess2 = req.assess2_mark if req.assess2_mark is not None else _MEDIAN_ASSESS2
-    subj_diff   = _SUBJ_DIFFICULTY.get(req.subject, 0.3)
-    trim_num    = 9  # current period = 25.3
+    reliability = "fully_clean"
+    if req.subject not in _SAFE_SUBJECTS:
+        reliability = _subject_reliability_category(req.subject)
+        if reliability == "unreliable":
+            return {
+                "subject":              req.subject,
+                "prediction_available": False,
+                "message": (
+                    "Prediction unavailable for this subject due to incomplete "
+                    "assessment data. Contact your Head of Technology."
+                ),
+            }
 
-    features = [[req.assess1_mark, assess2, subj_diff, trim_num]]
-    proba    = float(_MODEL.predict_proba(features)[0][1])
-    pct      = round(proba * 100, 1)
-
-    if proba >= 0.65:
-        risk_level, risk_colour, prediction = "Safe",      "green", "Likely to Pass"
-    elif proba >= 0.40:
-        risk_level, risk_colour, prediction = "At Risk",   "amber", "Borderline"
-    else:
-        risk_level, risk_colour, prediction = "High Risk", "red",   "High Risk of Failing"
-
-    # Confidence: count training-like records within ±10% of assess1
-    conf_count = 0
-    if _DATA is not None and "MARKPERCENT" in _DATA.columns:
-        lo, hi = req.assess1_mark - 10, req.assess1_mark + 10
-        df_subj = _DATA[_DATA["SUBJECTCODE"] == req.subject] if "SUBJECTCODE" in _DATA.columns else _DATA
-        conf_count = int(((df_subj["MARKPERCENT"] >= lo) & (df_subj["MARKPERCENT"] <= hi)).sum())
-
-    # Subject pass rate for the Gemini prompt
-    pass_rate_pct = round((1 - subj_diff) * 100, 1)
-
-    # Gemini one-sentence advice
-    advice_prompt = (
-        f"Student in {req.subject} scored {req.assess1_mark:.1f}% in Assessment 1. "
-        f"Pass probability: {pct}%. Subject average pass rate: {pass_rate_pct}%. "
-        "Write ONE sentence of advice for the lecturer. Be specific and actionable."
+    result = ml_predict(
+        subject=                 req.subject,
+        study_period=            req.study_period,
+        trimester_num=           req.trimester_num,
+        assess1_mark=            req.assess1_mark,
+        assess1_weight=          req.assess1_weight,
+        assess1_contribution=    req.assess1_contribution,
+        assess2_mark=            req.assess2_mark,
+        assess2_weight=          req.assess2_weight,
+        assess2_contribution=    req.assess2_contribution,
+        partial_weighted_score=  req.partial_weighted_score,
+        partial_weight_coverage= req.partial_weight_coverage,
+        num_assessments=         req.num_assessments,
+        total_weight_recorded=   req.total_weight_recorded,
+        weight_complete=         req.weight_complete,
+        assessments_used=        [a.model_dump() for a in req.assessments_used],
     )
-    gemini_advice, _ = await _gemini_call(_flash_model, advice_prompt)
 
-    result: dict = {
-        "pass_probability":   pct,
-        "prediction":         prediction,
-        "risk_level":         risk_level,
-        "risk_colour":        risk_colour,
-        "confidence_records": conf_count,
-        "gemini_advice":      gemini_advice,
-    }
-    if is_admin:
-        result["model_name"]     = _MODEL_NAME
-        result["model_accuracy"] = _MODEL_ACCURACY
+    if "error" in result:
+        raise HTTPException(503, "ML model not loaded. Run train_model.py first.")
+
+    if reliability == "mostly_clean":
+        result["reliability_warning"] = (
+            "This subject's data was only partially verified during cleaning — "
+            "assessment weightings may be incomplete."
+        )
+
     await _append_audit_db(db, user_uid=user["sub"], action_type="Prediction Run",
-                           status="Success", detail=f"Predicted {req.subject}: {pct}% pass probability")
+                           status="Success",
+                           detail=f"Predicted {result['subject']}: {result['probability']}% pass probability")
     return result
 
-
 # ─────────────────────────────────────────────────────────────────────────────
-# GEMINI ENDPOINTS
+# Gemini Routes
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _subject_stats(subject: Optional[str], trimester: Optional[str], user: dict) -> dict:
@@ -1320,14 +1508,12 @@ def _subject_stats(subject: Optional[str], trimester: Optional[str], user: dict)
     pass_rate = round(float((df["MARKPERCENT"] >= 50).mean() * 100), 1)
     at_risk   = int((df["MARKPERCENT"] < 50).sum())
 
-    # Weakest assessment type
     if "ASSESSMENTTYPECODE" in df.columns:
-        grp = df.groupby("ASSESSMENTTYPECODE")["MARKPERCENT"].mean()
+        grp     = df.groupby("ASSESSMENTTYPECODE")["MARKPERCENT"].mean()
         weakest = str(grp.idxmin()) if not grp.empty else "N/A"
     else:
         weakest = "N/A"
 
-    # Previous trimester
     prev_pass_rate = None
     if trimester:
         prev = _prev_period(trimester)
@@ -1340,12 +1526,13 @@ def _subject_stats(subject: Optional[str], trimester: Optional[str], user: dict)
             if not df_p.empty:
                 prev_pass_rate = round(float((df_p["MARKPERCENT"] >= 50).mean() * 100), 1)
 
-    # Assessment breakdown
-    breakdown = {}
+    breakdown: dict = {}
     if "ASSESSMENTTYPECODE" in df.columns:
         for t, g in df.groupby("ASSESSMENTTYPECODE"):
-            breakdown[str(t)] = {"avg_mark": round(float(g["MARKPERCENT"].mean()), 1),
-                                 "count":    int(len(g))}
+            breakdown[str(t)] = {
+                "avg_mark": round(float(g["MARKPERCENT"].mean()), 1),
+                "count":    int(len(g)),
+            }
 
     return {
         "subject":        subject or "All",
@@ -1360,125 +1547,8 @@ def _subject_stats(subject: Optional[str], trimester: Optional[str], user: dict)
     }
 
 
-@app.post("/api/gemini/alert", tags=["Gemini"])
-async def gemini_alert(req: GeminiAlertRequest, user: dict = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
-    stats = _subject_stats(req.subject, req.trimester, user)
-    if not stats:
-        return {"alert": "", "tokens_used": 0}
-
-    change_str = f"{stats['change']:+.1f}%" if stats["change"] is not None else "N/A"
-    prompt = (
-        f"Subject: {stats['subject']}, Current pass rate: {stats['pass_rate']}%, "
-        f"Previous: {stats.get('prev_pass_rate', 'N/A')}%, Change: {change_str}. "
-        f"Weakest assessment type: {stats['weakest_type']}. "
-        "Write ONE alert sentence for a lecturer. Be specific. Mention the subject name and the change."
-    )
-    alert, tokens = await _gemini_call(_flash_model, prompt)
-    await _append_audit_db(db, user_uid=user["sub"], action_type="AI Request",
-                           status="Success", detail=f"Gemini alert requested for {req.subject or 'all subjects'}")
-    return {"alert": alert, "tokens_used": tokens}
-
-
-@app.post("/api/gemini/analyse", tags=["Gemini"])
-async def gemini_analyse(req: GeminiAnalyseRequest, user: dict = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
-    stats = _subject_stats(req.subject, req.trimester, user)
-    if not stats:
-        return {"analysis": "No data available for analysis.", "tokens_used": 0, "model": "none"}
-
-    prompt = (
-        f"You are an academic analyst. Given these stats for {req.subject} "
-        f"in {req.trimester or 'the current period'}: {stats}. "
-        "Write a 3-4 sentence analysis for a lecturer. "
-        "Be factual. Use the exact numbers provided. Recommend one action."
-    )
-    analysis, tokens = await _gemini_call(_pro_model, prompt)
-    await _append_audit_db(db, user_uid=user["sub"], action_type="AI Request",
-                           status="Success", detail=f"Gemini analysis requested for {req.subject}")
-    return {"analysis": analysis, "tokens_used": tokens, "model": "gemini-1.5-pro"}
-
-
-@app.post("/api/gemini/ask", tags=["Gemini"])
-async def gemini_ask(req: GeminiAskRequest, user: dict = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
-    stats = _subject_stats(req.subject, req.trimester, user)
-    context = stats if stats else {"note": "No data loaded yet."}
-
-    prompt = (
-        f"You are an academic analyst for {req.subject or 'the institution'} at KOI. "
-        f"Here is the current data: {context}. "
-        f"Lecturer question: {req.question}. "
-        "Answer in 2-3 sentences using the data provided. Be specific and actionable."
-    )
-    answer, tokens = await _gemini_call(_pro_model, prompt)
-    await _append_audit_db(db, user_uid=user["sub"], action_type="AI Request",
-                           status="Success", detail=f"Gemini question asked about {req.subject or 'institution'}")
-    return {"answer": answer, "tokens_used": tokens, "model": "gemini-1.5-pro"}
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# AUTH EXTRAS — change password + logout
-# ─────────────────────────────────────────────────────────────────────────────
-
-@app.post("/api/auth/change-password", tags=["Auth"])
-async def change_password(
-    req:  ChangePasswordRequest,
-    user: dict = Depends(get_current_user),
-    db:   AsyncSession = Depends(get_db),
-):
-    email  = user.get("sub", "")
-    result = await db.execute(select(UserModel).where(UserModel.email == email))
-    db_user = result.scalar_one_or_none()
-    if not db_user:
-        raise HTTPException(404, "User not found.")
-    if not _pwd.verify(req.current_password, db_user.hashed_password):
-        await _append_audit_db(db, user_uid=email, action_type="Password Change",
-                               status="Alert", detail="Failed — incorrect current password")
-        raise HTTPException(400, "Current password is incorrect.")
-    _validate_password(req.new_password)
-    db_user.hashed_password = _pwd.hash(req.new_password)
-    await _append_audit_db(db, user_uid=email, action_type="Password Change",
-                           status="Success", detail="User changed their password")
-    return {"message": "Password updated successfully."}
-
-
-@app.post("/api/auth/logout", tags=["Auth"])
-async def logout_user(
-    token: str  = Depends(_oauth2),
-    user: dict  = Depends(get_current_user),
-    db:   AsyncSession = Depends(get_db),
-):
-    _REVOKED_TOKENS.add(token)
-    email = user.get("sub", "unknown")
-    await _append_audit_db(db, user_uid=email, action_type="Logout",
-                           status="Success", detail="User signed out")
-    return {"message": "Logged out."}
-
-
-@app.post("/api/auth/update-profile", tags=["Auth"])
-async def update_profile(
-    req:  UpdateProfileRequest,
-    user: dict = Depends(get_current_user),
-    db:   AsyncSession = Depends(get_db),
-):
-    email  = user.get("sub", "")
-    result = await db.execute(select(UserModel).where(UserModel.email == email))
-    db_user = result.scalar_one_or_none()
-    if not db_user:
-        raise HTTPException(404, "User not found.")
-    if req.name is not None and req.name.strip():
-        db_user.name = req.name.strip()
-    await _append_audit_db(db, user_uid=email, action_type="Profile Updated",
-                           status="Success", detail="User updated their profile")
-    return {
-        "message": "Profile updated successfully.",
-        "user": {"email": db_user.email, "name": db_user.name, "role": db_user.role},
-    }
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# SUBJECT ANALYTICS
-# ─────────────────────────────────────────────────────────────────────────────
-
 def _calc_subject_analytics(subject: str, trimester: Optional[str]) -> dict:
+    """Compute full analytics for a single subject, optionally scoped to a trimester."""
     if _DATA is None or "SUBJECTCODE" not in _DATA.columns:
         return {}
 
@@ -1487,19 +1557,29 @@ def _calc_subject_analytics(subject: str, trimester: Optional[str]) -> dict:
     if df_subj.empty:
         return {}
 
-    df_scope = (df_subj[df_subj["STUDYPERIOD"] == trimester]
-                if trimester and "STUDYPERIOD" in df_subj.columns else df_subj)
-    df_inst  = (df_all[df_all["STUDYPERIOD"] == trimester]
-                if trimester and "STUDYPERIOD" in df_all.columns  else df_all)
+    df_scope = (
+        df_subj[df_subj["STUDYPERIOD"] == trimester]
+        if trimester and "STUDYPERIOD" in df_subj.columns else df_subj
+    )
+    df_inst = (
+        df_all[df_all["STUDYPERIOD"] == trimester]
+        if trimester and "STUDYPERIOD" in df_all.columns else df_all
+    )
     if df_scope.empty:
         return {}
 
     avg_mark   = round(float(df_scope["MARKPERCENT"].mean()), 1)
     pass_rate  = round(float((df_scope["MARKPERCENT"] >= 50).mean() * 100), 1)
     fail_rate  = round(100.0 - pass_rate, 1)
-    stu_count  = int(df_scope["STUDENTID_MASKED"].nunique()) if "STUDENTID_MASKED" in df_scope.columns else len(df_scope)
-    inst_avg   = round(float(df_inst["MARKPERCENT"].mean()), 1)   if not df_inst.empty else avg_mark
-    inst_pr    = round(float((df_inst["MARKPERCENT"] >= 50).mean() * 100), 1) if not df_inst.empty else pass_rate
+    stu_count  = (
+        int(df_scope["STUDENTID_MASKED"].nunique())
+        if "STUDENTID_MASKED" in df_scope.columns else len(df_scope)
+    )
+    inst_avg = round(float(df_inst["MARKPERCENT"].mean()), 1) if not df_inst.empty else avg_mark
+    inst_pr  = (
+        round(float((df_inst["MARKPERCENT"] >= 50).mean() * 100), 1)
+        if not df_inst.empty else pass_rate
+    )
     difficulty = "Low" if fail_rate < 20 else ("Medium" if fail_rate <= 40 else "High")
 
     prev_avg = prev_pr = None
@@ -1511,7 +1591,10 @@ def _calc_subject_analytics(subject: str, trimester: Optional[str]) -> dict:
                 prev_avg = round(float(df_p["MARKPERCENT"].mean()), 1)
                 prev_pr  = round(float((df_p["MARKPERCENT"] >= 50).mean() * 100), 1)
     else:
-        periods_w_data = [p for p in PERIODS_ORDER if "STUDYPERIOD" in df_subj.columns and p in df_subj["STUDYPERIOD"].values]
+        periods_w_data = [
+            p for p in PERIODS_ORDER
+            if "STUDYPERIOD" in df_subj.columns and p in df_subj["STUDYPERIOD"].values
+        ]
         if len(periods_w_data) >= 2:
             df_p = df_subj[df_subj["STUDYPERIOD"] == periods_w_data[-2]]
             if not df_p.empty:
@@ -1531,7 +1614,10 @@ def _calc_subject_analytics(subject: str, trimester: Optional[str]) -> dict:
         for p in PERIODS_ORDER:
             df_p = df_subj[df_subj["STUDYPERIOD"] == p]
             if not df_p.empty:
-                pc = int(df_p["STUDENTID_MASKED"].nunique()) if "STUDENTID_MASKED" in df_p.columns else len(df_p)
+                pc = (
+                    int(df_p["STUDENTID_MASKED"].nunique())
+                    if "STUDENTID_MASKED" in df_p.columns else len(df_p)
+                )
                 trimester_comparison.append({
                     "period":    p,
                     "avg":       round(float(df_p["MARKPERCENT"].mean()), 1),
@@ -1542,14 +1628,17 @@ def _calc_subject_analytics(subject: str, trimester: Optional[str]) -> dict:
     grade_distribution = []
     for band, lo, hi in GRADE_BANDS:
         s_cnt = int(((df_scope["MARKPERCENT"] >= lo) & (df_scope["MARKPERCENT"] <= hi)).sum())
-        i_cnt = int(((df_inst["MARKPERCENT"]  >= lo) & (df_inst["MARKPERCENT"]  <= hi)).sum()) if not df_inst.empty else 0
+        i_cnt = (
+            int(((df_inst["MARKPERCENT"] >= lo) & (df_inst["MARKPERCENT"] <= hi)).sum())
+            if not df_inst.empty else 0
+        )
         grade_distribution.append({"band": band, "subject_count": s_cnt, "institution_count": i_cnt})
 
     performance_trend = []
     if "STUDYPERIOD" in df_subj.columns:
         for p in PERIODS_ORDER:
             df_sp = df_subj[df_subj["STUDYPERIOD"] == p]
-            df_ip = df_all[df_all["STUDYPERIOD"] == p]
+            df_ip = df_all[df_all["STUDYPERIOD"]  == p]
             s_avg = round(float(df_sp["MARKPERCENT"].mean()), 1) if not df_sp.empty else None
             i_avg = round(float(df_ip["MARKPERCENT"].mean()), 1) if not df_ip.empty else None
             if s_avg is not None:
@@ -1573,42 +1662,18 @@ def _calc_subject_analytics(subject: str, trimester: Optional[str]) -> dict:
     }
 
 
-@app.get("/api/subjects/list", tags=["Subjects"])
-async def subjects_list(user: dict = Depends(require_head_of_school)):
-    if _DATA is None or "SUBJECTCODE" not in _DATA.columns:
-        return []
-    return sorted(_DATA["SUBJECTCODE"].dropna().unique().tolist())
-
-
-@app.get("/api/subjects/analytics", tags=["Subjects"])
-async def subjects_analytics(
-    subject_a: str           = Query(...),
-    subject_b: Optional[str] = Query(None),
-    trimester: Optional[str] = Query(None),
-    user: dict = Depends(require_head_of_school),
-):
-    stats_a = _calc_subject_analytics(subject_a, trimester)
-    if not stats_a:
-        raise HTTPException(404, f"No data found for subject {subject_a}")
-    stats_b = _calc_subject_analytics(subject_b, trimester) if subject_b else None
-    return {"subject_a": stats_a, "subject_b": stats_b}
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# INSTITUTION GEMINI ENDPOINTS
-# ─────────────────────────────────────────────────────────────────────────────
-
 def _institution_stats() -> dict:
+    """Compute institution-wide summary statistics used by the HoT Gemini endpoints."""
     if _DATA is None or _DATA.empty:
         return {}
     df = _DATA.dropna(subset=["MARKPERCENT"]).copy()
     if df.empty:
         return {}
 
-    overall_avg  = round(float(df["MARKPERCENT"].mean()), 1)
-    overall_pr   = round(float((df["MARKPERCENT"] >= 50).mean() * 100), 1)
-    at_risk      = int((df["MARKPERCENT"] < 50).sum())
-    countries    = int(df["COUNTRY_MASKED"].nunique()) if "COUNTRY_MASKED" in df.columns else 0
+    overall_avg = round(float(df["MARKPERCENT"].mean()), 1)
+    overall_pr  = round(float((df["MARKPERCENT"] >= 50).mean() * 100), 1)
+    at_risk     = int((df["MARKPERCENT"] < 50).sum())
+    countries   = int(df["COUNTRY_MASKED"].nunique()) if "COUNTRY_MASKED" in df.columns else 0
 
     latest = None
     if "STUDYPERIOD" in df.columns:
@@ -1617,8 +1682,14 @@ def _institution_stats() -> dict:
                 latest = p
                 break
 
-    df_latest = df[df["STUDYPERIOD"] == latest] if latest and "STUDYPERIOD" in df.columns else df
-    latest_pr = round(float((df_latest["MARKPERCENT"] >= 50).mean() * 100), 1) if not df_latest.empty else overall_pr
+    df_latest = (
+        df[df["STUDYPERIOD"] == latest]
+        if latest and "STUDYPERIOD" in df.columns else df
+    )
+    latest_pr = (
+        round(float((df_latest["MARKPERCENT"] >= 50).mean() * 100), 1)
+        if not df_latest.empty else overall_pr
+    )
 
     prev_pr = None
     if latest:
@@ -1639,7 +1710,10 @@ def _institution_stats() -> dict:
     intl: list = []
     if "COUNTRY_MASKED" in df.columns:
         for country, grp in df.groupby("COUNTRY_MASKED"):
-            intl.append({"country": str(country), "avg_mark": round(float(grp["MARKPERCENT"].mean()), 1)})
+            intl.append({
+                "country":  str(country),
+                "avg_mark": round(float(grp["MARKPERCENT"].mean()), 1),
+            })
         intl.sort(key=lambda x: x["avg_mark"], reverse=True)
 
     assess: list = []
@@ -1667,15 +1741,94 @@ def _institution_stats() -> dict:
     }
 
 
+@app.post("/api/gemini/alert", tags=["Gemini"])
+async def gemini_alert(
+    req:  GeminiAlertRequest,
+    user: dict = Depends(get_current_user),
+    db:   AsyncSession = Depends(get_db),
+):
+    """Generate a one-sentence Gemini alert for the selected subject/trimester."""
+    stats = _subject_stats(req.subject, req.trimester, user)
+    if not stats:
+        return {"alert": "", "tokens_used": 0}
+
+    change_str = f"{stats['change']:+.1f}%" if stats["change"] is not None else "N/A"
+    prompt = (
+        f"Subject: {stats['subject']}, Current pass rate: {stats['pass_rate']}%, "
+        f"Previous: {stats.get('prev_pass_rate', 'N/A')}%, Change: {change_str}. "
+        f"Weakest assessment type: {stats['weakest_type']}. "
+        "Write ONE alert sentence for a lecturer. Be specific. Mention the subject name and the change."
+    )
+    alert, tokens = await _gemini_call(_flash_model, prompt)
+    await _append_audit_db(db, user_uid=user["sub"], action_type="AI Request",
+                           status="Success",
+                           detail=f"Gemini alert requested for {req.subject or 'all subjects'}")
+    return {"alert": alert, "tokens_used": tokens}
+
+
+@app.post("/api/gemini/analyse", tags=["Gemini"])
+async def gemini_analyse(
+    req:  GeminiAnalyseRequest,
+    user: dict = Depends(get_current_user),
+    db:   AsyncSession = Depends(get_db),
+):
+    """Generate a 3-4 sentence Gemini analysis for the selected subject/trimester."""
+    stats = _subject_stats(req.subject, req.trimester, user)
+    if not stats:
+        return {"analysis": "No data available for analysis.", "tokens_used": 0, "model": "none"}
+
+    prompt = (
+        f"You are an academic analyst. Given these stats for {req.subject} "
+        f"in {req.trimester or 'the current period'}: {stats}. "
+        "Write a 3-4 sentence analysis for a lecturer. "
+        "Be factual. Use the exact numbers provided. Recommend one action."
+    )
+    analysis, tokens = await _gemini_call(_pro_model, prompt)
+    await _append_audit_db(db, user_uid=user["sub"], action_type="AI Request",
+                           status="Success",
+                           detail=f"Gemini analysis requested for {req.subject}")
+    return {"analysis": analysis, "tokens_used": tokens, "model": "gemini-1.5-pro"}
+
+
+@app.post("/api/gemini/ask", tags=["Gemini"])
+async def gemini_ask(
+    req:  GeminiAskRequest,
+    user: dict = Depends(get_current_user),
+    db:   AsyncSession = Depends(get_db),
+):
+    """Answer a lecturer's free-text question using Gemini with subject context."""
+    stats   = _subject_stats(req.subject, req.trimester, user)
+    context = stats if stats else {"note": "No data loaded yet."}
+
+    prompt = (
+        f"You are an academic analyst for {req.subject or 'the institution'} at KOI. "
+        f"Here is the current data: {context}. "
+        f"Lecturer question: {req.question}. "
+        "Answer in 2-3 sentences using the data provided. Be specific and actionable."
+    )
+    answer, tokens = await _gemini_call(_pro_model, prompt)
+    await _append_audit_db(db, user_uid=user["sub"], action_type="AI Request",
+                           status="Success",
+                           detail=f"Gemini question asked about {req.subject or 'institution'}")
+    return {"answer": answer, "tokens_used": tokens, "model": "gemini-1.5-pro"}
+
+
 @app.post("/api/gemini/institution-alert", tags=["Gemini"])
-async def gemini_institution_alert(user: dict = Depends(require_head_of_school), db: AsyncSession = Depends(get_db)):
+async def gemini_institution_alert(
+    user: dict = Depends(require_head_of_school),
+    db:   AsyncSession = Depends(get_db),
+):
+    """Generate a one-sentence institution-wide Gemini alert for the Head of Technology."""
     stats = _institution_stats()
     if not stats:
         return {"alert": "", "tokens_used": 0}
     subj_str = ", ".join(stats["subjects_below_50"][:5]) or "none"
-    top3 = ", ".join(f"{s['subject']} ({s['pass_rate']}%)" for s in stats["top_3_failing"]) or "none"
+    top3     = ", ".join(
+        f"{s['subject']} ({s['pass_rate']}%)" for s in stats["top_3_failing"]
+    ) or "none"
     prompt = (
-        f"Institution stats: overall pass rate {stats['latest_pass_rate']}% in period {stats['latest_period']}, "
+        f"Institution stats: overall pass rate {stats['latest_pass_rate']}% "
+        f"in period {stats['latest_period']}, "
         f"{stats['subjects_below_50_count']} subjects below 50%: {subj_str}. "
         f"Top failing: {top3}. "
         "Write ONE alert sentence for the Head of Technology. Name specific subjects. Be direct."
@@ -1687,7 +1840,11 @@ async def gemini_institution_alert(user: dict = Depends(require_head_of_school),
 
 
 @app.post("/api/gemini/institution-analyse", tags=["Gemini"])
-async def gemini_institution_analyse(user: dict = Depends(require_head_of_school), db: AsyncSession = Depends(get_db)):
+async def gemini_institution_analyse(
+    user: dict = Depends(require_head_of_school),
+    db:   AsyncSession = Depends(get_db),
+):
+    """Generate a 4-5 sentence institution-wide Gemini analysis."""
     stats = _institution_stats()
     if not stats:
         return {"analysis": "No data available for analysis.", "tokens_used": 0, "model": "none"}
@@ -1704,10 +1861,15 @@ async def gemini_institution_analyse(user: dict = Depends(require_head_of_school
 
 
 @app.post("/api/gemini/institution-ask", tags=["Gemini"])
-async def gemini_institution_ask(req: GeminiInstitutionAskRequest, user: dict = Depends(require_head_of_school), db: AsyncSession = Depends(get_db)):
-    stats = _institution_stats()
+async def gemini_institution_ask(
+    req:  GeminiInstitutionAskRequest,
+    user: dict = Depends(require_head_of_school),
+    db:   AsyncSession = Depends(get_db),
+):
+    """Answer a Head of Technology question using Gemini with institution-wide context."""
+    stats   = _institution_stats()
     context = stats if stats else {"note": "No data loaded yet."}
-    prompt = (
+    prompt  = (
         "You are an academic analyst for KOI. "
         f"Institution context: {context}. "
         f"Head of Technology question: {req.question}. "
@@ -1721,4 +1883,249 @@ async def gemini_institution_ask(req: GeminiInstitutionAskRequest, user: dict = 
 
 @app.get("/api/gemini/token-log", tags=["Gemini"])
 async def gemini_token_log(user: dict = Depends(require_head_of_school)):
+    """Return the in-memory Gemini token-usage log (newest first)."""
     return {"data": list(reversed(_GEMINI_TOKEN_LOG)), "total": len(_GEMINI_TOKEN_LOG)}
+
+
+@app.get("/api/subjects/list", tags=["Subjects"])
+async def subjects_list(user: dict = Depends(require_head_of_school)):
+    """Return sorted list of all subject codes in the dataset."""
+    if _DATA is None or "SUBJECTCODE" not in _DATA.columns:
+        return []
+    return sorted(_DATA["SUBJECTCODE"].dropna().unique().tolist())
+
+
+@app.get("/api/subjects/{subject}/assessments", tags=["Subjects"])
+async def subject_assessments(
+    subject:      str,
+    study_period: Optional[str] = Query(None),
+    user:         dict = Depends(get_current_user),
+):
+    """Return unique assessment types and weightings for a subject and period."""
+    if _DATA is None or _DATA.empty:
+        raise HTTPException(503, "No data loaded. Upload a dataset first.")
+    df_subj = _DATA[_DATA["SUBJECTCODE"] == subject]
+    if df_subj.empty:
+        raise HTTPException(404, "Subject not found.")
+
+    reliability = "fully_clean"
+    if subject not in _SAFE_SUBJECTS:
+        reliability = _subject_reliability_category(subject)
+        if reliability == "unreliable":
+            return {
+                "subject":              subject,
+                "prediction_available": False,
+                "message": (
+                    "Prediction unavailable for this subject due to incomplete "
+                    "assessment data. Contact your Head of Technology."
+                ),
+            }
+
+    if study_period is not None:
+        df_period = df_subj[df_subj["STUDYPERIOD"] == study_period]
+        if df_period.empty:
+            raise HTTPException(404, f"No data for subject {subject} in period {study_period}.")
+        used_period = study_period
+    else:
+        used_period = str(df_subj["STUDYPERIOD"].dropna().max())
+        df_period = df_subj[df_subj["STUDYPERIOD"] == used_period]
+    types_df = (
+        df_period
+        .drop_duplicates(subset=["ASSESSMENTTYPECODE"])
+        [["ASSESSMENTTYPECODE", "WEIGHTING"]]
+        .sort_values("WEIGHTING", ascending=False)
+    )
+    assessment_list = [
+        {"assessmentType": str(r["ASSESSMENTTYPECODE"]), "weighting": float(r["WEIGHTING"])}
+        for _, r in types_df.iterrows()
+        if float(r["WEIGHTING"]) > 0
+    ]
+    total_weight = sum(a["weighting"] for a in assessment_list)
+    response = {
+        "subject":         subject,
+        "study_period":    used_period,
+        "assessments":     assessment_list,
+        "total_weight":    total_weight,
+        "weight_complete": total_weight == 100.0,
+    }
+    if reliability == "mostly_clean":
+        response["reliability_warning"] = (
+            "This subject's data was only partially verified during cleaning — "
+            "assessment weightings may be incomplete."
+        )
+    return response
+
+
+@app.get("/api/subjects/analytics", tags=["Subjects"])
+async def subjects_analytics(
+    subject_a: str           = Query(...),
+    subject_b: Optional[str] = Query(None),
+    trimester: Optional[str] = Query(None),
+    user: dict = Depends(require_head_of_school),
+):
+    """Return analytics for one or two subjects for side-by-side comparison."""
+    stats_a = _calc_subject_analytics(subject_a, trimester)
+    if not stats_a:
+        raise HTTPException(404, f"No data found for subject {subject_a}")
+    stats_b = _calc_subject_analytics(subject_b, trimester) if subject_b else None
+    return {"subject_a": stats_a, "subject_b": stats_b}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Admin Routes
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.get("/api/audit-logs", tags=["Audit"])
+async def get_audit_logs(
+    action_type:   Optional[str] = Query(None),
+    status_filter: Optional[str] = Query(None),
+    user: dict = Depends(require_admin),
+    db:   AsyncSession = Depends(get_db),
+):
+    """Return all audit log entries, optionally filtered by action type or status."""
+    await _append_audit_db(db, user_uid=user["sub"], action_type="Data Access",
+                           status="Success", detail="Viewed audit log")
+    query = select(AuditLog).order_by(desc(AuditLog.id))
+    if action_type:   query = query.where(AuditLog.action_type == action_type)
+    if status_filter: query = query.where(AuditLog.status == status_filter)
+    result = await db.execute(query)
+    logs   = result.scalars().all()
+
+    # Resolve each user_uid to its current role in one batch query so the
+    # frontend never has to infer role from UID patterns (which fails for
+    # real email addresses like principal@koi.edu.au).
+    uids = {log.user_uid for log in logs}
+    role_rows = await db.execute(
+        select(UserModel.email, UserModel.role).where(UserModel.email.in_(uids))
+    )
+    role_map: dict[str, str] = {email: role for email, role in role_rows.all()}
+
+    data = [
+        {
+            "event_id":    log.id,
+            "timestamp":   log.timestamp.strftime("%Y-%m-%d %H:%M") if log.timestamp else "",
+            "user_uid":    log.user_uid,
+            "role":        role_map.get(log.user_uid),
+            "action_type": log.action_type,
+            "status":      log.status,
+            "detail":      log.detail,
+        }
+        for log in logs
+    ]
+    return {"total": len(data), "count": len(data), "data": data}
+
+
+@app.get("/api/users", tags=["Admin"])
+async def list_users(
+    user: dict = Depends(require_super_admin),
+    db:   AsyncSession = Depends(get_db),
+):
+    """Return all non-admin user accounts."""
+    result = await db.execute(select(UserModel).where(UserModel.email != "admin"))
+    users  = result.scalars().all()
+    return [
+        {
+            "email":    u.email,
+            "name":     u.name,
+            "role":     u.role,
+            "subjects": u.subjects or [],
+            "active":   u.is_active,
+        }
+        for u in users
+    ]
+
+
+@app.post("/api/users", status_code=201, tags=["Admin"])
+async def create_user(
+    payload: CreateUserRequest,
+    user: dict = Depends(require_super_admin),
+    db:   AsyncSession = Depends(get_db),
+):
+    """Create a new staff account with role and subject assignments."""
+    domain = payload.email.split('@')[1]
+    if '.' not in domain:
+        raise HTTPException(400, "Please enter a valid institutional email address.")
+    if not payload.name.strip():
+        raise HTTPException(400, "Name must not be empty.")
+    _validate_password(payload.password)
+    if payload.role not in {"Lecturer", "Head of Technology", "Head of School"}:
+        raise HTTPException(400, "Role must be 'Lecturer', 'Head of Technology', or 'Head of School'.")
+    if payload.role == "Lecturer" and not payload.subjects:
+        raise HTTPException(400, "At least one subject must be assigned for a Lecturer.")
+
+    existing = await db.execute(select(UserModel).where(UserModel.email == payload.email))
+    if existing.scalar_one_or_none():
+        raise HTTPException(400, "Email already exists.")
+
+    subjects = [] if payload.role in {"Head of Technology", "Head of School"} else payload.subjects
+    new_user = UserModel(
+        email=payload.email,
+        name=payload.name.strip(),
+        hashed_password=_pwd.hash(payload.password),
+        role=payload.role,
+        is_active=True,
+        subjects=subjects,
+    )
+    db.add(new_user)
+    await db.flush()  # get the id without committing yet
+
+    detail = (
+        f"{payload.role} account created: {payload.email}"
+        + (f" assigned to {', '.join(subjects)}" if subjects else "")
+    )
+    await _append_audit_db(db, user_uid=user["sub"], action_type="User Created",
+                           status="Success", detail=detail)
+    return {
+        "message": f"{payload.role} account created",
+        "user":    {"email": payload.email, "name": payload.name,
+                    "role": payload.role,   "subjects": subjects},
+    }
+
+
+@app.put("/api/users/{email}", tags=["Admin"])
+async def update_user(
+    email:   str,
+    payload: UpdateUserRequest,
+    user: dict = Depends(require_super_admin),
+    db:   AsyncSession = Depends(get_db),
+):
+    """Update subject assignments or active status for an existing account."""
+    result  = await db.execute(select(UserModel).where(UserModel.email == email))
+    db_user = result.scalar_one_or_none()
+    if not db_user:
+        raise HTTPException(404, "User not found.")
+    if db_user.email == "admin":
+        raise HTTPException(403, "Cannot modify the system administrator account.")
+
+    if payload.subjects is not None:
+        db_user.subjects = payload.subjects
+    if payload.active is not None:
+        db_user.is_active = payload.active
+        status_str = "activated" if payload.active else "deactivated"
+        await _append_audit_db(db, user_uid=user["sub"], action_type="User Modified",
+                               status="Success", detail=f"Account {status_str}: {email}")
+    else:
+        await _append_audit_db(db, user_uid=user["sub"], action_type="User Modified",
+                               status="Success", detail=f"Account updated: {email}")
+    return {"message": "Account updated"}
+
+
+@app.delete("/api/users/{email}", tags=["Admin"])
+async def delete_user(
+    email: str,
+    user: dict = Depends(require_super_admin),
+    db:   AsyncSession = Depends(get_db),
+):
+    """Permanently delete a staff account; prevents self-deletion and admin removal."""
+    result  = await db.execute(select(UserModel).where(UserModel.email == email))
+    db_user = result.scalar_one_or_none()
+    if not db_user:
+        raise HTTPException(404, "User not found.")
+    if db_user.email == "admin":
+        raise HTTPException(403, "Cannot delete the system administrator account.")
+    if email == user.get("sub"):
+        raise HTTPException(403, "Cannot delete your own account.")
+
+    await db.delete(db_user)
+    await _append_audit_db(db, user_uid=user["sub"], action_type="User Modified",
+                           status="Success", detail=f"Account deleted: {email}")
+    return {"message": "Account deleted"}

@@ -1,3 +1,4 @@
+// Admin settings: profile editor and password change for HoT/HoS accounts.
 import { useState, useRef } from 'react';
 import { getUser, getUserName, getUserInitials } from '../utils/auth';
 import api from '../services/api';

@@ -1,3 +1,4 @@
+// Admin/HoT dashboard with KPI cards, charts, and institution-wide Gemini insights.
 import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, Cell,

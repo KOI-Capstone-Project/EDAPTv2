@@ -1,3 +1,4 @@
+// Admin student explorer with demographic filters, pagination, and CSV export.
 import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,

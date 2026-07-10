@@ -1,3 +1,4 @@
+// Lecturer dashboard with subject-scoped KPI cards, grade chart, and trend line.
 import { useEffect, useState, useCallback } from 'react';
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip,

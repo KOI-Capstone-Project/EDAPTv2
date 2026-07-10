@@ -1,0 +1,349 @@
+SUBJECTCODE,STUDYPERIOD,TOTAL_WEIGHT,GAP,SEVERITY,ASSESSMENT_TYPES_PRESENT,ASSESSMENT_TYPES_MISSING_ESTIMATE
+ICT732,25.1,5.0,95.0,CRITICAL,"OQ, PJ, TE, IA",major assessment component missing — manual review required
+BUS710,23.2,15.0,85.0,CRITICAL,GR,major assessment component missing — manual review required
+BUS710,23.3,15.0,85.0,CRITICAL,GR,major assessment component missing — manual review required
+BUS710,24.1,15.0,85.0,CRITICAL,GR,major assessment component missing — manual review required
+BUS710,24.2,15.0,85.0,CRITICAL,GR,major assessment component missing — manual review required
+BUS710,24.3,15.0,85.0,CRITICAL,GR,major assessment component missing — manual review required
+BUS710,25.1,15.0,85.0,CRITICAL,GR,major assessment component missing — manual review required
+BUS710,25.2,15.0,85.0,CRITICAL,GR,major assessment component missing — manual review required
+BUS710,25.3,15.0,85.0,CRITICAL,GR,major assessment component missing — manual review required
+ICT724,23.1,20.0,80.0,CRITICAL,TE,major assessment component missing — manual review required
+BUS303,23.2,30.0,70.0,CRITICAL,"GR, RR",major assessment component missing — manual review required
+BUS303,23.3,30.0,70.0,CRITICAL,"GR, RR",major assessment component missing — manual review required
+TSL718,23.2,30.0,70.0,CRITICAL,DA,major assessment component missing — manual review required
+TSL718,23.3,30.0,70.0,CRITICAL,DA,major assessment component missing — manual review required
+TSL718,24.1,30.0,70.0,CRITICAL,DA,major assessment component missing — manual review required
+TSL718,24.2,30.0,70.0,CRITICAL,DA,major assessment component missing — manual review required
+TSL718,24.3,30.0,70.0,CRITICAL,DA,major assessment component missing — manual review required
+TSL718,25.1,30.0,70.0,CRITICAL,DA,major assessment component missing — manual review required
+TSL718,25.2,30.0,70.0,CRITICAL,DA,major assessment component missing — manual review required
+TSL718,25.3,30.0,70.0,CRITICAL,DA,major assessment component missing — manual review required
+ICT740,25.1,40.0,60.0,CRITICAL,"IA, TX",major assessment component missing — manual review required
+ICT740,25.2,40.0,60.0,CRITICAL,"IA, TX",major assessment component missing — manual review required
+ICT740,25.3,40.0,60.0,CRITICAL,"IA, TX",major assessment component missing — manual review required
+MBA909,24.2,40.0,60.0,CRITICAL,"IA, IW",major assessment component missing — manual review required
+MBA909,24.3,40.0,60.0,CRITICAL,"IA, IW",major assessment component missing — manual review required
+MBA909,25.1,40.0,60.0,CRITICAL,"IA, IW",major assessment component missing — manual review required
+MBA909,25.2,40.0,60.0,CRITICAL,"IA, IW",major assessment component missing — manual review required
+MBA909,25.3,40.0,60.0,CRITICAL,"IA, IW",major assessment component missing — manual review required
+ICT301,23.3,50.0,50.0,SEVERE,"PJ, RR",major assessment component missing — manual review required
+ICT302,23.3,50.0,50.0,SEVERE,"PJ, RR",major assessment component missing — manual review required
+ICT703,24.2,50.0,50.0,SEVERE,"OQ, GR, PR, IA",major assessment component missing — manual review required
+ICT741,23.2,50.0,50.0,SEVERE,"FE, DA",major assessment component missing — manual review required
+ICT741,23.3,50.0,50.0,SEVERE,"FE, DA",major assessment component missing — manual review required
+ICT741,24.1,50.0,50.0,SEVERE,"FE, DA",major assessment component missing — manual review required
+MBA912,24.2,50.0,50.0,SEVERE,"GR, GP, IA",major assessment component missing — manual review required
+MBA912,24.3,50.0,50.0,SEVERE,"GR, GP, IA",major assessment component missing — manual review required
+MBA912,25.1,50.0,50.0,SEVERE,"GR, GP, IA",major assessment component missing — manual review required
+MBA912,25.2,50.0,50.0,SEVERE,"GR, GP, IA",major assessment component missing — manual review required
+MBA912,25.3,50.0,50.0,SEVERE,"GR, GP, IA",major assessment component missing — manual review required
+TSL716,23.2,50.0,50.0,SEVERE,"IA, CQ",major assessment component missing — manual review required
+TSL716,24.2,50.0,50.0,SEVERE,"IA, CQ",major assessment component missing — manual review required
+TSL716,25.2,50.0,50.0,SEVERE,"IA, CQ",major assessment component missing — manual review required
+BUS304,24.3,55.0,45.0,SEVERE,"PJ, IA, TP, GP",major assessment component missing — manual review required
+BUS304,25.1,55.0,45.0,SEVERE,"PJ, IA, TP",major assessment component missing — manual review required
+BUS304,25.2,55.0,45.0,SEVERE,"PJ, IA, TP",major assessment component missing — manual review required
+BUS304,25.3,55.0,45.0,SEVERE,"PJ, IA, TP",major assessment component missing — manual review required
+BUS303,24.1,60.0,40.0,SEVERE,"GR, GP, RR",major assessment component missing — manual review required
+BUS303,24.2,60.0,40.0,SEVERE,"GR, GP, RR",major assessment component missing — manual review required
+BUS303,24.3,60.0,40.0,SEVERE,"GR, GP, RR",major assessment component missing — manual review required
+BUS303,25.1,60.0,40.0,SEVERE,"GR, GP, RR",major assessment component missing — manual review required
+BUS303,25.2,60.0,40.0,SEVERE,"GR, GP, RR",major assessment component missing — manual review required
+BUS303,25.3,60.0,40.0,SEVERE,"GR, GP, RR",major assessment component missing — manual review required
+ICT100,25.1,60.0,40.0,SEVERE,"IA, TP, OQ",major assessment component missing — manual review required
+ICT100,25.2,60.0,40.0,SEVERE,"IA, TP, OQ",major assessment component missing — manual review required
+ICT100,25.3,60.0,40.0,SEVERE,"IA, TP, OQ",major assessment component missing — manual review required
+ICT702,23.2,60.0,40.0,SEVERE,"PJ, TX, DA, PS",major assessment component missing — manual review required
+ICT702,23.3,60.0,40.0,SEVERE,"PJ, TX, PS, DA",major assessment component missing — manual review required
+ICT702,24.1,60.0,40.0,SEVERE,"PJ, DA, TX, PS",major assessment component missing — manual review required
+ICT702,24.2,60.0,40.0,SEVERE,"PJ, PS, TX, DA",major assessment component missing — manual review required
+ICT702,24.3,60.0,40.0,SEVERE,"PJ, TX, DA, OQ",major assessment component missing — manual review required
+ICT702,25.1,60.0,40.0,SEVERE,"PJ, PS, DA, TX",major assessment component missing — manual review required
+ICT702,25.2,60.0,40.0,SEVERE,"PJ, TX, DA, OQ",major assessment component missing — manual review required
+ICT702,25.3,60.0,40.0,SEVERE,"PJ, TX, DA, OQ",major assessment component missing — manual review required
+ICT725,24.2,60.0,40.0,SEVERE,"DA, IA, TX",major assessment component missing — manual review required
+ICT725,24.3,60.0,40.0,SEVERE,"DA, IA, TX",major assessment component missing — manual review required
+ICT725,25.1,60.0,40.0,SEVERE,"DA, IA, TX",major assessment component missing — manual review required
+ICT725,25.2,60.0,40.0,SEVERE,"DA, TX, IA",major assessment component missing — manual review required
+ICT725,25.3,60.0,40.0,SEVERE,"IA, TX, DA",major assessment component missing — manual review required
+ICT728,23.2,60.0,40.0,SEVERE,"IA, GP, PJ",major assessment component missing — manual review required
+ICT728,23.3,60.0,40.0,SEVERE,"IA, GP, PJ",major assessment component missing — manual review required
+ICT728,24.1,60.0,40.0,SEVERE,"IA, GP, PJ",major assessment component missing — manual review required
+ICT728,24.2,60.0,40.0,SEVERE,"IA, GP, PJ",major assessment component missing — manual review required
+ICT728,24.3,60.0,40.0,SEVERE,"IA, GP, PJ",major assessment component missing — manual review required
+ICT728,25.1,60.0,40.0,SEVERE,"GP, IA, PJ",major assessment component missing — manual review required
+ICT728,25.2,60.0,40.0,SEVERE,"IA, GP, PJ",major assessment component missing — manual review required
+ICT728,25.3,60.0,40.0,SEVERE,"IA, GP, PJ",major assessment component missing — manual review required
+ICT761,24.2,60.0,40.0,SEVERE,"IA, DA, TP",major assessment component missing — manual review required
+ICT761,24.3,60.0,40.0,SEVERE,"IA, DA, TP",major assessment component missing — manual review required
+ICT761,25.1,60.0,40.0,SEVERE,"IA, DA, TP",major assessment component missing — manual review required
+ICT761,25.2,60.0,40.0,SEVERE,"IA, DA, TP",major assessment component missing — manual review required
+ICT761,25.3,60.0,40.0,SEVERE,"IA, DA, TP",major assessment component missing — manual review required
+MBA901,23.3,60.0,40.0,SEVERE,"RR, IA, DA",major assessment component missing — manual review required
+MBA901,24.1,60.0,40.0,SEVERE,"RR, IA, DA",major assessment component missing — manual review required
+MBA901,24.2,60.0,40.0,SEVERE,"RR, IA, DA",major assessment component missing — manual review required
+MBA901,25.1,60.0,40.0,SEVERE,"RR, IA, DA",major assessment component missing — manual review required
+MBA901,25.2,60.0,40.0,SEVERE,"DA, IA, RR",major assessment component missing — manual review required
+MBA901,25.3,60.0,40.0,SEVERE,"DA, IA, RR",major assessment component missing — manual review required
+TSL709,23.2,60.0,40.0,SEVERE,"GP, DA",major assessment component missing — manual review required
+TSL709,24.3,60.0,40.0,SEVERE,"GP, DA",major assessment component missing — manual review required
+TSL709,25.3,60.0,40.0,SEVERE,"GP, DA",major assessment component missing — manual review required
+ICT274,25.1,65.0,35.0,SEVERE,"GR, GP, IA, TX, OQ",major assessment component missing — manual review required
+ICT370,23.2,65.0,35.0,SEVERE,"PJ, ME, RR",major assessment component missing — manual review required
+ICT370,23.3,65.0,35.0,SEVERE,"PJ, ME, RR",major assessment component missing — manual review required
+ICT370,24.1,65.0,35.0,SEVERE,"PJ, RR, ME",major assessment component missing — manual review required
+ICT370,24.2,65.0,35.0,SEVERE,"PJ, ME, RR",major assessment component missing — manual review required
+ICT370,24.3,65.0,35.0,SEVERE,"PJ, OQ, RR",major assessment component missing — manual review required
+ICT370,25.1,65.0,35.0,SEVERE,"PJ, RR, OQ",major assessment component missing — manual review required
+ICT370,25.2,65.0,35.0,SEVERE,"PJ, OQ, RR",major assessment component missing — manual review required
+ICT370,25.3,65.0,35.0,SEVERE,"PJ, OQ, RR",major assessment component missing — manual review required
+ICT725,23.2,65.0,35.0,SEVERE,"FE, ME, DA",major assessment component missing — manual review required
+ICT725,23.3,65.0,35.0,SEVERE,"FE, ME, DA",major assessment component missing — manual review required
+MBA907,24.2,65.0,35.0,SEVERE,"IA, GR, GP",major assessment component missing — manual review required
+MBA907,24.3,65.0,35.0,SEVERE,"IA, GR, GP",major assessment component missing — manual review required
+MBA907,25.1,65.0,35.0,SEVERE,"IA, GR, GP",major assessment component missing — manual review required
+MBA907,25.2,65.0,35.0,SEVERE,"IA, GR, GP",major assessment component missing — manual review required
+MBA907,25.3,65.0,35.0,SEVERE,"IA, GR, GP",major assessment component missing — manual review required
+ICT701,23.2,70.0,30.0,SEVERE,"FE, DA, OQ",major assessment component missing — manual review required
+ICT701,23.3,70.0,30.0,SEVERE,"FE, DA, OQ",major assessment component missing — manual review required
+ICT701,24.1,70.0,30.0,SEVERE,"FE, DA, OQ",major assessment component missing — manual review required
+ICT722,24.3,70.0,30.0,SEVERE,"PJ, DA, OQ",major assessment component missing — manual review required
+ICT722,25.1,70.0,30.0,SEVERE,"DA, PJ, OQ",major assessment component missing — manual review required
+ICT722,25.2,70.0,30.0,SEVERE,"DA, PJ, OQ",major assessment component missing — manual review required
+ICT722,25.3,70.0,30.0,SEVERE,"DA, PJ, OQ",major assessment component missing — manual review required
+ICT733,24.2,70.0,30.0,SEVERE,"GP, DA, TE",major assessment component missing — manual review required
+ICT733,25.1,70.0,30.0,SEVERE,"DA, GP, TE",major assessment component missing — manual review required
+ICT751,23.3,70.0,30.0,SEVERE,"GR, IA",major assessment component missing — manual review required
+ICT751,24.1,70.0,30.0,SEVERE,"GR, IA",major assessment component missing — manual review required
+ICT752,24.2,70.0,30.0,SEVERE,"GR, ME, GP, CP",major assessment component missing — manual review required
+ICT752,24.3,70.0,30.0,SEVERE,"GR, GP, OQ, CP",major assessment component missing — manual review required
+ICT752,25.1,70.0,30.0,SEVERE,"GR, GP, OQ, CP",major assessment component missing — manual review required
+ICT752,25.2,70.0,30.0,SEVERE,"GR, OQ, GP, CP",major assessment component missing — manual review required
+ICT752,25.3,70.0,30.0,SEVERE,"GR, OQ, GP, CP",major assessment component missing — manual review required
+MBA903,23.3,70.0,30.0,SEVERE,"IA, RR, DA",major assessment component missing — manual review required
+MBA903,24.1,70.0,30.0,SEVERE,"IA, DA, RR",major assessment component missing — manual review required
+MBA903,24.2,70.0,30.0,SEVERE,"IA, DA, RR",major assessment component missing — manual review required
+MBA903,24.3,70.0,30.0,SEVERE,"IA, RR, DA",major assessment component missing — manual review required
+MBA903,25.1,70.0,30.0,SEVERE,"IA, DA, RR",major assessment component missing — manual review required
+MBA903,25.2,70.0,30.0,SEVERE,"RR, IA, DA",major assessment component missing — manual review required
+MBA903,25.3,70.0,30.0,SEVERE,"IA, RR, DA",major assessment component missing — manual review required
+MBA904,24.1,70.0,30.0,SEVERE,"DA, GR, RR",major assessment component missing — manual review required
+MBA904,24.2,70.0,30.0,SEVERE,"GR, RR, IA, DA",major assessment component missing — manual review required
+MBA904,24.3,70.0,30.0,SEVERE,"RR, GR, IA, DA",major assessment component missing — manual review required
+MBA904,25.1,70.0,30.0,SEVERE,"IA, RR, GR, DA",major assessment component missing — manual review required
+MBA904,25.2,70.0,30.0,SEVERE,"GR, RR, IA, DA",major assessment component missing — manual review required
+MBA904,25.3,70.0,30.0,SEVERE,"IA, GR, RR, DA",major assessment component missing — manual review required
+MBA905,24.1,70.0,30.0,SEVERE,"IA, IW",major assessment component missing — manual review required
+MBA905,24.2,70.0,30.0,SEVERE,"IA, IW",major assessment component missing — manual review required
+MBA905,24.3,70.0,30.0,SEVERE,"IA, IW",major assessment component missing — manual review required
+MBA905,25.1,70.0,30.0,SEVERE,"GR, IW",major assessment component missing — manual review required
+MBA905,25.2,70.0,30.0,SEVERE,"GR, IW",major assessment component missing — manual review required
+MBA905,25.3,70.0,30.0,SEVERE,"GR, IW",major assessment component missing — manual review required
+MBA906,24.1,70.0,30.0,SEVERE,"GR, IA",major assessment component missing — manual review required
+MBA906,24.2,70.0,30.0,SEVERE,"GR, IA",major assessment component missing — manual review required
+MBA906,24.3,70.0,30.0,SEVERE,"GR, IA",major assessment component missing — manual review required
+MBA906,25.1,70.0,30.0,SEVERE,"GR, IA",major assessment component missing — manual review required
+MBA906,25.2,70.0,30.0,SEVERE,"GR, IA",major assessment component missing — manual review required
+MBA906,25.3,70.0,30.0,SEVERE,"GR, IA",major assessment component missing — manual review required
+MBA910,24.2,70.0,30.0,SEVERE,"PJ, IA, AA, TP",major assessment component missing — manual review required
+MBA910,25.1,70.0,30.0,SEVERE,"PJ, IA, AA, TP",major assessment component missing — manual review required
+MGT100,24.1,70.0,30.0,SEVERE,"IA, PR, TP, DA",major assessment component missing — manual review required
+MGT100,24.2,70.0,30.0,SEVERE,"IA, PR, TP, DA",major assessment component missing — manual review required
+MGT100,24.3,70.0,30.0,SEVERE,"IA, PR, TP, DA",major assessment component missing — manual review required
+MGT100,25.1,70.0,30.0,SEVERE,"IA, PR, DA, TP",major assessment component missing — manual review required
+MGT100,25.2,70.0,30.0,SEVERE,"IA, PR, TP, DA",major assessment component missing — manual review required
+MGT100,25.3,70.0,30.0,SEVERE,"IA, PR, TP, DA",major assessment component missing — manual review required
+BUS104,25.2,75.0,25.0,SEVERE,"GR, RR, TX, IA",major assessment component missing — manual review required
+BUS707,23.1,75.0,25.0,SEVERE,"IW, IA, TP",major assessment component missing — manual review required
+BUS707,23.2,75.0,25.0,SEVERE,"IW, IA, TP",major assessment component missing — manual review required
+BUS707,23.3,75.0,25.0,SEVERE,"IW, IA, TP",major assessment component missing — manual review required
+BUS707,24.1,75.0,25.0,SEVERE,"IW, IA, TP",major assessment component missing — manual review required
+BUS707,24.2,75.0,25.0,SEVERE,"IW, IA, TP",major assessment component missing — manual review required
+BUS707,24.3,75.0,25.0,SEVERE,"IW, IA, TP",major assessment component missing — manual review required
+BUS707,25.1,75.0,25.0,SEVERE,"IW, IA, TP",major assessment component missing — manual review required
+BUS707,25.2,75.0,25.0,SEVERE,"IW, IA, TP",major assessment component missing — manual review required
+BUS707,25.3,75.0,25.0,SEVERE,"IW, IA, TP",major assessment component missing — manual review required
+BUS708,25.2,75.0,25.0,SEVERE,"DA, OQ",major assessment component missing — manual review required
+BUS708,25.3,75.0,25.0,SEVERE,"IA, OQ",major assessment component missing — manual review required
+ICT106,24.1,75.0,25.0,SEVERE,"FE, IA, TX, PR",major assessment component missing — manual review required
+ICT106,24.2,75.0,25.0,SEVERE,"FE, IA, TX, PR",major assessment component missing — manual review required
+ICT106,24.3,75.0,25.0,SEVERE,"FE, TX, IA, PR",major assessment component missing — manual review required
+ICT106,25.1,75.0,25.0,SEVERE,"FE, TX, IA, PR, OQ",major assessment component missing — manual review required
+ICT106,25.2,75.0,25.0,SEVERE,"FE, TX, IA, OQ, PR",major assessment component missing — manual review required
+ICT106,25.3,75.0,25.0,SEVERE,"FE, TX, IA, PR, OQ",major assessment component missing — manual review required
+ICT372,24.1,75.0,25.0,SEVERE,"FE, IA, PJ, TX",major assessment component missing — manual review required
+ICT372,24.2,75.0,25.0,SEVERE,"FE, IA, PJ, TX",major assessment component missing — manual review required
+ICT730,24.2,75.0,25.0,SEVERE,"IW, GR, IA",major assessment component missing — manual review required
+ICT730,24.3,75.0,25.0,SEVERE,"IW, GR, IA",major assessment component missing — manual review required
+ICT730,25.1,75.0,25.0,SEVERE,"IW, GR, IA",major assessment component missing — manual review required
+ICT730,25.2,75.0,25.0,SEVERE,"IW, GR, IA",major assessment component missing — manual review required
+ICT730,25.3,75.0,25.0,SEVERE,"IW, GR, IA",major assessment component missing — manual review required
+ICT731,23.2,75.0,25.0,SEVERE,"FE, PJ, TE",major assessment component missing — manual review required
+ICT731,23.3,75.0,25.0,SEVERE,"FE, PJ, TE",major assessment component missing — manual review required
+ICT731,24.1,75.0,25.0,SEVERE,"FE, PJ, TE",major assessment component missing — manual review required
+ICT733,25.2,75.0,25.0,SEVERE,"PJ, DA, TE",major assessment component missing — manual review required
+ICT741,24.2,75.0,25.0,SEVERE,"GR, TX, IA",major assessment component missing — manual review required
+ICT741,24.3,75.0,25.0,SEVERE,"GR, TX, IA",major assessment component missing — manual review required
+ICT741,25.1,75.0,25.0,SEVERE,"GR, TX, IA",major assessment component missing — manual review required
+ICT741,25.2,75.0,25.0,SEVERE,"GR, TX, IA",major assessment component missing — manual review required
+ICT741,25.3,75.0,25.0,SEVERE,"GR, TX, IA",major assessment component missing — manual review required
+ICT751,24.2,75.0,25.0,SEVERE,"GR, IA, TP",major assessment component missing — manual review required
+ICT751,24.3,75.0,25.0,SEVERE,"GR, IA, TP",major assessment component missing — manual review required
+ICT751,25.1,75.0,25.0,SEVERE,"GR, IA, TP",major assessment component missing — manual review required
+ICT751,25.2,75.0,25.0,SEVERE,"GR, IA, TP",major assessment component missing — manual review required
+ICT751,25.3,75.0,25.0,SEVERE,"GR, IA, TP",major assessment component missing — manual review required
+MBA910,24.3,75.0,25.0,SEVERE,"PJ, IA, TP, AA",major assessment component missing — manual review required
+MBA910,25.2,75.0,25.0,SEVERE,"PJ, IA, TP, AA",major assessment component missing — manual review required
+MBA910,25.3,75.0,25.0,SEVERE,"PJ, IA, AA, TP",major assessment component missing — manual review required
+TSL720,25.1,75.0,25.0,SEVERE,"RR, DA, OQ",major assessment component missing — manual review required
+TSL720,25.2,75.0,25.0,SEVERE,"RR, DA, OQ",major assessment component missing — manual review required
+TSL720,25.3,75.0,25.0,SEVERE,"RR, DA, OQ",major assessment component missing — manual review required
+BUS302,23.2,80.0,20.0,MODERATE,"FE, GR, IA",major assessment component missing — manual review required
+BUS302,23.3,80.0,20.0,MODERATE,"FE, IA, GR",major assessment component missing — manual review required
+BUS302,24.1,80.0,20.0,MODERATE,"DA, IA, GR",major assessment component missing — manual review required
+BUS302,24.2,80.0,20.0,MODERATE,"DA, IA, GR",major assessment component missing — manual review required
+BUS302,24.3,80.0,20.0,MODERATE,"DA, IA, GR",major assessment component missing — manual review required
+BUS304,24.1,80.0,20.0,MODERATE,"PJ, IA, TP, FAT, GP",major assessment component missing — manual review required
+BUS304,24.2,80.0,20.0,MODERATE,"IA, GR, GP, FAT, TP",major assessment component missing — manual review required
+ICT101,24.3,80.0,20.0,MODERATE,"DA, OQ, WE",major assessment component missing — manual review required
+ICT101,25.1,80.0,20.0,MODERATE,"DA, OQ, WE",major assessment component missing — manual review required
+ICT102,24.3,80.0,20.0,MODERATE,"DA, TP, PS, OQ",major assessment component missing — manual review required
+ICT102,25.1,80.0,20.0,MODERATE,"DA, TP, PS, OQ",major assessment component missing — manual review required
+ICT102,25.2,80.0,20.0,MODERATE,"DA, TP, PS, OQ",major assessment component missing — manual review required
+ICT102,25.3,80.0,20.0,MODERATE,"DA, TP, PS, OQ",major assessment component missing — manual review required
+ICT372,23.2,80.0,20.0,MODERATE,"FE, ME, PJ, TX",major assessment component missing — manual review required
+ICT372,23.3,80.0,20.0,MODERATE,"FE, ME, PJ, TX",major assessment component missing — manual review required
+ICT753,24.1,80.0,20.0,MODERATE,"GR, TP, GP, PJ",major assessment component missing — manual review required
+ICT753,24.2,80.0,20.0,MODERATE,"GR, GP, TP, PJ",major assessment component missing — manual review required
+ICT753,24.3,80.0,20.0,MODERATE,"GR, GP, TP, PJ",major assessment component missing — manual review required
+ICT753,25.1,80.0,20.0,MODERATE,"GR, GP, TP, PJ",major assessment component missing — manual review required
+ICT753,25.2,80.0,20.0,MODERATE,"GR, GP, TP, PJ",major assessment component missing — manual review required
+ICT753,25.3,80.0,20.0,MODERATE,"GR, TP, GP, PJ",major assessment component missing — manual review required
+ICT772,24.2,80.0,20.0,MODERATE,"IA, GR, CP",major assessment component missing — manual review required
+ICT772,24.3,80.0,20.0,MODERATE,"IA, GR, CP",major assessment component missing — manual review required
+ICT772,25.1,80.0,20.0,MODERATE,"GR, IA, CP",major assessment component missing — manual review required
+ICT772,25.2,80.0,20.0,MODERATE,"IA, GR, CP",major assessment component missing — manual review required
+ICT772,25.3,80.0,20.0,MODERATE,"IA, GR, CP",major assessment component missing — manual review required
+MBA901,24.3,80.0,20.0,MODERATE,"RR, DA, IA",major assessment component missing — manual review required
+TSL704,25.1,80.0,20.0,MODERATE,"IDA, DA, TX",major assessment component missing — manual review required
+TSL704,25.2,80.0,20.0,MODERATE,"IDA, DA, TX",major assessment component missing — manual review required
+TSL720,23.3,80.0,20.0,MODERATE,"RR, DA, OQ",major assessment component missing — manual review required
+TSL720,24.1,80.0,20.0,MODERATE,"RR, DA, OQ",major assessment component missing — manual review required
+TSL720,24.2,80.0,20.0,MODERATE,"RR, DA, OQ",major assessment component missing — manual review required
+TSL720,24.3,80.0,20.0,MODERATE,"RR, DA, OQ",major assessment component missing — manual review required
+ACC701,25.1,85.0,15.0,MODERATE,"FE, DA, OQ",partial data missing
+ACC701,25.2,85.0,15.0,MODERATE,"FE, DA, OQ",partial data missing
+ACC701,25.3,85.0,15.0,MODERATE,"FE, DA, OQ",partial data missing
+ACC705,25.1,85.0,15.0,MODERATE,"FE, DA, OQ",partial data missing
+ACC705,25.2,85.0,15.0,MODERATE,"FE, DA, OQ",partial data missing
+ACC705,25.3,85.0,15.0,MODERATE,"FE, DA, OQ",partial data missing
+BUS708,23.1,85.0,15.0,MODERATE,"FE, IA, ME, OQ",partial data missing
+BUS708,23.2,85.0,15.0,MODERATE,"FE, IA, OQ, ME",partial data missing
+ICT102,23.1,85.0,15.0,MODERATE,"FE, DA, TP, OQ",partial data missing
+ICT102,23.2,85.0,15.0,MODERATE,"FE, DA, TP, OQ",partial data missing
+ICT102,23.3,85.0,15.0,MODERATE,"FE, DA, TP, OQ",partial data missing
+ICT102,24.1,85.0,15.0,MODERATE,"FE, PS, TP, OQ",partial data missing
+ICT104,23.1,85.0,15.0,MODERATE,"FE, PS, TX, OQ",partial data missing
+ICT104,23.2,85.0,15.0,MODERATE,"FE, PS, TX, OQ",partial data missing
+ICT104,23.3,85.0,15.0,MODERATE,"FE, PS, TX, OQ",partial data missing
+ICT200,23.2,85.0,15.0,MODERATE,"FE, PS, TX, OQ",partial data missing
+ICT200,23.3,85.0,15.0,MODERATE,"FE, PS, TX, OQ",partial data missing
+ICT373,23.2,85.0,15.0,MODERATE,"FE, PJ, TX, OQ",partial data missing
+ICT373,23.3,85.0,15.0,MODERATE,"FE, PJ, TX, OQ",partial data missing
+ICT373,24.1,85.0,15.0,MODERATE,"FE, PJ, TX, OQ",partial data missing
+ICT373,24.2,85.0,15.0,MODERATE,"FE, PJ, TX, OQ",partial data missing
+ICT373,24.3,85.0,15.0,MODERATE,"FE, PJ, TX, OQ",partial data missing
+ICT373,25.1,85.0,15.0,MODERATE,"FE, PJ, TX, OQ",partial data missing
+ICT373,25.2,85.0,15.0,MODERATE,"FE, PJ, TX, OQ",partial data missing
+ICT373,25.3,85.0,15.0,MODERATE,"FE, PJ, TX, OQ",partial data missing
+ICT740,23.2,85.0,15.0,MODERATE,"FE, IA, ME",partial data missing
+ICT740,23.3,85.0,15.0,MODERATE,"FE, IA, ME",partial data missing
+ICT740,24.1,85.0,15.0,MODERATE,"FE, IA, DA",partial data missing
+ICT740,24.2,85.0,15.0,MODERATE,"FE, IA, DA",partial data missing
+ICT740,24.3,85.0,15.0,MODERATE,"FE, IA, DA",partial data missing
+MGT201,24.1,85.0,15.0,MODERATE,"IA, GR, OQ, TP, GP",partial data missing
+MGT201,24.2,85.0,15.0,MODERATE,"GR, IA, OQ, GP, TP",partial data missing
+MGT201,25.1,85.0,15.0,MODERATE,"GR, IA, OQ, GP, TP",partial data missing
+ACC204,25.1,90.0,10.0,MODERATE,"FE, IA, TX, OQ",likely OQ or small quiz missing
+ACC204,25.2,90.0,10.0,MODERATE,"FE, IA, TX, OQ",likely OQ or small quiz missing
+ACC204,25.3,90.0,10.0,MODERATE,"FE, IA, TX, OQ",likely OQ or small quiz missing
+ACC702,25.1,90.0,10.0,MODERATE,"FE, GR, OQ",likely OQ or small quiz missing
+ACC702,25.2,90.0,10.0,MODERATE,"FE, GR, OQ",likely OQ or small quiz missing
+ACC702,25.3,90.0,10.0,MODERATE,"FE, GR, OQ",likely OQ or small quiz missing
+ICT103,25.1,90.0,10.0,MODERATE,"CP, IDA, TX, MB, PR",likely OQ or small quiz missing
+ICT272,24.3,90.0,10.0,MODERATE,"GP, GR, RR, OQ",likely OQ or small quiz missing
+ICT272,25.1,90.0,10.0,MODERATE,"GP, GR, RR, OQ",likely OQ or small quiz missing
+ICT272,25.2,90.0,10.0,MODERATE,"GP, GR, RR, OQ",likely OQ or small quiz missing
+ICT272,25.3,90.0,10.0,MODERATE,"GP, GR, RR, OQ",likely OQ or small quiz missing
+ICT713,23.1,90.0,10.0,MODERATE,"FE, PJ, IW, OQ",likely OQ or small quiz missing
+ICT713,23.2,90.0,10.0,MODERATE,"FE, PJ, IW, OQ",likely OQ or small quiz missing
+ICT713,23.3,90.0,10.0,MODERATE,"PJ, FE, IW, OQ",likely OQ or small quiz missing
+ICT722,24.2,90.0,10.0,MODERATE,"FE, DA, PJ, OQ",likely OQ or small quiz missing
+ICT732,23.2,90.0,10.0,MODERATE,"FE, GR, TE, OQ",likely OQ or small quiz missing
+ICT732,23.3,90.0,10.0,MODERATE,"FE, GR, TE, OQ",likely OQ or small quiz missing
+ICT732,24.1,90.0,10.0,MODERATE,"FE, GR, TE, OQ",likely OQ or small quiz missing
+ICT732,24.2,90.0,10.0,MODERATE,"FE, GR, TE, OQ",likely OQ or small quiz missing
+ICT732,24.3,90.0,10.0,MODERATE,"PJ, GR, TE, OQ",likely OQ or small quiz missing
+ICT732,25.2,90.0,10.0,MODERATE,"IA, PJ, TE, OQ",likely OQ or small quiz missing
+ICT732,25.3,90.0,10.0,MODERATE,"IA, PJ, TE, OQ",likely OQ or small quiz missing
+ICT742,25.1,90.0,10.0,MODERATE,"IA, PJ, TX, OQ",likely OQ or small quiz missing
+ICT742,25.2,90.0,10.0,MODERATE,"PJ, IA, TX, OQ",likely OQ or small quiz missing
+ICT742,25.3,90.0,10.0,MODERATE,"IA, PJ, TX, OQ",likely OQ or small quiz missing
+ICT743,23.2,90.0,10.0,MODERATE,"FE, PJ, OQ",likely OQ or small quiz missing
+ICT743,23.3,90.0,10.0,MODERATE,"FE, PJ, OQ",likely OQ or small quiz missing
+ICT743,24.1,90.0,10.0,MODERATE,"FE, PJ, OQ",likely OQ or small quiz missing
+ICT743,24.2,90.0,10.0,MODERATE,"FE, PJ, OQ",likely OQ or small quiz missing
+ICT743,24.3,90.0,10.0,MODERATE,"FE, PJ, OQ",likely OQ or small quiz missing
+MGT201,23.2,90.0,10.0,MODERATE,"FE, PJ, IA, TP",likely OQ or small quiz missing
+TSL717,25.1,90.0,10.0,MODERATE,"PF, PJ, RR",likely OQ or small quiz missing
+ACC100,23.1,95.0,5.0,MINOR,"FE, ME, GR, TX, OQ",likely OQ missing
+ACC100,23.2,95.0,5.0,MINOR,"FE, ME, GR, TX, OQ",likely OQ missing
+ACC100,23.3,95.0,5.0,MINOR,"FE, GR, ME, TX, OQ",likely OQ missing
+ACC100,24.1,95.0,5.0,MINOR,"FE, GR, ME, TX, OQ",likely OQ missing
+ACC100,24.2,95.0,5.0,MINOR,"FE, ME, GR, TX, OQ",likely OQ missing
+ACC100,24.3,95.0,5.0,MINOR,"FE, GR, ME, TX, OQ",likely OQ missing
+ACC101,23.2,95.0,5.0,MINOR,"FE, GR, ME, OQ",likely OQ missing
+ACC101,23.3,95.0,5.0,MINOR,"FE, ME, GR, OQ",likely OQ missing
+ACC101,24.1,95.0,5.0,MINOR,"FE, GR, ME, OQ",likely OQ missing
+ACC101,24.2,95.0,5.0,MINOR,"FE, ME, GR, OQ",likely OQ missing
+ACC101,24.3,95.0,5.0,MINOR,"FE, GR, ME, OQ",likely OQ missing
+ACC201,23.2,95.0,5.0,MINOR,"FE, GR, ME, OQ",likely OQ missing
+ACC201,23.3,95.0,5.0,MINOR,"FE, GR, ME, OQ",likely OQ missing
+ACC201,24.1,95.0,5.0,MINOR,"FE, GR, ME, OQ",likely OQ missing
+ACC201,24.2,95.0,5.0,MINOR,"FE, GR, ME, OQ",likely OQ missing
+ACC201,24.3,95.0,5.0,MINOR,"FE, ME, GR, OQ",likely OQ missing
+ACC202,23.2,95.0,5.0,MINOR,"FE, ME, PJ, OQ",likely OQ missing
+ACC202,23.3,95.0,5.0,MINOR,"FE, ME, PJ, OQ",likely OQ missing
+ACC202,24.1,95.0,5.0,MINOR,"FE, PJ, ME, OQ",likely OQ missing
+ACC202,24.2,95.0,5.0,MINOR,"FE, PJ, ME, OQ",likely OQ missing
+ACC202,24.3,95.0,5.0,MINOR,"FE, ME, PJ, OQ",likely OQ missing
+ACC300,23.2,95.0,5.0,MINOR,"FE, GR, ME, OQ",likely OQ missing
+ACC300,23.3,95.0,5.0,MINOR,"FE, GR, ME, OQ",likely OQ missing
+ACC300,24.1,95.0,5.0,MINOR,"FE, GR, ME, OQ",likely OQ missing
+ACC300,24.2,95.0,5.0,MINOR,"FE, ME, GR, OQ",likely OQ missing
+ACC300,24.3,95.0,5.0,MINOR,"FE, GR, ME, OQ",likely OQ missing
+BUS104,24.2,95.0,5.0,MINOR,"IA, PJ, DA, GP",likely OQ missing
+ICT103,23.1,95.0,5.0,MINOR,"FE, CP, MB, TX",likely OQ missing
+ICT103,23.2,95.0,5.0,MINOR,"FE, CP, MB, TX",likely OQ missing
+ICT103,23.3,95.0,5.0,MINOR,"FE, CP, MB, TX",likely OQ missing
+ICT204,23.2,95.0,5.0,MINOR,"FE, TR, PJ, OQ",likely OQ missing
+ICT204,23.3,95.0,5.0,MINOR,"FE, TR, PJ, OQ",likely OQ missing
+ICT204,24.1,95.0,5.0,MINOR,"FE, TR, PJ, OQ",likely OQ missing
+ICT204,24.2,95.0,5.0,MINOR,"FE, TR, PJ, OQ",likely OQ missing
+ICT204,24.3,95.0,5.0,MINOR,"FE, TR, PJ, OQ",likely OQ missing
+ICT204,25.1,95.0,5.0,MINOR,"FE, TR, PJ, OQ",likely OQ missing
+ICT204,25.2,95.0,5.0,MINOR,"FE, TR, PJ, OQ",likely OQ missing
+ICT204,25.3,95.0,5.0,MINOR,"FE, TR, PJ, OQ",likely OQ missing
+ICT274,23.2,95.0,5.0,MINOR,"FE, GR, TX, IA, OQ",likely OQ missing
+ICT274,23.3,95.0,5.0,MINOR,"FE, GR, IA, TX, OQ",likely OQ missing
+ICT274,24.1,95.0,5.0,MINOR,"FE, GR, IA, TX, OQ",likely OQ missing
+ICT274,24.2,95.0,5.0,MINOR,"FE, GR, IA, TX, OQ",likely OQ missing
+ICT274,24.3,95.0,5.0,MINOR,"IA, GR, TX, FE, OQ",likely OQ missing
+ICT274,25.2,95.0,5.0,MINOR,"GR, IA, TX, GP, OQ",likely OQ missing
+ICT303,23.2,95.0,5.0,MINOR,"FE, AA, CP, TP, OQ",likely OQ missing
+ICT303,23.3,95.0,5.0,MINOR,"FE, AA, CP, TP, OQ",likely OQ missing
+ICT303,24.1,95.0,5.0,MINOR,"FE, AA, CP, TP, OQ",likely OQ missing
+ICT726,24.1,95.0,5.0,MINOR,"PJ, DA, TX, OQ",likely OQ missing
+ICT726,24.2,95.0,5.0,MINOR,"PJ, DA, TX, OQ",likely OQ missing
+ICT726,24.3,95.0,5.0,MINOR,"DA, PJ, TX, OQ",likely OQ missing

@@ -1,3 +1,5 @@
+
+// CSV upload page with column validation, preview table, and ingestion status.
 import { useRef, useState, useEffect, useCallback } from 'react';
 import api from '../services/api';
 

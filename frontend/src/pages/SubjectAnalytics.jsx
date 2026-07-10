@@ -1,3 +1,4 @@
+// Subject analytics: side-by-side comparison of two subjects with trend and grade charts.
 import { useState, useEffect, useRef } from 'react';
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend,

@@ -628,6 +628,14 @@ class User(AuditMixin, Base):
         comment="Set to False to disable login without deleting the account",
     )
 
+    is_super_admin: bool = Column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default='false',
+        comment="True for the primary system administrator account — grants access to user management and audit log",
+    )
+
     subjects: list = Column(
         JSON,
         nullable=True,

@@ -1,114 +1,80 @@
-"""
-EDAPT v2 — ML Predictor (Mode 2)
+"""EDAPT v2 — ML inference wrapper. Loads best_model.pkl once at import time."""
 
-Pipeline:
-  1. Feature engineering  — build a flat feature matrix from Enrollment +
-                            Assessment rows up to T2 2025.
-  2. Training             — RandomForestClassifier (target accuracy > 75 %).
-  3. Inference            — predict_proba for T3 2025 enrolments.
-  4. Persistence          — serialise model to disk with joblib; write
-                            Prediction rows to PostgreSQL.
-"""
+from pathlib import Path
+from typing import Optional
 
 import joblib
-import pandas as pd
-from pathlib import Path
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import accuracy_score
-from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import LabelEncoder
+import numpy as np
 
-MODEL_DIR = Path(__file__).parent / "saved_models"
-MODEL_DIR.mkdir(exist_ok=True)
+# ── Load model package at startup ─────────────────────────────────────────────
 
+_PKG_PATH = Path(__file__).parent / "best_model.pkl"
 
-def build_features(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Convert raw assessment rows into a per-student feature matrix.
+if _PKG_PATH.exists():
+    _PACKAGE: Optional[dict] = joblib.load(_PKG_PATH)
+else:
+    _PACKAGE = None
+    print(f"WARNING: ML model not found at {_PKG_PATH}. Run train_model.py first.")
 
-    Expected columns in df:
-        student_masked_id, subject_code, assessment_type_code,
-        mark_percent, weighting, attempt_number,
-        gender_code, age_group, country_masked_id,
-        study_period_code (trimester label)
+# ── Inference ─────────────────────────────────────────────────────────────────
 
-    Returns a DataFrame with one row per student and engineered features.
-    """
-    # Aggregate mark stats per student
-    agg = (
-        df.groupby("student_masked_id")
-        .agg(
-            avg_mark=("mark_percent", "mean"),
-            min_mark=("mark_percent", "min"),
-            max_mark=("mark_percent", "max"),
-            std_mark=("mark_percent", "std"),
-            total_assessments=("mark_percent", "count"),
-            avg_attempts=("attempt_number", "mean"),
-        )
-        .reset_index()
-    )
+def predict(
+    subject:                 str,
+    study_period:            str,
+    trimester_num:           float,
+    assess1_mark:            float,
+    assess1_weight:          float,
+    assess1_contribution:    float,
+    assess2_mark:            float,
+    assess2_weight:          float,
+    assess2_contribution:    float,
+    partial_weighted_score:  float,
+    partial_weight_coverage: float,
+    num_assessments:         int,
+    total_weight_recorded:   float,
+    weight_complete:         bool,
+    assessments_used:        list,
+) -> dict:
+    """Return a prediction dict or an error dict if the model is not loaded."""
+    if _PACKAGE is None:
+        return {"error": "model_not_loaded"}
 
-    # Merge demographic columns (take first row per student — static attrs)
-    demo = df[["student_masked_id", "gender_code", "age_group", "country_masked_id"]].drop_duplicates(
-        subset="student_masked_id"
-    )
-    features = agg.merge(demo, on="student_masked_id", how="left")
+    model           = _PACKAGE["model"]
+    subj_difficulty = _PACKAGE["subject_difficulty"].get(subject, 0.2)
 
-    # Encode categoricals
-    for col in ["gender_code", "age_group"]:
-        le = LabelEncoder()
-        features[col] = le.fit_transform(features[col].fillna("Unknown"))
+    # FEATURES order must match train_model.py FEATURES list exactly
+    feature_values = np.array([[
+        assess1_mark, assess1_weight, assess1_contribution,
+        assess2_mark, assess2_weight, assess2_contribution,
+        partial_weighted_score, partial_weight_coverage,
+        subj_difficulty, trimester_num,
+    ]])
 
-    features["std_mark"] = features["std_mark"].fillna(0)
-    return features
+    proba       = float(model.predict_proba(feature_values)[0][1])
+    probability = round(proba * 100, 1)
 
+    prediction = "Pass" if probability >= 50 else "Fail"
 
-def train(df_train: pd.DataFrame, model_version: str = "rf_v1") -> dict:
-    """
-    Train a RandomForestClassifier and persist to disk.
+    if probability >= 65:
+        risk_band = "Safe"
+    elif probability >= 40:
+        risk_band = "At Risk"
+    else:
+        risk_band = "High Risk"
 
-    df_train must contain a boolean 'passed' column (True = Pass).
-    Returns a dict with accuracy and model path.
-    """
-    features = build_features(df_train)
-    X = features.drop(columns=["student_masked_id"])
-    y = df_train.groupby("student_masked_id")["passed"].first().reindex(features["student_masked_id"]).values
-
-    X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.2, random_state=42)
-
-    clf = RandomForestClassifier(n_estimators=200, max_depth=8, random_state=42, n_jobs=-1)
-    clf.fit(X_train, y_train)
-
-    acc = accuracy_score(y_val, clf.predict(X_val))
-    model_path = MODEL_DIR / f"{model_version}.joblib"
-    joblib.dump(clf, model_path)
-
-    return {"accuracy": round(acc, 4), "model_path": str(model_path)}
-
-
-def predict(df_infer: pd.DataFrame, model_version: str = "rf_v1") -> pd.DataFrame:
-    """
-    Load a trained model and return predictions for df_infer.
-
-    Returns a DataFrame with columns:
-        student_masked_id, predicted_pass (bool), pass_probability (float)
-    """
-    model_path = MODEL_DIR / f"{model_version}.joblib"
-    if not model_path.exists():
-        raise FileNotFoundError(f"Model not found: {model_path}. Run /api/v1/predictions/train first.")
-
-    clf = joblib.load(model_path)
-    features = build_features(df_infer)
-    X = features.drop(columns=["student_masked_id"])
-
-    proba = clf.predict_proba(X)[:, 1]   # probability of Pass class
-    preds = proba >= 0.5
-
-    return pd.DataFrame(
-        {
-            "student_masked_id": features["student_masked_id"].values,
-            "predicted_pass": preds,
-            "pass_probability": proba.round(4),
-        }
-    )
+    return {
+        "subject":                subject,
+        "study_period":           study_period,
+        "probability":            probability,
+        "prediction":             prediction,
+        "risk_band":              risk_band,
+        "subject_difficulty":     subj_difficulty,
+        "num_assessments_used":   num_assessments,
+        "total_weight_recorded":  total_weight_recorded,
+        "weight_complete":        weight_complete,
+        "partial_weighted_score": partial_weighted_score,
+        "model_name":             _PACKAGE["model_name"],
+        "model_accuracy":         _PACKAGE["accuracy"],
+        "gemini_insight":         None,
+        "assessments_used":       assessments_used,
+    }

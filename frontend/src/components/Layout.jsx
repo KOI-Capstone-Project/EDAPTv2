@@ -1,3 +1,4 @@
+// Shell layout: Sidebar on the left, page content on the right, floating AI chatbox.
 import React from 'react';
 import Sidebar from './Sidebar';
 import AIChatbox from './AIChatbox';
