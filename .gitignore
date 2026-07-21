@@ -47,6 +47,7 @@ yarn-error.log*
 *.joblib
 *.h5
 ml_models/
+backend/app/ml/models/
 
 # ── OS ───────────────────────────────────────────────────
 .DS_Store
@@ -56,3 +57,4 @@ Thumbs.db
 .idea/
 .vscode/
 *.swp
+.env-working-saved
