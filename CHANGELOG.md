@@ -4,6 +4,14 @@ All notable changes to EDAPT v2 are documented here.
 
 ---
 
+## [2026-07-17] — Dead File Cleanup
+
+### Removed
+
+- **`frontend/src/pages/LecturerAIInsights.jsx` deleted outright.** Its route and import were removed from `App.js` back on 2026-05-21 (see below) because its functionality — subject/trimester-scoped AI alert, deep analysis, and Q&A via the embedded `GeminiPanel` component — was already live and reachable through `LecturerDashboard.jsx`'s own embedded `GeminiPanel`, making the standalone page a duplicate rather than missing functionality. The file itself sat unreferenced in the repo for two months after the route was cut. Investigated before deleting: confirmed nothing (imports, tests, routes, docs) still referenced it, confirmed its API dependencies (`/api/explorer/filters`, `/api/gemini/alert`, `/api/gemini/analyse`, `/api/gemini/ask`) still work, and confirmed the duplication against `LecturerDashboard.jsx` directly — then removed the dead file rather than leaving it sitting in the repo indefinitely.
+
+---
+
 ## [2026-05-21] — Security Hardening, Head of School Role, and UI Enhancements
 
 ### Security

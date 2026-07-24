@@ -1,5 +1,8 @@
-// Lecturer student explorer: searchable, paginated assessment record table.
-import { useState, useEffect, useCallback } from 'react';
+// Student explorer: searchable, paginated assessment record table with a
+// drill-in student detail panel. Shared by admin (institution-wide, with
+// demographic filters) and lecturer (scoped to assigned subjects) via the
+// isLecturer prop.
+import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
   ResponsiveContainer, BarChart, Bar,
@@ -7,6 +10,88 @@ import {
 import api from '../services/api';
 
 const PAGE_SIZE = 50;
+
+function SearchableSelect({ value, onChange, options, placeholder }) {
+  const [open,  setOpen]  = useState(false);
+  const [query, setQuery] = useState('');
+  const ref = useRef(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const close = (e) => { if (ref.current && !ref.current.contains(e.target)) { setOpen(false); setQuery(''); } };
+    document.addEventListener('mousedown', close);
+    return () => document.removeEventListener('mousedown', close);
+  }, [open]);
+
+  const filtered = query
+    ? options.filter(o => o.toLowerCase().includes(query.toLowerCase()))
+    : options;
+
+  return (
+    <div ref={ref} style={{ position: 'relative' }}>
+      <button
+        type="button"
+        onClick={() => { setOpen(v => !v); setQuery(''); }}
+        style={{
+          border: '0.5px solid #C5D2DC', borderRadius: 8, padding: '8px 28px 8px 12px',
+          fontSize: 13, color: value ? '#1E293B' : '#94A3B8', background: '#fff',
+          outline: 'none', cursor: 'pointer', textAlign: 'left', minWidth: 130,
+        }}
+      >
+        {value || placeholder}
+      </button>
+      {open && (
+        <div style={{
+          position: 'absolute', top: 'calc(100% + 4px)', left: 0, zIndex: 200,
+          background: '#fff', border: '1px solid #DDE4EA', borderRadius: 8,
+          boxShadow: '0 4px 16px rgba(0,0,0,0.10)', minWidth: 180,
+        }}>
+          <div style={{ padding: '8px 8px 4px' }}>
+            <input
+              autoFocus
+              value={query}
+              onChange={e => setQuery(e.target.value)}
+              placeholder="Search…"
+              style={{
+                width: '100%', padding: '6px 10px', border: '1px solid #E2E8F0',
+                borderRadius: 6, fontSize: 12, color: '#1E293B', outline: 'none',
+                boxSizing: 'border-box', background: '#F8FAFC',
+              }}
+            />
+          </div>
+          <div style={{ maxHeight: 200, overflowY: 'auto' }}>
+            <div
+              onClick={() => { onChange(''); setOpen(false); setQuery(''); }}
+              style={{ padding: '8px 12px', fontSize: 13, cursor: 'pointer', color: '#64748B' }}
+              onMouseEnter={e => e.currentTarget.style.background = '#F0F4F8'}
+              onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
+            >
+              {placeholder}
+            </div>
+            {filtered.map(opt => (
+              <div
+                key={opt}
+                onClick={() => { onChange(opt); setOpen(false); setQuery(''); }}
+                style={{
+                  padding: '8px 12px', fontSize: 13, cursor: 'pointer',
+                  color: '#1E293B', fontWeight: value === opt ? 600 : 400,
+                  background: value === opt ? '#EFF6FF' : 'transparent',
+                }}
+                onMouseEnter={e => { if (value !== opt) e.currentTarget.style.background = '#F0F4F8'; }}
+                onMouseLeave={e => { if (value !== opt) e.currentTarget.style.background = 'transparent'; }}
+              >
+                {opt}
+              </div>
+            ))}
+            {filtered.length === 0 && (
+              <div style={{ padding: '8px 12px', fontSize: 12, color: '#94A3B8' }}>No matches</div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
 
 function PassBadge({ passed }) {
   return (
@@ -100,11 +185,13 @@ function StudentDetail({ studentId, onClose }) {
   );
 }
 
-export default function LecturerExplorer() {
-  const [filters,    setFilters]    = useState({ subjects: [], assessment_types: [], trimesters: [] });
+export default function ExplorerView({ isLecturer }) {
+  const [filters,    setFilters]    = useState({ subjects: [], assessment_types: [], trimesters: [], countries: [], genders: [], age_groups: [] });
   const [search,     setSearch]     = useState('');
   const [subject,    setSubject]    = useState('');
   const [trimester,  setTrimester]  = useState('');
+  const [country,    setCountry]    = useState('');
+  const [gender,     setGender]     = useState('');
   const [assessType, setAssessType] = useState('');
   const [passed,     setPassed]     = useState('');
   const [records,    setRecords]    = useState([]);
@@ -125,6 +212,8 @@ export default function LecturerExplorer() {
       if (search)     params.search          = search;
       if (subject)    params.subject         = subject;
       if (trimester)  params.trimester       = trimester;
+      if (country)    params.country         = country;
+      if (gender)     params.gender          = gender;
       if (assessType) params.assessment_type = assessType;
       if (passed)     params.passed          = passed;
       const res = await api.get('/api/explorer/records', { params });
@@ -137,7 +226,7 @@ export default function LecturerExplorer() {
     } finally {
       setLoading(false);
     }
-  }, [search, subject, trimester, assessType, passed]);
+  }, [search, subject, trimester, country, gender, assessType, passed]);
 
   useEffect(() => { fetchRecords(1); }, [fetchRecords]);
 
@@ -145,22 +234,29 @@ export default function LecturerExplorer() {
 
   const clearAll = () => {
     setSearch(''); setSubject(''); setTrimester('');
-    setAssessType(''); setPassed('');
+    setCountry(''); setGender(''); setAssessType(''); setPassed('');
   };
 
   const colStyle = { fontSize: 12, color: '#475569', padding: '10px 12px', borderBottom: '0.5px solid #F0F4F8', whiteSpace: 'nowrap' };
   const thStyle  = { fontSize: 11, fontWeight: 600, color: '#94A3B8', padding: '10px 12px', borderBottom: '1px solid #E2E8F0', textTransform: 'uppercase', letterSpacing: 0.5, background: '#F8FAFC', whiteSpace: 'nowrap' };
+  const colCount = isLecturer ? 7 : 8;
 
   return (
     <div style={s.page}>
+      {/* Header */}
       <div style={s.pageHeader}>
         <div>
-          <h1 style={s.pageTitle}>My Class Explorer</h1>
-          <p style={s.pageSub}>Browse and drill into student records across your assigned subjects</p>
+          <h1 style={s.pageTitle}>{isLecturer ? 'My Class Explorer' : 'Student Analytics'}</h1>
+          <p style={s.pageSub}>
+            {isLecturer
+              ? 'Browse and drill into student records across your assigned subjects'
+              : 'Explore individual student records and drill into performance detail'}
+          </p>
         </div>
         <span style={s.countBadge}>{total.toLocaleString()} records</span>
       </div>
 
+      {/* Filters */}
       <div style={s.card}>
         <form onSubmit={handleSearch} style={s.filterRow}>
           <input
@@ -169,18 +265,41 @@ export default function LecturerExplorer() {
             value={search}
             onChange={e => setSearch(e.target.value)}
           />
-          <select style={s.select} value={subject} onChange={e => setSubject(e.target.value)}>
-            <option value="">All my subjects</option>
-            {filters.subjects.map(sv => <option key={sv} value={sv}>{sv}</option>)}
-          </select>
+          {isLecturer ? (
+            <select style={s.select} value={subject} onChange={e => setSubject(e.target.value)}>
+              <option value="">All my subjects</option>
+              {filters.subjects.map(sv => <option key={sv} value={sv}>{sv}</option>)}
+            </select>
+          ) : (
+            <SearchableSelect
+              value={subject}
+              onChange={setSubject}
+              options={filters.subjects}
+              placeholder="All subjects"
+            />
+          )}
           <select style={s.select} value={trimester} onChange={e => setTrimester(e.target.value)}>
             <option value="">All trimesters</option>
             {filters.trimesters.map(t => <option key={t} value={t}>{t}</option>)}
           </select>
-          {filters.assessment_types?.length > 0 && (
+          {isLecturer && filters.assessment_types?.length > 0 && (
             <select style={s.select} value={assessType} onChange={e => setAssessType(e.target.value)}>
               <option value="">All assessment types</option>
               {filters.assessment_types.map(a => <option key={a} value={a}>{a}</option>)}
+            </select>
+          )}
+          {!isLecturer && filters.countries.length > 0 && (
+            <SearchableSelect
+              value={country}
+              onChange={setCountry}
+              options={filters.countries}
+              placeholder="All countries"
+            />
+          )}
+          {!isLecturer && filters.genders.length > 0 && (
+            <select style={s.select} value={gender} onChange={e => setGender(e.target.value)}>
+              <option value="">All genders</option>
+              {filters.genders.map(g => <option key={g} value={g}>{g}</option>)}
             </select>
           )}
           <select style={s.select} value={passed} onChange={e => setPassed(e.target.value)}>
@@ -194,10 +313,11 @@ export default function LecturerExplorer() {
       </div>
 
       <div style={{ display: 'flex', gap: 20, alignItems: 'flex-start' }}>
+        {/* Table */}
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={s.tableCard}>
             <div style={{ overflowX: 'auto' }}>
-              <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: 580 }}>
+              <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: isLecturer ? 580 : 700 }}>
                 <thead>
                   <tr>
                     <th style={thStyle}>Student ID</th>
@@ -206,15 +326,16 @@ export default function LecturerExplorer() {
                     <th style={thStyle}>Mark %</th>
                     <th style={thStyle}>Result</th>
                     <th style={thStyle}>Period</th>
+                    {!isLecturer && <th style={thStyle}>Country</th>}
                     <th style={thStyle}></th>
                   </tr>
                 </thead>
                 <tbody>
                   {loading && (
-                    <tr><td colSpan={7} style={{ ...colStyle, textAlign: 'center', padding: 32, color: '#94A3B8' }}>Loading…</td></tr>
+                    <tr><td colSpan={colCount} style={{ ...colStyle, textAlign: 'center', padding: 32, color: '#94A3B8' }}>Loading…</td></tr>
                   )}
                   {!loading && records.length === 0 && (
-                    <tr><td colSpan={7} style={{ ...colStyle, textAlign: 'center', padding: 32, color: '#94A3B8' }}>No records found.</td></tr>
+                    <tr><td colSpan={colCount} style={{ ...colStyle, textAlign: 'center', padding: 32, color: '#94A3B8' }}>No records found.</td></tr>
                   )}
                   {!loading && records.map((rec, i) => (
                     <tr
@@ -224,21 +345,15 @@ export default function LecturerExplorer() {
                       <td style={{ ...colStyle, fontWeight: 600, color: '#1E293B' }}>{rec.student_id}</td>
                       <td style={colStyle}>{rec.subject ?? '—'}</td>
                       <td style={colStyle}>{rec.assessment_type ?? '—'}</td>
-                      <td style={{
-                        ...colStyle, fontWeight: 600,
-                        color: rec.mark_percent != null && rec.mark_percent < 50 ? '#DC2626' : '#059669',
-                      }}>
+                      <td style={{ ...colStyle, fontWeight: 600, color: rec.mark_percent != null && rec.mark_percent < 50 ? '#DC2626' : '#059669' }}>
                         {rec.mark_percent != null ? `${rec.mark_percent}%` : '—'}
                       </td>
                       <td style={colStyle}><PassBadge passed={rec.passed} /></td>
                       <td style={colStyle}>{rec.study_period ?? '—'}</td>
+                      {!isLecturer && <td style={colStyle}>{rec.country ?? '—'}</td>}
                       <td style={{ ...colStyle, textAlign: 'right' }}>
                         <button
-                          style={{
-                            ...s.viewBtn,
-                            background: selectedId === rec.student_id ? '#2E6E8E' : '#F0F4F8',
-                            color:      selectedId === rec.student_id ? '#fff' : '#2E6E8E',
-                          }}
+                          style={{ ...s.viewBtn, background: selectedId === rec.student_id ? '#2E6E8E' : '#F0F4F8', color: selectedId === rec.student_id ? '#fff' : '#2E6E8E' }}
                           onClick={() => setSelectedId(id => id === rec.student_id ? null : rec.student_id)}
                         >
                           {selectedId === rec.student_id ? 'Close' : 'View'}
@@ -250,6 +365,7 @@ export default function LecturerExplorer() {
               </table>
             </div>
 
+            {/* Pagination */}
             {totalPages > 1 && (
               <div style={s.pagination}>
                 <button style={s.pageBtn} disabled={page <= 1} onClick={() => fetchRecords(page - 1)}>← Prev</button>
@@ -260,6 +376,7 @@ export default function LecturerExplorer() {
           </div>
         </div>
 
+        {/* Student detail panel */}
         {selectedId && (
           <div style={{ width: 360, flexShrink: 0 }}>
             <StudentDetail studentId={selectedId} onClose={() => setSelectedId(null)} />

@@ -1,8 +1,11 @@
 ###############################################################################
 # EDAPT v2 — docker-compose.yml  (DEVELOPMENT)
 #
-# Services:  db · backend · frontend · pgadmin
+# Services:  db · backend · frontend · pgadmin · scheduler (opt-in)
 # Usage:     docker compose up --build
+#            docker compose --profile scheduler up --build   (also starts the
+#            retrain sidecar — off by default so a plain `up` doesn't add an
+#            extra long-running container to everyday dev)
 ###############################################################################
 
 name: edaptv2-dev
@@ -78,6 +81,33 @@ services:
       - "3000:3000"
     depends_on:
       - backend
+
+  # ── Scheduled-retrain sidecar (opt-in — see docker compose --profile above) ─
+  # Reuses the backend image; runs scheduled_retrain.py in a loop instead of
+  # serving requests. Isolated from the backend service on purpose — a hung
+  # or slow retrain can't take the API down with it. See
+  # backend/scripts/retrain_loop.sh for the loop itself and
+  # backend/app/ml/scheduled_retrain.py for why the no-op-when-nothing-new
+  # check makes daily polling safe regardless of exact timing.
+  scheduler:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.dev
+    container_name: edaptv2_scheduler
+    restart: unless-stopped
+    profiles: ["scheduler"]
+    env_file: .env
+    environment:
+      DATABASE_URL:      ${DATABASE_URL}
+      ENVIRONMENT:       development
+      PYTHONUNBUFFERED:  "1"
+    volumes:
+      - ./backend:/app
+      - ./data:/data:ro
+    depends_on:
+      db:
+        condition: service_healthy
+    entrypoint: ["sh", "/app/scripts/retrain_loop.sh"]
 
   # ── pgAdmin ────────────────────────────────────────────────────────────────
   pgadmin:

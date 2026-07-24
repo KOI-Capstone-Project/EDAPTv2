@@ -32,11 +32,12 @@ from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 from pydantic import BaseModel, Field, StringConstraints, field_validator
-from sqlalchemy import desc, select
+from sqlalchemy import desc, func, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
-from app.db.models import AuditLog, Base, User as UserModel
+from app.db.models import AuditLog, Base, Prediction, User as UserModel
 
 load_dotenv()
 
@@ -279,6 +280,64 @@ async def _append_audit_db(
     await db.commit()
 
 
+async def _upsert_prediction(
+    db: AsyncSession,
+    *,
+    student_id_masked: str,
+    subject_code:       str,
+    study_period:        str,
+    result:              dict,
+    commit:              bool = True,
+) -> None:
+    """
+    Record a prediction for a real, identified student so it can later be
+    reconciled against the real outcome (reconcile_predictions.py) and rolled
+    into an accuracy report (prediction_accuracy_report.py).
+
+    Upserts on (student_id_masked, subject_code, study_period, model_version)
+    — the same natural key the unique constraint enforces — so re-predicting
+    the same student under the same model version (e.g. reopening a roster
+    page) refreshes the stored prediction rather than accumulating duplicate
+    history rows. The audit log already exists for a call-by-call history;
+    this table is "our current prediction for this student, per model
+    version," not a log.
+
+    Silently no-ops if `result` has no model_version (e.g. the model wasn't
+    loaded) — there's nothing traceable to record in that case.
+
+    commit=False lets a caller looping over many students (the roster
+    endpoint) batch every upsert into one commit at the end of the loop,
+    instead of a round-trip per student.
+    """
+    model_version = result.get("model_version")
+    if not model_version or result.get("prediction") is None:
+        return
+
+    stmt = pg_insert(Prediction).values(
+        student_id_masked = student_id_masked,
+        subject_code       = subject_code,
+        study_period        = study_period,
+        model_version       = model_version,
+        predicted_pass      = result["prediction"] == "Pass",
+        pass_probability    = (result["probability"] / 100) if result.get("probability") is not None else None,
+        risk_band            = result.get("risk_band"),
+        estimate_type        = result.get("estimate_type"),
+    )
+    stmt = stmt.on_conflict_do_update(
+        constraint="uq_prediction_student_subject_period_model",
+        set_={
+            "predicted_pass":   stmt.excluded.predicted_pass,
+            "pass_probability": stmt.excluded.pass_probability,
+            "risk_band":        stmt.excluded.risk_band,
+            "estimate_type":    stmt.excluded.estimate_type,
+            "predicted_at":     func.now(),
+        },
+    )
+    await db.execute(stmt)
+    if commit:
+        await db.commit()
+
+
 async def _seed_default_users() -> None:
     """Insert the three default demo accounts if the users table is empty."""
     async with _AsyncSession() as db:
@@ -443,6 +502,13 @@ class _AssessmentEntry(BaseModel):
 
 
 class PredictRequest(BaseModel):
+    # Optional — /api/predict is used for both genuine what-if scenarios
+    # (hypothetical marks, no real student) and real predictions for an
+    # identified student. Only the latter gets logged to the predictions
+    # table (see _upsert_prediction); a what-if call with no student_id
+    # correctly logs nothing, since there's no real student to reconcile
+    # a hypothetical prediction against.
+    student_id:              Optional[str] = Field(None, max_length=50)
     subject:                 str   = Field(..., min_length=1, max_length=20)
     study_period:            str   = Field(..., min_length=1, max_length=10)
     trimester_num:           float
@@ -452,6 +518,8 @@ class PredictRequest(BaseModel):
     assess2_mark:            float = Field(0.0,  ge=0.0, le=100.0)
     assess2_weight:          float = Field(0.0,  ge=0.0, le=100.0)
     assess2_contribution:    float = Field(0.0,  ge=0.0, le=100.0)
+    # Accepted for backward compatibility but never trusted — /api/predict
+    # recomputes both server-side from assessments_used (see compute_partial_score).
     partial_weighted_score:  float = Field(..., ge=0.0, le=100.0)
     partial_weight_coverage: float = Field(..., ge=0.0, le=1.0)
     num_assessments:         int   = Field(..., ge=1)
@@ -471,7 +539,15 @@ class GeminiAnalyseRequest(BaseModel):
 
 
 class GeminiAskRequest(BaseModel):
-    question:  str           = Field(..., max_length=500)
+    # 500 was sized for a human typing a free-text question. Once the
+    # frontend started embedding real SHAP factor lists (see PredictorView.jsx
+    # fetchDetailGeminiInsight/fetchWhatIfGeminiInsight) the auto-generated
+    # per-prediction question routinely exceeded that — verified: every real
+    # prediction's insight request 422'd, silently degrading to the generic
+    # "unavailable" fallback. 700 gives real margin for the templated
+    # SHAP-factors question (~350-450 chars typical) while still bounding a
+    # human-typed question to something reasonable.
+    question:  str           = Field(..., max_length=700)
     subject:   Optional[str] = Field(None, max_length=20)
     trimester: Optional[str] = Field(None, max_length=10)
 
@@ -1194,6 +1270,7 @@ def _row_to_record(row: dict, is_admin: bool) -> dict:
         "mark_percent":    _safe(mp),
         "assessment_mark": _safe(row.get("ASSESSMENTMARK")),
         "max_mark":        _safe(row.get("MAXMARK")),
+        "weighting":       _safe(row.get("WEIGHTING")),
         "passed":          passed,
     }
     if is_admin:
@@ -1298,8 +1375,9 @@ async def explorer_filters(user: dict = Depends(get_current_user)):
 
 @app.get("/api/explorer/student/{student_id}", tags=["Explorer"])
 async def explorer_student(
-    student_id: str,
-    subject:    Optional[str] = Query(None),
+    student_id:   str,
+    subject:      Optional[str] = Query(None),
+    study_period: Optional[str] = Query(None),
     user: dict = Depends(get_current_user),
 ):
     """Return full assessment history, trend, and peer comparison for a single student."""
@@ -1311,6 +1389,8 @@ async def explorer_student(
     df = df[df["STUDENTID_MASKED"].astype(str) == str(student_id)]
     if subject and "SUBJECTCODE" in df.columns:
         df = df[df["SUBJECTCODE"] == subject]
+    if study_period and "STUDYPERIOD" in df.columns:
+        df = df[df["STUDYPERIOD"] == study_period]
     df = df.dropna(subset=["MARKPERCENT"])
 
     if df.empty:
@@ -1434,7 +1514,13 @@ async def predict_outcome(
     db:   AsyncSession = Depends(get_db),
 ):
     """Run the ML ensemble and return a pass-probability prediction."""
-    from app.ml.predictor import predict as ml_predict
+    from app.ml.predictor import (
+        predict as ml_predict,
+        predict_partial as ml_predict_partial,
+        compute_partial_score,
+        classify_coverage,
+        MIN_COVERAGE_FOR_PREDICTION,
+    )
 
     is_admin  = user.get("role") in {"Head of Technology", "Head of School"}
     subj_list = user.get("subjects", [])
@@ -1442,36 +1528,81 @@ async def predict_outcome(
     if not is_admin and req.subject not in subj_list:
         raise HTTPException(403, "You are not assigned to that subject.")
 
-    reliability = "fully_clean"
-    if req.subject not in _SAFE_SUBJECTS:
-        reliability = _subject_reliability_category(req.subject)
-        if reliability == "unreliable":
-            return {
-                "subject":              req.subject,
-                "prediction_available": False,
-                "message": (
-                    "Prediction unavailable for this subject due to incomplete "
-                    "assessment data. Contact your Head of Technology."
-                ),
-            }
+    # Always derive from subject_reliability.json directly — _SAFE_SUBJECTS is the
+    # model's *training* subject list (fully_clean + mostly_clean) and is not a
+    # reliable proxy for "no warning needed": a mostly_clean subject is safe to
+    # train on but should still show the yellow warning below.
+    reliability = _subject_reliability_category(req.subject)
+    if reliability == "unreliable":
+        return {
+            "subject":              req.subject,
+            "prediction_available": False,
+            "message": (
+                "Prediction unavailable for this subject due to incomplete "
+                "assessment data. Contact your Head of Technology."
+            ),
+        }
 
-    result = ml_predict(
-        subject=                 req.subject,
-        study_period=            req.study_period,
-        trimester_num=           req.trimester_num,
-        assess1_mark=            req.assess1_mark,
-        assess1_weight=          req.assess1_weight,
-        assess1_contribution=    req.assess1_contribution,
-        assess2_mark=            req.assess2_mark,
-        assess2_weight=          req.assess2_weight,
-        assess2_contribution=    req.assess2_contribution,
-        partial_weighted_score=  req.partial_weighted_score,
-        partial_weight_coverage= req.partial_weight_coverage,
-        num_assessments=         req.num_assessments,
-        total_weight_recorded=   req.total_weight_recorded,
-        weight_complete=         req.weight_complete,
-        assessments_used=        [a.model_dump() for a in req.assessments_used],
-    )
+    assessments_used_dicts = [a.model_dump() for a in req.assessments_used]
+
+    # Coverage tier decides which model serves this request — never trust
+    # req.total_weight_recorded for this decision, only the raw items actually
+    # submitted, for the same reason partial_weighted_score is never trusted
+    # directly (a client could misreport how complete a record is).
+    cumulative_weighting_recorded = sum(a["weighting"] for a in assessments_used_dicts)
+    coverage_tier = classify_coverage(cumulative_weighting_recorded)
+
+    if coverage_tier == "insufficient":
+        # A coverage gate, not a data-quality gate — distinct message from the
+        # unreliable-subject case above, even though the response shape (
+        # prediction_available: False) matches so the frontend can reuse the
+        # same red-panel pattern for both.
+        return {
+            "subject":              req.subject,
+            "prediction_available": False,
+            "coverage_status":      "insufficient_data",
+            "message": (
+                f"Not enough assessment data recorded yet to generate a prediction "
+                f"({cumulative_weighting_recorded:.0f}% of the term recorded — at least "
+                f"{MIN_COVERAGE_FOR_PREDICTION:.0f}% is needed). Check back once more "
+                f"assessments have been marked."
+            ),
+        }
+
+    if coverage_tier == "complete":
+        # ── UNCHANGED — existing top-2, best_model.pkl path. Do not touch. ──
+        # req.partial_weighted_score / req.partial_weight_coverage are accepted for
+        # backward compatibility but never trusted — a client summing ALL entered
+        # assessments (not just the top 2 by weight) would silently feed the model
+        # a feature value outside its training distribution. Always recompute
+        # server-side from the raw assessments_used, using the same top-2-by-weight
+        # logic train_model.py's build_early_features() uses, so training and
+        # serving can't drift apart regardless of what the client sends.
+        partial_weighted_score, partial_weight_coverage = compute_partial_score(assessments_used_dicts)
+        result = ml_predict(
+            subject=                 req.subject,
+            study_period=            req.study_period,
+            trimester_num=           req.trimester_num,
+            assess1_mark=            req.assess1_mark,
+            assess1_weight=          req.assess1_weight,
+            assess1_contribution=    req.assess1_contribution,
+            assess2_mark=            req.assess2_mark,
+            assess2_weight=          req.assess2_weight,
+            assess2_contribution=    req.assess2_contribution,
+            partial_weighted_score=  partial_weighted_score,
+            partial_weight_coverage= partial_weight_coverage,
+            num_assessments=         req.num_assessments,
+            total_weight_recorded=   req.total_weight_recorded,
+            weight_complete=         req.weight_complete,
+            assessments_used=        assessments_used_dicts,
+        )
+    else:  # "partial" — 50-99% coverage, genuinely mid-term
+        result = ml_predict_partial(
+            subject=          req.subject,
+            study_period=     req.study_period,
+            trimester_num=    req.trimester_num,
+            assessments_used= assessments_used_dicts,
+        )
 
     if "error" in result:
         raise HTTPException(503, "ML model not loaded. Run train_model.py first.")
@@ -1482,9 +1613,35 @@ async def predict_outcome(
             "assessment weightings may be incomplete."
         )
 
+    # Log the actual server-computed features alongside the outcome — not just
+    # subject+probability — so any future train/serve discrepancy can be
+    # reconstructed exactly from history instead of only bounded by mechanism
+    # (see the partial_weighted_score client/server mismatch this fixed). Pulled
+    # from `result` rather than tier-specific locals, since both branches above
+    # populate the same partial_weighted_score/total_weight_recorded keys.
+    audit_features = json.dumps({
+        "coverage_tier":           coverage_tier,
+        "assessments_used":        assessments_used_dicts,
+        "partial_weighted_score":  result.get("partial_weighted_score"),
+        "partial_weight_coverage": (result.get("total_weight_recorded") or 0) / 100,
+    })
     await _append_audit_db(db, user_uid=user["sub"], action_type="Prediction Run",
                            status="Success",
-                           detail=f"Predicted {result['subject']}: {result['probability']}% pass probability")
+                           detail=(f"Predicted {result['subject']}: {result['probability']}% pass probability "
+                                   f"| features: {audit_features}"))
+
+    # Only when this call is identified to a real student — a what-if scenario
+    # (no student_id) has nothing to reconcile against later and correctly
+    # logs no prediction row.
+    if req.student_id:
+        await _upsert_prediction(
+            db,
+            student_id_masked = req.student_id,
+            subject_code       = req.subject,
+            study_period        = req.study_period,
+            result              = result,
+        )
+
     return result
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1908,18 +2065,18 @@ async def subject_assessments(
     if df_subj.empty:
         raise HTTPException(404, "Subject not found.")
 
-    reliability = "fully_clean"
-    if subject not in _SAFE_SUBJECTS:
-        reliability = _subject_reliability_category(subject)
-        if reliability == "unreliable":
-            return {
-                "subject":              subject,
-                "prediction_available": False,
-                "message": (
-                    "Prediction unavailable for this subject due to incomplete "
-                    "assessment data. Contact your Head of Technology."
-                ),
-            }
+    # Always derive from subject_reliability.json directly — see the /api/predict
+    # comment above for why _SAFE_SUBJECTS membership isn't a valid shortcut here.
+    reliability = _subject_reliability_category(subject)
+    if reliability == "unreliable":
+        return {
+            "subject":              subject,
+            "prediction_available": False,
+            "message": (
+                "Prediction unavailable for this subject due to incomplete "
+                "assessment data. Contact your Head of Technology."
+            ),
+        }
 
     if study_period is not None:
         df_period = df_subj[df_subj["STUDYPERIOD"] == study_period]
@@ -1947,6 +2104,200 @@ async def subject_assessments(
         "assessments":     assessment_list,
         "total_weight":    total_weight,
         "weight_complete": total_weight == 100.0,
+    }
+    if reliability == "mostly_clean":
+        response["reliability_warning"] = (
+            "This subject's data was only partially verified during cleaning — "
+            "assessment weightings may be incomplete."
+        )
+    return response
+
+
+@app.get("/api/subjects/{subject}/roster", tags=["Subjects"])
+async def subject_roster(
+    subject:           str,
+    study_period:      str             = Query(...),
+    simulate_progress: Optional[float] = Query(None, ge=0, le=100),
+    user:              dict            = Depends(get_current_user),
+    db:                AsyncSession    = Depends(get_db),
+):
+    """Return one row per student for a subject+period: progress, weighted score, and risk band.
+
+    simulate_progress is a dev/demo-only override — Capstone_data_20260324.csv is a
+    closed, term-end dataset where every student already has 100% weighting recorded,
+    so there's no real mid-semester partial-progress data to test against. When set,
+    each student's real items are truncated to a simulated submission-order prefix
+    before the same feature/prediction logic below runs. Not meaningful once a live
+    feed exists — remove this param at that point.
+    """
+    from app.ml.predictor import (
+        predict as ml_predict,
+        predict_partial as ml_predict_partial,
+        classify_coverage,
+    )
+
+    if _DATA is None or _DATA.empty:
+        raise HTTPException(503, "No data loaded. Upload a dataset first.")
+
+    is_admin  = user.get("role") in {"Head of Technology", "Head of School"}
+    subj_list = user.get("subjects", [])
+    if not is_admin and subject not in subj_list:
+        raise HTTPException(403, "You are not assigned to that subject.")
+
+    df_subj = _DATA[_DATA["SUBJECTCODE"] == subject]
+    if df_subj.empty:
+        raise HTTPException(404, "Subject not found.")
+
+    # Always derive from subject_reliability.json directly — see the /api/predict
+    # comment above for why _SAFE_SUBJECTS membership isn't a valid shortcut here.
+    reliability = _subject_reliability_category(subject)
+    if reliability == "unreliable":
+        return {
+            "subject":              subject,
+            "prediction_available": False,
+            "message": (
+                "Prediction unavailable for this subject due to incomplete "
+                "assessment data. Contact your Head of Technology."
+            ),
+        }
+
+    df_period = df_subj[df_subj["STUDYPERIOD"] == study_period]
+    if df_period.empty:
+        raise HTTPException(404, f"No data for subject {subject} in period {study_period}.")
+    df_period = df_period.dropna(subset=["MARKPERCENT"])
+
+    period_total_weight = (
+        df_period.drop_duplicates(subset=["ASSESSMENTTYPECODE"])["WEIGHTING"].sum()
+    )
+    trimester_num = float(study_period)
+
+    roster = []
+    for student_id, grp in df_period.groupby("STUDENTID_MASKED"):
+        if simulate_progress is not None:
+            grp_seq      = grp.sort_values("STUDYPACKAGEASSESSMENTID").reset_index(drop=True)
+            cum_seq      = grp_seq["WEIGHTING"].cumsum()
+            grp_included = grp_seq[cum_seq <= simulate_progress]
+            if grp_included.empty:
+                continue
+            grp_sorted = grp_included.sort_values("WEIGHTING", ascending=False).reset_index(drop=True)
+        else:
+            grp_sorted = grp.sort_values("WEIGHTING", ascending=False).reset_index(drop=True)
+        n_recorded             = len(grp_sorted)
+        cumulative_weighting   = float(grp_sorted["WEIGHTING"].sum())
+        current_weighted_score = float((grp_sorted["MARKPERCENT"] * grp_sorted["WEIGHTING"] / 100).sum())
+
+        assessments_used = [
+            {
+                "type":         str(r["ASSESSMENTTYPECODE"]),
+                "mark_percent": float(r["MARKPERCENT"]),
+                "weighting":    float(r["WEIGHTING"]),
+            }
+            for _, r in grp_sorted.iterrows()
+        ]
+
+        coverage_tier = classify_coverage(cumulative_weighting)
+
+        if coverage_tier == "insufficient":
+            # Coverage gate, not a data-quality gate — no model call, this
+            # student just sorts last (probability is None) same as an
+            # unscored student already does below.
+            row = {
+                "student_id":                    str(student_id),
+                "num_assessments_recorded":      n_recorded,
+                "cumulative_weighting_recorded": round(cumulative_weighting, 1),
+                "current_weighted_score":        round(current_weighted_score, 1),
+                "probability":                   None,
+                "prediction":                    None,
+                "risk_band":                     None,
+                "coverage_status":               "insufficient_data",
+            }
+            roster.append(row)
+            continue
+
+        if coverage_tier == "complete":
+            # ── UNCHANGED — existing top-2, best_model.pkl path. Do not touch. ──
+            a1         = grp_sorted.iloc[0]
+            a1_mark    = float(a1["MARKPERCENT"])
+            a1_weight  = float(a1["WEIGHTING"])
+            a1_contrib = a1_mark * a1_weight / 100
+
+            if n_recorded > 1:
+                a2        = grp_sorted.iloc[1]
+                a2_mark   = float(a2["MARKPERCENT"])
+                a2_weight = float(a2["WEIGHTING"])
+            else:
+                a2_mark   = 0.0
+                a2_weight = 0.0
+            a2_contrib = a2_mark * a2_weight / 100
+
+            result = ml_predict(
+                subject=                 subject,
+                study_period=            study_period,
+                trimester_num=           trimester_num,
+                assess1_mark=            a1_mark,
+                assess1_weight=          a1_weight,
+                assess1_contribution=    a1_contrib,
+                assess2_mark=            a2_mark,
+                assess2_weight=          a2_weight,
+                assess2_contribution=    a2_contrib,
+                partial_weighted_score=  a1_contrib + a2_contrib,
+                partial_weight_coverage= (a1_weight + a2_weight) / 100,
+                num_assessments=         n_recorded,
+                total_weight_recorded=   cumulative_weighting,
+                weight_complete=         cumulative_weighting >= period_total_weight,
+                assessments_used=        assessments_used,
+            )
+            estimate_type = None
+        else:  # "partial" — 50-99% coverage, genuinely mid-term
+            result = ml_predict_partial(
+                subject=          subject,
+                study_period=     study_period,
+                trimester_num=    trimester_num,
+                assessments_used= assessments_used,
+            )
+            estimate_type = "mid-term estimate"
+
+        row = {
+            "student_id":                    str(student_id),
+            "num_assessments_recorded":      n_recorded,
+            "cumulative_weighting_recorded": round(cumulative_weighting, 1),
+            "current_weighted_score":        round(current_weighted_score, 1),
+            "probability":                   result.get("probability"),
+            "prediction":                    result.get("prediction"),
+            "risk_band":                     result.get("risk_band"),
+            "estimate_type":                 estimate_type,
+        }
+        roster.append(row)
+
+        # simulate_progress is a dev/demo-only override (see this endpoint's
+        # docstring) — never persist a prediction derived from fabricated
+        # truncated data as if it were a real one to later reconcile.
+        # commit=False: batched into one commit after the loop rather than a
+        # round-trip per student — this loop can run 250+ times per call.
+        if simulate_progress is None:
+            await _upsert_prediction(
+                db,
+                student_id_masked = str(student_id),
+                subject_code       = subject,
+                study_period        = study_period,
+                result              = result,
+                commit              = False,
+            )
+
+    if simulate_progress is None and roster:
+        await db.commit()
+
+    # Highest risk first — lowest pass-probability first; unscored students (model
+    # unavailable) sort last rather than being mixed in among ranked students.
+    roster.sort(key=lambda r: (r["probability"] is None, r["probability"] if r["probability"] is not None else 0))
+
+    response = {
+        "subject":             subject,
+        "study_period":        study_period,
+        "total_students":      len(roster),
+        "period_total_weight": float(period_total_weight),
+        "simulated":           simulate_progress is not None,
+        "roster":              roster,
     }
     if reliability == "mostly_clean":
         response["reliability_warning"] = (

@@ -1,14 +1,18 @@
-// Lecturer settings: profile editor and password change.
+// Settings: profile editor, password change, and preferences. Shared by
+// admin (HoT/HoS) and lecturer accounts via the isLecturer prop — the
+// lecturer role additionally sees its assigned-subjects list and a
+// default-subject preference that doesn't apply to an admin, who has no
+// fixed subject scope.
 import { useState, useRef } from 'react';
 import { getUser, getUserName, getUserInitials } from '../utils/auth';
 import api from '../services/api';
 
 const ALL_PERIODS = ['23.1','23.2','23.3','24.1','24.2','24.3','25.1','25.2','25.3'];
 
-export default function LecturerSettings() {
+export default function SettingsView({ isLecturer }) {
   const user     = getUser();
   const email    = user?.email    || '';
-  const role     = user?.role     || 'Lecturer';
+  const role     = user?.role     || (isLecturer ? 'Lecturer' : 'Head of Technology');
   const subjects = user?.subjects || [];
   const PHOTO_KEY = `user_photo_${email}`;
 
@@ -99,7 +103,11 @@ export default function LecturerSettings() {
   const [prefSaved,     setPrefSaved]     = useState(false);
 
   const handleSavePrefs = () => {
-    localStorage.setItem('pref_default_subject',   prefSubject);
+    // Admin has no fixed subject scope, so pref_default_subject was never
+    // written for that role before this merge — keep it that way.
+    if (isLecturer) {
+      localStorage.setItem('pref_default_subject', prefSubject);
+    }
     localStorage.setItem('pref_default_trimester', prefTrimester);
     setPrefSaved(true);
     setTimeout(() => setPrefSaved(false), 2500);
@@ -125,7 +133,14 @@ export default function LecturerSettings() {
             {photoSrc ? (
               <img src={photoSrc} alt="Profile" style={s.photo} />
             ) : (
-              <div style={s.avatarFallback}>{initials}</div>
+              <div style={{
+                ...s.avatarFallback,
+                background: isLecturer
+                  ? 'linear-gradient(135deg, #2E6E8E, #4f8ef7)'
+                  : 'linear-gradient(135deg, #1A2E40, #2E6E8E)',
+              }}>
+                {initials}
+              </div>
             )}
             <button style={s.photoOverlay} onClick={() => fileRef.current?.click()} title="Change photo">
               📷
@@ -181,17 +196,18 @@ export default function LecturerSettings() {
           />
         </div>
 
-        {/* Assigned subjects (read-only) */}
-        <div style={s.prefField}>
-          <label style={s.label}>Assigned Subjects</label>
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 4 }}>
-            {subjects.length > 0
-              ? subjects.map(sub => <span key={sub} style={s.subjectChip}>{sub}</span>)
-              : <span style={s.muted}>None assigned</span>
-            }
+        {isLecturer && (
+          <div style={s.prefField}>
+            <label style={s.label}>Assigned Subjects</label>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 4 }}>
+              {subjects.length > 0
+                ? subjects.map(sub => <span key={sub} style={s.subjectChip}>{sub}</span>)
+                : <span style={s.muted}>None assigned</span>
+              }
+            </div>
+            <p style={s.fieldNote}>Subjects are assigned by the Head of Technology</p>
           </div>
-          <p style={s.fieldNote}>Subjects are assigned by the Head of Technology</p>
-        </div>
+        )}
 
         {profileMsg && (
           <div style={profileMsg.type === 'success' ? s.successBox : s.errorBox}>
@@ -213,8 +229,8 @@ export default function LecturerSettings() {
         <h2 style={s.cardTitle}>Security</h2>
         <form onSubmit={handleChangePassword}>
 
-          <PasswordField label="Current Password"     value={curPwd}  onChange={setCurPwd}  show={showCur}  onToggle={() => setShowCur(v => !v)} />
-          <PasswordField label="New Password"         value={newPwd}  onChange={setNewPwd}  show={showNew}  onToggle={() => setShowNew(v => !v)} />
+          <PasswordField label="Current Password" value={curPwd} onChange={setCurPwd} show={showCur} onToggle={() => setShowCur(v => !v)} />
+          <PasswordField label="New Password"     value={newPwd} onChange={setNewPwd} show={showNew} onToggle={() => setShowNew(v => !v)} />
 
           {newPwd && (
             <div style={{ marginBottom: 14 }}>
@@ -257,15 +273,19 @@ export default function LecturerSettings() {
       {/* ── Section 3: Preferences ──────────────────────────────── */}
       <div style={s.card}>
         <h2 style={s.cardTitle}>Preferences</h2>
-        <p style={s.muted}>These preferences are applied when you log in.</p>
+        <p style={s.muted}>
+          {isLecturer ? 'These preferences are applied when you log in.' : 'Applied when you log in or navigate to the dashboard.'}
+        </p>
 
-        <div style={s.prefField}>
-          <label style={s.prefLabel}>Default Subject on Login</label>
-          <select style={s.select} value={prefSubject} onChange={e => setPrefSubject(e.target.value)}>
-            <option value="">All My Subjects</option>
-            {subjects.map(sub => <option key={sub} value={sub}>{sub}</option>)}
-          </select>
-        </div>
+        {isLecturer && (
+          <div style={s.prefField}>
+            <label style={s.prefLabel}>Default Subject on Login</label>
+            <select style={s.select} value={prefSubject} onChange={e => setPrefSubject(e.target.value)}>
+              <option value="">All My Subjects</option>
+              {subjects.map(sub => <option key={sub} value={sub}>{sub}</option>)}
+            </select>
+          </div>
+        )}
 
         <div style={s.prefField}>
           <label style={s.prefLabel}>Default Trimester View</label>
@@ -321,7 +341,6 @@ const s = {
   photo: { width: 72, height: 72, borderRadius: '50%', objectFit: 'cover', display: 'block' },
   avatarFallback: {
     width: 72, height: 72, borderRadius: '50%',
-    background: 'linear-gradient(135deg, #2E6E8E, #4f8ef7)',
     display: 'flex', alignItems: 'center', justifyContent: 'center',
     fontSize: 24, fontWeight: 700, color: '#fff',
   },

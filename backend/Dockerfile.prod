@@ -29,6 +29,10 @@ COPY --from=builder /install /usr/local
 
 # Copy application source
 COPY app/ ./app/
+# scripts/retrain_loop.sh — the scheduled-retrain sidecar service (see
+# docker-compose.prod.yml) reuses this same image and just overrides the
+# entrypoint to run the loop instead of gunicorn.
+COPY scripts/ ./scripts/
 
 # Non-root user for security
 RUN addgroup --system edapt && adduser --system --ingroup edapt edapt

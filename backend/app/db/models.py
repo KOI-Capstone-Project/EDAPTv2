@@ -172,7 +172,8 @@ class Trimester(AuditMixin, Base):
 
     # Relationships
     enrollments: list = relationship("Enrollment", back_populates="trimester")
-    predictions: list = relationship("Prediction", back_populates="trimester")
+    # No `predictions` relationship — Prediction stores study_period as a raw
+    # string (see Prediction's docstring), not an FK to this table.
 
 
 class Subject(AuditMixin, Base):
@@ -330,7 +331,8 @@ class Student(AuditMixin, Base):
     # Relationships
     country: "Country" = relationship("Country", back_populates="students")
     enrollments: list = relationship("Enrollment", back_populates="student")
-    predictions: list = relationship("Prediction", back_populates="student")
+    # No `predictions` relationship — Prediction stores student_id_masked as a
+    # raw string (see Prediction's docstring), not an FK to this table.
 
     __table_args__ = (
         Index("ix_student_gender_agegroup", "gender_code", "age_group"),
@@ -503,36 +505,47 @@ class Prediction(AuditMixin, Base):
     """
     Stores ML model predictions for Mode 2 (Predictive).
 
-    One row = one model's Pass/Fail prediction for one student in one trimester.
-    Keeping predictions in the database (rather than only in-memory) allows
-    the dashboard to serve pre-computed results without re-running inference
-    on every page load, and supports audit / model versioning.
+    One row = one model's prediction for one student in one subject in one
+    study period.
+
+    NOTE ON IDENTIFIERS: this originally FK'd to Student.id/Trimester.id, but
+    those tables (along with Subject/Enrollment/Assessment/ClassGroup/Program)
+    are never populated — the app's real serving path loads data directly
+    from the CSV into an in-memory dataframe, keyed by the raw string
+    STUDENTID_MASKED/SUBJECTCODE/STUDYPERIOD values (e.g. "Student3340",
+    "ICT205", "25.2"), not the integer IDs this schema assumed. Using those
+    FKs would have required first building and maintaining a full CSV-to-SQL
+    ETL into the unrelated relational schema below, which nothing else in
+    this codebase does. This table stores the same string identifiers the
+    rest of the app actually uses, instead.
+
+    Also originally had no subject reference at all (unique constraint was
+    student+trimester+model_version) despite one student having a separate
+    prediction per subject per period — added subject_code and fixed the
+    unique constraint accordingly.
     """
 
     __tablename__ = "predictions"
 
     id: int = Column(BigInteger, primary_key=True, autoincrement=True)
 
-    student_id: int = Column(
-        Integer,
-        ForeignKey("students.id", ondelete="CASCADE"),
-        nullable=False,
-        index=True,
-    )
+    # Raw CSV-native identifiers — matches STUDENTID_MASKED/SUBJECTCODE/
+    # STUDYPERIOD as used everywhere else in this app (roster endpoint,
+    # /api/predict, subject_reliability.json), not an FK into the unused
+    # Student/Trimester/Subject tables.
+    student_id_masked: str = Column(String(50), nullable=False, index=True)
+    subject_code:      str = Column(String(20), nullable=False, index=True)
+    study_period:       str = Column(String(10), nullable=False, index=True)
 
-    trimester_id: int = Column(
-        Integer,
-        ForeignKey("trimesters.id", ondelete="RESTRICT"),
-        nullable=False,
-        index=True,
-    )
-
-    # Identifier / version tag for the model that produced this row
-    # e.g. 'rf_v1', 'xgb_v2' — enables A/B comparison between model runs
+    # Which model version served this prediction — the registry version id
+    # (model_registry.py) for a complete-record prediction, or a
+    # simulated-progress-model identifier for a mid-term estimate. Not an
+    # arbitrary free-text tag: always traceable back to an actual saved
+    # model package.
     model_version: str = Column(
-        String(50),
+        String(80),
         nullable=False,
-        comment="Model identifier and version tag (e.g. 'rf_v1', 'logreg_baseline')",
+        comment="Registry version id, or a simulated-progress model identifier",
     )
 
     # Primary binary prediction
@@ -549,11 +562,48 @@ class Prediction(AuditMixin, Base):
         comment="Confidence score for Pass class from predict_proba (0.0–1.0)",
     )
 
-    # Ground-truth label populated after trimester results are released
+    risk_band: str | None = Column(
+        String(20),
+        nullable=True,
+        comment="Safe / At Risk / High Risk at prediction time",
+    )
+
+    # None for a complete-record prediction; "mid-term estimate" when served
+    # by the simulated-progress model (predictor.predict_partial()).
+    estimate_type: str | None = Column(
+        String(30),
+        nullable=True,
+        comment="'mid-term estimate' for simulated-progress predictions, NULL for complete-record predictions",
+    )
+
+    # Ground-truth label — backfilled by reconcile_predictions.py once the
+    # student-subject-period enrolment is fully graded (the same
+    # per-enrolment clean check used everywhere else in this project, not a
+    # fixed T3 2025 assumption).
     actual_pass: bool | None = Column(
         Boolean,
         nullable=True,
-        comment="Actual outcome once T3 2025 results are available. NULL until then.",
+        comment="Backfilled once the enrolment is fully graded. NULL until then.",
+    )
+    reconciled_at: datetime | None = Column(
+        DateTime(timezone=True),
+        nullable=True,
+        comment="When actual_pass was backfilled",
+    )
+
+    # True when actual_pass came from reconcile_predictions.py's resit
+    # fallback (that student's LATEST attempt for this subject+period, used
+    # only when no ATTEMPTNUMBER==1 record exists) rather than the standard
+    # attempt-1 clean-enrolment check every other "clean" definition in this
+    # project uses. Kept distinguishable rather than silently merged into one
+    # actual_pass number — see reconcile_predictions.py's module docstring
+    # for why these two reconciliation paths aren't guaranteed equivalent.
+    reconciled_via_resit: bool = Column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default="false",
+        comment="actual_pass came from a resit-fallback reconciliation, not the standard attempt-1 check",
     )
 
     # Natural-language insight generated by Gemini API for this prediction
@@ -576,15 +626,11 @@ class Prediction(AuditMixin, Base):
             name="ck_pass_probability_range",
         ),
         UniqueConstraint(
-            "student_id", "trimester_id", "model_version",
-            name="uq_prediction_student_trimester_model",
+            "student_id_masked", "subject_code", "study_period", "model_version",
+            name="uq_prediction_student_subject_period_model",
         ),
-        Index("ix_prediction_trimester_model", "trimester_id", "model_version"),
+        Index("ix_prediction_subject_period_model", "subject_code", "study_period", "model_version"),
     )
-
-    # Relationships
-    student: "Student" = relationship("Student", back_populates="predictions")
-    trimester: "Trimester" = relationship("Trimester", back_populates="predictions")
 
 class User(AuditMixin, Base):
     """

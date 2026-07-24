@@ -12,14 +12,11 @@ import LecturerDashboard  from './pages/LecturerDashboard';
 import AdminDashboard     from './pages/AdminDashboard';
 import DataIngestion      from './pages/DataIngestion';
 import AuditLog           from './pages/AuditLog';
-import LecturerExplorer   from './pages/LecturerExplorer';
-import AdminExplorer      from './pages/AdminExplorer';
+import ExplorerView       from './pages/ExplorerView';
 import SubjectAnalytics   from './pages/SubjectAnalytics';
 import UserManagement     from './pages/UserManagement';
-import LecturerPredictor  from './pages/LecturerPredictor';
-import LecturerSettings   from './pages/LecturerSettings';
-import AdminSettings      from './pages/AdminSettings';
-import AdminPredictor     from './pages/AdminPredictor';
+import PredictorView      from './pages/PredictorView';
+import SettingsView       from './pages/SettingsView';
 
 // Auth utilities
 import { getToken, getUser } from './utils/auth';
@@ -74,9 +71,8 @@ function HoTOnlyProtected({ children }) {
 
 function SettingsPage() {
   const user = getUser();
-  return (user?.role === 'Head of Technology' || user?.role === 'Head of School')
-    ? <AdminSettings />
-    : <LecturerSettings />;
+  const isLecturer = !(user?.role === 'Head of Technology' || user?.role === 'Head of School');
+  return <SettingsView isLecturer={isLecturer} />;
 }
 
 // ── App ───────────────────────────────────────────────────────────────────────
@@ -93,8 +89,8 @@ export default function App() {
 
       {/* Lecturer pages */}
       <Route path="/dashboard/lecturer" element={<Protected><LecturerDashboard /></Protected>} />
-      <Route path="/explorer"            element={<Protected><LecturerExplorer /></Protected>} />
-      <Route path="/predictor"           element={<Protected><LecturerPredictor /></Protected>} />
+      <Route path="/explorer"            element={<Protected><ExplorerView isLecturer={true} /></Protected>} />
+      <Route path="/predictor"           element={<Protected><PredictorView isAdmin={false} /></Protected>} />
 
       {/* Admin dashboard */}
       <Route path="/dashboard/admin" element={
@@ -107,8 +103,8 @@ export default function App() {
       <Route path="/data-ingestion"     element={<AdminProtected><DataIngestion /></AdminProtected>} />
       <Route path="/audit-log"          element={<HoTOnlyProtected><AuditLog /></HoTOnlyProtected>} />
       <Route path="/subject-analytics"  element={<AdminProtected><SubjectAnalytics /></AdminProtected>} />
-      <Route path="/student-analytics"  element={<AdminProtected><AdminExplorer /></AdminProtected>} />
-      <Route path="/predictive-reports" element={<AdminProtected><AdminPredictor /></AdminProtected>} />
+      <Route path="/student-analytics"  element={<AdminProtected><ExplorerView isLecturer={false} /></AdminProtected>} />
+      <Route path="/predictive-reports" element={<AdminProtected><PredictorView isAdmin={true} /></AdminProtected>} />
       <Route path="/users"              element={<HoTOnlyProtected><UserManagement /></HoTOnlyProtected>} />
 
       {/* Shared settings (role-aware) */}
