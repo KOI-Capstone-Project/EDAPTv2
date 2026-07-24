@@ -44,7 +44,7 @@ function uidRole(uid) {
 }
 
 function rowRole(row) {
-  return row.role || uidRole(row.user_uid) || '';
+  return (row.role || '').toLowerCase();
 }
 
 const IconCheck = () => (
@@ -96,9 +96,9 @@ export default function AuditLog() {
   }, [fetchLogs]);
 
   const filtered = useMemo(() => logs.filter(row => {
-    if (filterUID    && rowRole(row) !== filterUID)      return false;
-    if (filterAction && row.action_type !== filterAction) return false;
-    if (filterStatus && row.status !== filterStatus)      return false;
+    if (filterUID    && rowRole(row) !== filterUID.toLowerCase()) return false;
+    if (filterAction && row.action_type !== filterAction)         return false;
+    if (filterStatus && row.status !== filterStatus)              return false;
     return true;
   }), [logs, filterUID, filterAction, filterStatus]);
 

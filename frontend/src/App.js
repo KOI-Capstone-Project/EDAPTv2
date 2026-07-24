@@ -26,6 +26,11 @@ import { getToken, getUser } from './utils/auth';
 
 // ── Route guards ──────────────────────────────────────────────────────────────
 
+function getUser() {
+  try { return JSON.parse(localStorage.getItem('edapt_user') || '{}'); }
+  catch { return {}; }
+}
+
 function PrivateRoute({ children }) {
   if (!getToken()) return <Navigate to="/login" replace />;
   return children;
@@ -58,6 +63,14 @@ function HoTOnlyRoute({ children }) {
   } catch {
     return <Navigate to="/login" replace />;
   }
+}
+
+function AdminRoute({ children }) {
+  const token = localStorage.getItem('edapt_token');
+  if (!token) return <Navigate to="/login" replace />;
+  const user = getUser();
+  if (user.role !== 'administrator') return <Navigate to="/dashboard" replace />;
+  return children;
 }
 
 function Protected({ children }) {

@@ -5,7 +5,7 @@ import io
 import pandas as pd
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 
-from app.api.routes.auth import get_current_user
+from app.core.deps import get_current_user
 from app.core.audit import append_event
 from app.db.models import User
 
@@ -39,7 +39,7 @@ async def ingest_dataset(
     columns   = list(df.columns)
     preview   = df.head(10).fillna("").to_dict(orient="records")
 
-    append_event(
+    await append_event(
         user_uid=current_user.email,
         role=current_user.role,
         action_type="Data Upload",

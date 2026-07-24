@@ -1,0 +1,8 @@
+# render.yaml — DEPRECATED
+#
+# Render requires a credit card even for the free tier.
+#
+# This project now deploys via:
+#   Frontend  → Vercel          (vercel.json)                    free, no CC
+#   Backend   → Hugging Face    (.github/workflows/deploy-backend-hf.yml)  free, no CC
+#   Database  → Neon.tech       (https://neon.tech)              free, no CC
