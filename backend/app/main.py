@@ -20,6 +20,8 @@ import os
 from pathlib import Path
 import secrets
 import smtplib
+import tempfile
+import uuid
 from typing import Annotated, Optional
 
 import joblib
@@ -32,12 +34,12 @@ from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 from pydantic import BaseModel, Field, StringConstraints, field_validator
-from sqlalchemy import desc, func, select
+from sqlalchemy import delete, desc, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
-from app.db.models import AuditLog, Base, Prediction, User as UserModel
+from app.db.models import AuditLog, Base, PendingIngest, Prediction, User as UserModel
 
 load_dotenv()
 
@@ -64,6 +66,11 @@ MAX_ATTEMPTS:         int       = 5
 LOCKOUT_MINUTES:      int       = 15
 OTP_EXPIRY_MINUTES:   int       = 10
 MAX_UPLOAD_BYTES:     int       = 50 * 1024 * 1024
+# Attendance is recorded per class session, not per assessment — the real
+# masked_attendance.csv is ~125MB (2.5M rows) vs. the capstone file's ~36MB
+# (327K rows) for the same population, so it needs its own, higher cap
+# rather than sharing the capstone upload's 50MB limit.
+MAX_ATTENDANCE_UPLOAD_BYTES: int = 200 * 1024 * 1024
 
 # ── ML model (loaded once at startup) ────────────────────────────────────────
 
@@ -105,6 +112,66 @@ def _subject_reliability_category(subject: str) -> str:
     if subject in _SUBJECT_RELIABILITY.get("mostly_clean", []):
         return "mostly_clean"
     return "unreliable"
+
+
+_attendance_raw_sessions_cache: dict = {}
+
+
+def _attendance_raw_sessions() -> pd.DataFrame:
+    """Raw (non-aggregated) attendance sessions for the roster endpoint's
+    mid-term truncation — reuses train_model.load_attendance_raw() rather
+    than re-implementing the same filter/join logic. Cached against the
+    current _DATA's identity so ingestion (which replaces _DATA wholesale)
+    correctly invalidates it."""
+    from app.ml.train_model import load_attendance_raw
+    cache_key = id(_DATA)
+    if cache_key not in _attendance_raw_sessions_cache:
+        _attendance_raw_sessions_cache.clear()
+        _attendance_raw_sessions_cache[cache_key] = load_attendance_raw(_DATA).sort_values(
+            ["class_no", "actv_no", "cls_session_no"]
+        )
+    return _attendance_raw_sessions_cache[cache_key]
+
+
+def _truncated_attendance_rate(student_id: str, subject: str, study_period: str, coverage_fraction: float) -> Optional[float]:
+    """Real attendance rate truncated to the SAME coverage fraction as a
+    student's currently-recorded marks — the roster-endpoint equivalent of
+    build_simulated_progress_features()'s truncation, so a genuinely
+    mid-term roster row is never scored against that student's full/final
+    attendance (the same leakage class as the mid-term 100%-accuracy
+    incident this project already caught once). Returns None if this
+    student has no attendance sessions at all (rare — build_attendance_features.py
+    found a 100% match rate on the current dataset, but not guaranteed for
+    every future ingested file)."""
+    sessions = _attendance_raw_sessions()
+    mask = (
+        (sessions["STUDENTID_MASKED"] == student_id)
+        & (sessions["SUBJECTCODE"] == subject)
+        & (sessions["STUDYPERIOD"] == study_period)
+    )
+    codes = sessions.loc[mask, "attendance_code"].values
+    if len(codes) == 0:
+        return None
+    n_included = round(coverage_fraction * len(codes))
+    truncated = codes[:n_included]
+    if len(truncated) == 0:
+        return None
+    return float((truncated == "H").mean())
+
+
+def _subject_average_attendance_rate(subject: str) -> Optional[float]:
+    """Real average ATTENDANCE_RATE for a subject, from _ATTENDANCE (the same
+    build_attendance_features() output loaded at startup) — used as the
+    What-If Simulator's default when a lecturer leaves attendance blank,
+    per the explicit instruction not to require it on every hypothetical
+    scenario. Returns None if no attendance data is loaded/matches (the
+    caller must treat that as "no default available", not a silent 0)."""
+    if _ATTENDANCE is None or _ATTENDANCE.empty or "ATTENDANCE_RATE" not in _ATTENDANCE.columns:
+        return None
+    subj_rows = _ATTENDANCE[_ATTENDANCE["SUBJECTCODE"] == subject]
+    if subj_rows.empty:
+        return None
+    return float(subj_rows["ATTENDANCE_RATE"].mean())
 
 # ── Gemini ────────────────────────────────────────────────────────────────────
 
@@ -228,7 +295,7 @@ _DATA: Optional[pd.DataFrame] = pd.DataFrame()
 
 # Load the bundled development dataset on server start so the demo works without a
 # manual upload. The /api/ingest endpoint handles runtime uploads and overwrites _DATA.
-_DATA_PATH = Path(__file__).parent.parent.parent / "data" / "Capstone_data_20260324.csv"
+_DATA_PATH = Path(__file__).parent.parent.parent / "data" / "Capstone_data_20260729.csv"
 try:
     _df = pd.read_csv(_DATA_PATH)
     _df.columns = [c.strip() for c in _df.columns]
@@ -245,6 +312,36 @@ except FileNotFoundError:
     print(f"[EDAPT] ERROR: startup CSV not found at {_DATA_PATH} — upload a dataset via /api/ingest")
 except Exception as _e:
     print(f"[EDAPT] ERROR loading startup data: {_e}")
+
+# ── Attendance data store ───────────────────────────────────────────────────
+# Wired in as a standard part of startup, same as _DATA above — not a manual
+# script someone has to remember to run before attendance endpoints work. One
+# row per (STUDENTID_MASKED, SUBJECTCODE, STUDYPERIOD) enrolment, with the
+# same real PASS target training uses (via collapse_attempts_to_latest_per_type
+# + build_target, not the row-level PASSED column _DATA uses) merged on, so
+# an attendance-vs-outcome correlation means the same "pass" everywhere else
+# in this project means.
+_ATTENDANCE: Optional[pd.DataFrame] = pd.DataFrame()
+_ATTENDANCE_PATH = Path(__file__).parent.parent.parent / "data" / "masked_attendance.csv"
+try:
+    from app.ml.train_model import collapse_attempts_to_latest_per_type, build_target
+    from app.ml.build_attendance_features import build_attendance_features
+
+    _att_features = build_attendance_features(
+        attendance_path=_ATTENDANCE_PATH, capstone_path=_DATA_PATH
+    )
+    if not _DATA.empty:
+        _collapsed_for_target = collapse_attempts_to_latest_per_type(_DATA.copy())
+        _target = build_target(_collapsed_for_target)
+        _att_features = _att_features.merge(
+            _target, on=["STUDENTID_MASKED", "SUBJECTCODE", "STUDYPERIOD"], how="left"
+        )
+    _ATTENDANCE = _att_features
+    print(f"[EDAPT] Attendance features loaded: {len(_ATTENDANCE):,} enrolments")
+except FileNotFoundError:
+    print(f"[EDAPT] WARNING: attendance data not found at {_ATTENDANCE_PATH} — attendance endpoints will return empty")
+except Exception as _e:
+    print(f"[EDAPT] ERROR loading attendance data: {_e}")
 
 # ── Database setup ────────────────────────────────────────────────────────────
 
@@ -526,6 +623,12 @@ class PredictRequest(BaseModel):
     total_weight_recorded:   float = Field(..., ge=0.0, le=100.0)
     weight_complete:         bool  = True
     assessments_used:        list[_AssessmentEntry]
+    # Optional — if omitted (What-If left blank, or an older client), the
+    # handler below fills in that subject's real average ATTENDANCE_RATE
+    # server-side and reports attendance_rate_is_default=true in the
+    # response, rather than silently defaulting to 0 or requiring every
+    # caller to always supply a value.
+    attendance_rate:         Optional[float] = Field(None, ge=0.0, le=1.0)
 
 
 class GeminiAlertRequest(BaseModel):
@@ -889,62 +992,207 @@ async def get_filters(user: dict = Depends(get_current_user)):
     return {"subjects": [], "periods": periods}
 
 
-@app.post("/api/ingest", tags=["Ingest"])
-async def ingest_dataset(
+# ── Two-phase ingestion: analyze (parse + classify, no commit) then confirm
+# (commit) — nothing reaches the live _DATA/_ATTENDANCE until confirm is
+# called with the token an analyze call returned. The pending upload
+# (raw CSV bytes, not a cached DataFrame) is persisted in Postgres — see
+# PendingIngest in app/db/models.py — not an in-memory dict, because prod
+# runs 4 gunicorn workers (docker-compose.prod.yml: `--workers 4`), each a
+# separate OS process; an in-memory dict would only be visible to whichever
+# worker happened to handle analyze, so confirm would 404 whenever a
+# non-sticky load balancer routed it to a different worker. One row per
+# kind (kind is the primary key) — a new analyze for the same kind
+# overwrites the previous pending row, same "old token becomes invalid"
+# protection the dict had. Rows older than PENDING_INGEST_TTL_MINUTES are
+# treated as expired and rejected at confirm time.
+PENDING_INGEST_TTL_MINUTES = 30
+
+
+async def _save_pending_ingest(db: AsyncSession, kind: str, token: str, filename: Optional[str], content: bytes) -> None:
+    await db.execute(delete(PendingIngest).where(PendingIngest.kind == kind))
+    db.add(PendingIngest(kind=kind, token=token, filename=filename, csv_bytes=content))
+    await db.commit()
+
+
+async def _load_pending_ingest(db: AsyncSession, kind: str, token: str) -> Optional[PendingIngest]:
+    result = await db.execute(select(PendingIngest).where(PendingIngest.kind == kind))
+    row = result.scalar_one_or_none()
+    if row is None or row.token != token:
+        return None
+    age_minutes = (datetime.now(timezone.utc) - row.created_at).total_seconds() / 60
+    if age_minutes > PENDING_INGEST_TTL_MINUTES:
+        return None
+    return row
+
+
+async def _delete_pending_ingest(db: AsyncSession, kind: str) -> None:
+    await db.execute(delete(PendingIngest).where(PendingIngest.kind == kind))
+    await db.commit()
+
+# ── Ingest-confirm lock ──────────────────────────────────────────────────────
+# ingest_capstone_confirm() writes the ingested file to a shared path
+# (INGESTED_CAPSTONE_PATH) then temporarily monkey-patches the module-level
+# train_model.DATA_PATH / check_new_period.DATA_PATH globals for the
+# duration of the retrain check. Within one worker process this is safe —
+# the whole critical section is synchronous Python with zero `await`
+# points, so asyncio can't interleave another request into it — but in a
+# multi-worker prod deployment (gunicorn + several uvicorn workers, per
+# this project's Dockerfile.prod) two workers are separate OS processes
+# that could genuinely run this section concurrently and race on the
+# SAME shared file. Same fix as model_registry.py's already-proven
+# .registry.lock: an atomic O_CREAT|O_EXCL file lock, file-based so it's
+# shared across worker processes (unlike the in-memory DATA_PATH
+# variables themselves), with the same stale-lock recovery and
+# wait-then-fail-cleanly behavior.
+_INGEST_LOCK_PATH = Path(__file__).parent / "ml" / ".ingest.lock"
+_INGEST_LOCK_STALE_SECONDS = 30 * 60
+_INGEST_LOCK_WAIT_MAX_SECONDS = 5 * 60
+_INGEST_LOCK_POLL_INTERVAL_SECONDS = 1
+
+
+class IngestLockTimeout(RuntimeError):
+    """Raised when the ingest lock couldn't be acquired within _INGEST_LOCK_WAIT_MAX_SECONDS."""
+
+
+def _acquire_ingest_lock() -> None:
+    import os as _os
+    import time as _time
+    from datetime import datetime as _datetime, timezone as _timezone
+
+    _INGEST_LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+    deadline = _time.monotonic() + _INGEST_LOCK_WAIT_MAX_SECONDS
+    while True:
+        try:
+            fd = _os.open(_INGEST_LOCK_PATH, _os.O_CREAT | _os.O_EXCL | _os.O_WRONLY)
+            with _os.fdopen(fd, "w") as f:
+                f.write(f"{_os.getpid()} {_datetime.now(_timezone.utc).isoformat()}\n")
+            return
+        except FileExistsError:
+            pass
+
+        try:
+            age = _time.time() - _INGEST_LOCK_PATH.stat().st_mtime
+        except FileNotFoundError:
+            continue  # released between our open() and stat() — retry immediately
+
+        if age > _INGEST_LOCK_STALE_SECONDS:
+            try:
+                _INGEST_LOCK_PATH.unlink()
+            except FileNotFoundError:
+                pass
+            continue
+
+        if _time.monotonic() >= deadline:
+            raise IngestLockTimeout(
+                f"Could not acquire the ingest lock within {_INGEST_LOCK_WAIT_MAX_SECONDS}s — "
+                f"another capstone ingest appears to still be in progress."
+            )
+        _time.sleep(_INGEST_LOCK_POLL_INTERVAL_SECONDS)
+
+
+def _release_ingest_lock() -> None:
+    try:
+        _INGEST_LOCK_PATH.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def _reject_upload_common(content: bytes, max_bytes: int) -> Optional[str]:
+    """Shared validation for both capstone and attendance uploads. Returns an error string, or None if OK."""
+    if len(content) > max_bytes:
+        return f"File exceeds the {max_bytes // (1024*1024)} MB limit."
+    if len(content) == 0:
+        return "Uploaded file is empty."
+    head = content[:2000]
+    _BINARY_SIGS = (b"PK", b"%PDF", b"\x89PNG", b"\xff\xd8", b"\x42\x4d")
+    if any(head.startswith(sig) for sig in _BINARY_SIGS) or b"," not in head:
+        return "File does not appear to be a valid CSV."
+    return None
+
+
+@app.post("/api/ingest/capstone/analyze", tags=["Ingest"])
+async def ingest_capstone_analyze(
     file: UploadFile = File(...),
     user: dict = Depends(require_head_of_school),
     db:   AsyncSession = Depends(get_db),
 ):
-    """Accept a CSV upload, validate it, and replace the in-memory dataset."""
-    global _DATA
+    """
+    Parse + classify a capstone CSV's columns (KEEP/SKIP/NEW) WITHOUT
+    committing it to the live dataset. Returns a token; call
+    POST /api/ingest/capstone/confirm with it to actually commit.
+    """
+    from app.ml.column_classification import classify_columns
+
     ext = (file.filename or "").rsplit(".", 1)[-1].lower()
     if ext != "csv":
-        await _append_audit_db(db, user_uid=user["sub"], action_type="Data Upload",
-                               status="Alert",
-                               detail=f"Rejected upload: unsupported file type '.{ext}'")
         raise HTTPException(400, "Unsupported file type. Only .csv files are accepted.")
 
     content = await file.read()
-    if len(content) > MAX_UPLOAD_BYTES:
+    err = _reject_upload_common(content, MAX_UPLOAD_BYTES)
+    if err:
         await _append_audit_db(db, user_uid=user["sub"], action_type="Data Upload",
-                               status="Alert", detail="Rejected upload: file exceeds 50 MB limit")
-        raise HTTPException(400, "File exceeds the 50 MB limit.")
-
-    if len(content) == 0:
-        await _append_audit_db(db, user_uid=user["sub"], action_type="Data Upload",
-                               status="Alert", detail="Rejected upload: file is empty")
-        raise HTTPException(400, "Uploaded file is empty.")
-
-    head            = content[:2000]
-    _BINARY_SIGS    = (b"PK", b"%PDF", b"\x89PNG", b"\xff\xd8", b"\x42\x4d")
-    if any(head.startswith(sig) for sig in _BINARY_SIGS) or b"," not in head:
-        await _append_audit_db(db, user_uid=user["sub"], action_type="Data Upload",
-                               status="Alert",
-                               detail="Rejected upload: file does not appear to be a valid CSV")
-        raise HTTPException(400, "File does not appear to be a valid CSV.")
+                               status="Alert", detail=f"Rejected capstone upload: {err}")
+        raise HTTPException(400, err)
 
     try:
         df = pd.read_csv(io.BytesIO(content))
     except Exception as exc:
         await _append_audit_db(db, user_uid=user["sub"], action_type="Data Upload",
-                               status="Error", detail=f"Failed to parse CSV: {exc}")
+                               status="Error", detail=f"Failed to parse capstone CSV: {exc}")
         raise HTTPException(422, "The uploaded file could not be parsed as a valid CSV.")
-
     df.columns = [c.strip() for c in df.columns]
 
-    REQUIRED_COLS = [
-        "STUDYPACKAGEASSESSMENTID", "ASSESSMENTTYPECODE", "ATTEMPTNUMBER",
-        "ASSESSMENTMARK", "MAXMARK", "WEIGHTING", "GENDERCODE", "AGEGROUP",
-        "STUDYPERIOD", "SUBJECTCODE", "CLASSGROUP", "MARKPERCENT",
-        "STUDENTID_MASKED", "COUNTRY_MASKED",
-    ]
-    missing = [c for c in REQUIRED_COLS if c not in df.columns]
-    if missing:
+    from app.ml.column_classification import CAPSTONE_KEEP
+    missing_keep = [c for c in CAPSTONE_KEEP if c not in df.columns]
+    if missing_keep:
         await _append_audit_db(db, user_uid=user["sub"], action_type="Data Upload",
                                status="Alert",
-                               detail=f"Rejected upload: missing column '{missing[0]}'")
-        raise HTTPException(400, f"Missing required column: {missing[0]}")
+                               detail=f"Rejected capstone upload: missing required column '{missing_keep[0]}'")
+        raise HTTPException(400, f"Missing required column: {missing_keep[0]}")
 
+    classification = classify_columns(df.columns.tolist(), "capstone")
+
+    periods = (
+        sorted(df["STUDYPERIOD"].dropna().apply(lambda x: round(float(x), 1)).unique().tolist())
+        if "STUDYPERIOD" in df.columns else []
+    )
+    token = str(uuid.uuid4())
+    await _save_pending_ingest(db, "capstone", token, file.filename, content)
+    return {
+        "token":         token,
+        "row_count":     len(df),
+        "subjects":      int(df["SUBJECTCODE"].nunique()) if "SUBJECTCODE" in df.columns else 0,
+        "periods":       periods,
+        "columns":       classification,
+        "filename":      file.filename,
+    }
+
+
+@app.post("/api/ingest/capstone/confirm", tags=["Ingest"])
+async def ingest_capstone_confirm(
+    payload: dict,
+    user: dict = Depends(require_head_of_school),
+    db:   AsyncSession = Depends(get_db),
+):
+    """
+    Commit a previously-analyzed capstone upload (by token) to the live
+    dataset. Runs the SAME collapse_attempts_to_latest_per_type() logic
+    training uses — no attempt-1-only path anywhere in this flow. Writes
+    the file to DATA_PATH on disk (required for check_new_period.py /
+    train_model.py, both disk-based, to see the new data) and checks
+    for a genuinely new study period, registering a retrain candidate
+    if so — never auto-promoting.
+    """
+    global _DATA, _ATTENDANCE
+
+    token = payload.get("token")
+    pending_row = await _load_pending_ingest(db, "capstone", token)
+    if pending_row is None:
+        raise HTTPException(404, "No matching pending capstone upload (or it expired). Analyze the file again.")
+    pending_df = pd.read_csv(io.BytesIO(pending_row.csv_bytes))
+    pending_filename = pending_row.filename
+
+    df = pending_df.copy()
     if "STUDYPERIOD" in df.columns:
         df["STUDYPERIOD"] = df["STUDYPERIOD"].apply(
             lambda x: str(round(float(x), 1)) if pd.notna(x) else ""
@@ -952,16 +1200,133 @@ async def ingest_dataset(
     if "MARKPERCENT" in df.columns:
         df["MARKPERCENT"] = pd.to_numeric(df["MARKPERCENT"], errors="coerce")
 
-    df["PASSED"] = df["MARKPERCENT"] >= 50
-    _DATA = df
+    from app.ml.train_model import collapse_attempts_to_latest_per_type, build_target, RELIABILITY_PATH
 
-    await _append_audit_db(db, user_uid=user["sub"], action_type="Data Upload",
-                           status="Success",
-                           detail=f"{len(df):,} rows ingested from {file.filename}")
+    collapsed = collapse_attempts_to_latest_per_type(df.dropna(subset=["MARKPERCENT"]))
+
+    # Subjects reclassified — same per-enrolment weighting-sum check
+    # identify_clean_subjects.py uses (automated part only, no manual
+    # overrides — those are documented, subject-specific exceptions that
+    # don't generalize to an arbitrary new upload), diffed against the
+    # currently-loaded subject_reliability.json. Reported, not auto-applied
+    # — matches this project's "show the diff before overwriting" pattern.
+    subjects_reclassified = 0
+    try:
+        w = collapsed.groupby(["SUBJECTCODE", "STUDYPERIOD", "STUDENTID_MASKED"])["WEIGHTING"].sum()
+        clean = w.between(99.0, 101.0)
+        stats = clean.groupby(level="SUBJECTCODE").mean() * 100
+        def _cat(pct):
+            if pct == 100.0: return "FULLY_CLEAN"
+            if pct >= 90.0:  return "MOSTLY_CLEAN"
+            return "UNRELIABLE"
+        new_cats = {s: _cat(p) for s, p in stats.items()}
+        with open(RELIABILITY_PATH) as f:
+            old_rel = json.load(f)
+        old_cats = {}
+        for s in old_rel.get("fully_clean", []):  old_cats[s] = "FULLY_CLEAN"
+        for s in old_rel.get("mostly_clean", []): old_cats[s] = "MOSTLY_CLEAN"
+        for s in old_rel.get("unreliable", []):   old_cats[s] = "UNRELIABLE"
+        subjects_reclassified = sum(
+            1 for s in new_cats if s in old_cats and old_cats[s] != new_cats[s]
+        )
+    except Exception:
+        subjects_reclassified = 0
+
+    # Write to disk — required for check_new_period.py / train_model.py
+    # (both read DATA_PATH from disk), and so the newly ingested data
+    # survives a container restart rather than being an ephemeral
+    # in-memory-only override.
+    # data/ is mounted READ-ONLY in the backend container (./data:/data:ro
+    # in docker-compose.yml — the same deliberate protection that already
+    # applies to build_attendance_features.py's output). Writing the
+    # ingested file to DATA_PATH directly fails with EROFS. Instead: write
+    # to a writable location (the backend bind mount in dev, or the shared
+    # `ingested_data_prod` volume in prod — see train_model.INGESTED_DATA_DIR's
+    # docstring for why this is env-var-driven rather than hardcoded to this
+    # file's own directory), then temporarily point train_model.DATA_PATH /
+    # check_new_period.DATA_PATH at it — the same monkey-patch pattern
+    # verify_dynamic_period_e2e.py already uses for isolated retrain testing —
+    # restoring both afterward regardless of outcome. This is required for
+    # check_new_period.py and train_model.py to actually see the newly
+    # ingested data (both read DATA_PATH from disk, not from the in-memory
+    # _DATA this endpoint also updates).
+    import app.ml.train_model as train_model_mod
+    train_model_mod.INGESTED_DATA_DIR.mkdir(parents=True, exist_ok=True)
+    INGESTED_CAPSTONE_PATH = train_model_mod.INGESTED_DATA_DIR / "ingested_capstone.csv"
+
+    df["PASSED"] = df["MARKPERCENT"] >= 50
+
+    # Refresh the PASS target merged into _ATTENDANCE, if attendance data
+    # is already loaded, so it stays consistent with the new capstone data.
+    new_attendance = _ATTENDANCE
+    if _ATTENDANCE is not None and not _ATTENDANCE.empty and "PASS" in _ATTENDANCE.columns:
+        try:
+            new_target = build_target(collapsed)
+            att_no_pass = _ATTENDANCE.drop(columns=["PASS"])
+            new_attendance = att_no_pass.merge(
+                new_target, on=["STUDENTID_MASKED", "SUBJECTCODE", "STUDYPERIOD"], how="left"
+            )
+        except Exception:
+            pass
+
+    # Retrain trigger — candidate registration only, never auto-promote.
+    # Lock-protected (see _acquire_ingest_lock's docstring above): the disk
+    # write and the DATA_PATH monkey-patch both touch state shared across
+    # worker processes in a multi-worker deployment, so only one confirm can
+    # be in this section at a time, process-wide.
+    import app.ml.check_new_period as check_new_period_mod
+    from app.ml.model_registry import load_registry
+
+    _acquire_ingest_lock()
+    try:
+        pending_df.to_csv(INGESTED_CAPSTONE_PATH, index=False)
+        _DATA = df
+        _ATTENDANCE = new_attendance
+
+        original_paths = {
+            "train_model": train_model_mod.DATA_PATH,
+            "check_new_period": check_new_period_mod.DATA_PATH,
+        }
+        retrain_info = {"triggered": False, "reason": None, "candidate_version": None}
+        try:
+            train_model_mod.DATA_PATH = INGESTED_CAPSTONE_PATH
+            check_new_period_mod.DATA_PATH = INGESTED_CAPSTONE_PATH
+
+            is_new, latest, validated_on = check_new_period_mod.new_period_available()
+            if is_new:
+                before_versions = {v["version"] for v in load_registry().get("versions", [])}
+                train_model_mod.main()
+                after_versions = {v["version"] for v in load_registry().get("versions", [])}
+                new_versions = after_versions - before_versions
+                retrain_info = {
+                    "triggered": True,
+                    "reason": f"New period detected: {latest} (live model validated on {validated_on})",
+                    "candidate_version": sorted(new_versions)[-1] if new_versions else None,
+                }
+            else:
+                retrain_info["reason"] = f"No new period (latest in data: {latest}, live validated on: {validated_on})"
+        except Exception as exc:
+            retrain_info["reason"] = f"Retrain check failed: {exc}"
+        finally:
+            train_model_mod.DATA_PATH = original_paths["train_model"]
+            check_new_period_mod.DATA_PATH = original_paths["check_new_period"]
+    finally:
+        _release_ingest_lock()
+
+    await _delete_pending_ingest(db, "capstone")
+
+    await _append_audit_db(
+        db, user_uid=user["sub"], action_type="Data Upload", status="Success",
+        detail=f"{len(df):,} rows ingested from {pending_filename} "
+               f"(subjects reclassified: {subjects_reclassified}, retrain triggered: {retrain_info['triggered']})",
+    )
     return {
-        "row_count": len(df),
-        "columns":   list(df.columns),
-        "message":   f"{len(df):,} rows successfully loaded",
+        "row_count":              len(df),
+        "columns":                list(df.columns),
+        "subjects_reclassified":  subjects_reclassified,
+        "retrain":                retrain_info,
+        "promotion_note":         "Model promotion stays manual",
+        "message":                f"{len(df):,} rows successfully loaded",
     }
 
 
@@ -987,6 +1352,176 @@ async def ingest_preview(
         "page_size":   page_size,
         "total_pages": total_pages,
         "columns":     list(_DATA.columns),
+        "data":        page_df.fillna("").to_dict("records"),
+    }
+
+
+@app.post("/api/ingest/attendance/analyze", tags=["Ingest"])
+async def ingest_attendance_analyze(
+    file: UploadFile = File(...),
+    user: dict = Depends(require_head_of_school),
+    db:   AsyncSession = Depends(get_db),
+):
+    """
+    Parse + classify an attendance CSV's columns (KEEP/SKIP/NEW) WITHOUT
+    committing it. A separate, clearly distinct slot from the capstone
+    analyze endpoint — the two file types are never accepted through the
+    same endpoint, so they can't be cross-uploaded into the wrong slot.
+    Returns a token; call POST /api/ingest/attendance/confirm with it to
+    actually commit.
+    """
+    from app.ml.column_classification import classify_columns
+
+    ext = (file.filename or "").rsplit(".", 1)[-1].lower()
+    if ext != "csv":
+        raise HTTPException(400, "Unsupported file type. Only .csv files are accepted.")
+
+    content = await file.read()
+    err = _reject_upload_common(content, MAX_ATTENDANCE_UPLOAD_BYTES)
+    if err:
+        await _append_audit_db(db, user_uid=user["sub"], action_type="Data Upload",
+                               status="Alert", detail=f"Rejected attendance upload: {err}")
+        raise HTTPException(400, err)
+
+    try:
+        df = pd.read_csv(io.BytesIO(content))
+    except Exception as exc:
+        await _append_audit_db(db, user_uid=user["sub"], action_type="Data Upload",
+                               status="Error", detail=f"Failed to parse attendance CSV: {exc}")
+        raise HTTPException(422, "The uploaded file could not be parsed as a valid CSV.")
+    df.columns = [c.strip() for c in df.columns]
+
+    # Required for aggregation specifically (a functional subset of
+    # ATTENDANCE_KEEP — cls_session_no is in the locked KEEP schema but
+    # not needed for the student-subject-period aggregation this pipeline
+    # actually does).
+    required = ["STUDENTID_MASKED", "course", "study_period_code", "year", "attendance_code"]
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        await _append_audit_db(db, user_uid=user["sub"], action_type="Data Upload",
+                               status="Alert",
+                               detail=f"Rejected attendance upload: missing required column '{missing[0]}'")
+        raise HTTPException(400, f"Missing required column: {missing[0]}")
+
+    classification = classify_columns(df.columns.tolist(), "attendance")
+
+    token = str(uuid.uuid4())
+    await _save_pending_ingest(db, "attendance", token, file.filename, content)
+    return {
+        "token":     token,
+        "row_count": len(df),
+        "columns":   classification,
+        "filename":  file.filename,
+    }
+
+
+@app.post("/api/ingest/attendance/confirm", tags=["Ingest"])
+async def ingest_attendance_confirm(
+    payload: dict,
+    user: dict = Depends(require_head_of_school),
+    db:   AsyncSession = Depends(get_db),
+):
+    """Commit a previously-analyzed attendance upload (by token) to the live _ATTENDANCE table."""
+    global _ATTENDANCE
+
+    token = payload.get("token")
+    pending_row = await _load_pending_ingest(db, "attendance", token)
+    if pending_row is None:
+        raise HTTPException(404, "No matching pending attendance upload (or it expired). Analyze the file again.")
+
+    from app.ml.train_model import collapse_attempts_to_latest_per_type, build_target
+    from app.ml.build_attendance_features import build_attendance_features
+
+    with tempfile.NamedTemporaryFile(suffix=".csv", delete=True) as tmp:
+        tmp.write(pending_row.csv_bytes)
+        tmp.flush()
+        att_features = build_attendance_features(
+            attendance_path=Path(tmp.name), capstone_path=_DATA_PATH,
+        )
+
+    if not _DATA.empty:
+        collapsed = collapse_attempts_to_latest_per_type(_DATA.copy())
+        target    = build_target(collapsed)
+        att_features = att_features.merge(
+            target, on=["STUDENTID_MASKED", "SUBJECTCODE", "STUDYPERIOD"], how="left"
+        )
+
+    enrolments = pd.DataFrame()
+    if not _DATA.empty:
+        collapsed_pop = collapse_attempts_to_latest_per_type(_DATA.copy())
+        enrolments = collapsed_pop[["STUDENTID_MASKED", "SUBJECTCODE", "STUDYPERIOD"]].drop_duplicates()
+    match_rate = None
+    if not enrolments.empty:
+        merged_check = enrolments.merge(
+            att_features[["STUDENTID_MASKED", "SUBJECTCODE", "STUDYPERIOD"]].drop_duplicates(),
+            on=["STUDENTID_MASKED", "SUBJECTCODE", "STUDYPERIOD"], how="left", indicator=True,
+        )
+        match_rate = round(float((merged_check["_merge"] == "both").mean() * 100), 2)
+
+    _ATTENDANCE = att_features
+    await _delete_pending_ingest(db, "attendance")
+
+    await _append_audit_db(
+        db, user_uid=user["sub"], action_type="Data Upload", status="Success",
+        detail=f"{len(att_features):,} attendance enrolments ingested from {pending_row.filename} "
+               f"(match rate vs current capstone data: {match_rate}%)",
+    )
+    return {
+        "row_count":  len(att_features),
+        "columns":    list(att_features.columns),
+        "match_rate": match_rate,
+        "message":    f"{len(att_features):,} attendance enrolments loaded, {match_rate}% match rate against current capstone data",
+    }
+
+
+@app.post("/api/ingest/columns/decide", tags=["Ingest"])
+async def ingest_columns_decide(
+    payload: dict,
+    user: dict = Depends(require_head_of_school),
+):
+    """
+    Persist a reviewer's keep/permanently_skip decision for a NEW column,
+    so it's classified consistently (no longer flagged as NEW) on every
+    future upload — payload: {"kind": "capstone"|"attendance", "column": str, "decision": "keep"|"permanently_skip"}.
+    """
+    from app.ml.column_classification import record_column_decision
+
+    kind     = payload.get("kind")
+    column   = payload.get("column")
+    decision = payload.get("decision")
+    if kind not in ("capstone", "attendance"):
+        raise HTTPException(400, "kind must be 'capstone' or 'attendance'")
+    if decision not in ("keep", "permanently_skip"):
+        raise HTTPException(400, "decision must be 'keep' or 'permanently_skip'")
+    if not column:
+        raise HTTPException(400, "column is required")
+
+    record_column_decision(kind, column, decision)
+    return {"message": f"Column '{column}' ({kind}) recorded as '{decision}'."}
+
+
+@app.get("/api/ingest/attendance/preview", tags=["Ingest"])
+async def ingest_attendance_preview(
+    page:      int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=500),
+    user: dict = Depends(require_head_of_school),
+):
+    """Return a paginated slice of the currently loaded attendance table."""
+    if _ATTENDANCE is None or _ATTENDANCE.empty:
+        return {
+            "total": 0, "page": page, "page_size": page_size,
+            "total_pages": 0, "columns": [], "data": [],
+        }
+    total       = len(_ATTENDANCE)
+    total_pages = math.ceil(total / page_size) if total > 0 else 0
+    start       = (page - 1) * page_size
+    page_df     = _ATTENDANCE.iloc[start: start + page_size]
+    return {
+        "total":       total,
+        "page":        page,
+        "page_size":   page_size,
+        "total_pages": total_pages,
+        "columns":     list(_ATTENDANCE.columns),
         "data":        page_df.fillna("").to_dict("records"),
     }
 
@@ -1207,6 +1742,102 @@ async def get_classgroups(
         df = df[df["SUBJECTCODE"] == subject]
     return {"classgroups": sorted(df["CLASSGROUP"].dropna().unique().tolist())}
 
+
+ATTENDANCE_BANDS = [
+    ("0-49%",  0.0,  0.4999),
+    ("50-59%", 0.5,  0.5999),
+    ("60-69%", 0.6,  0.6999),
+    ("70-79%", 0.7,  0.7999),
+    ("80-89%", 0.8,  0.8999),
+    ("90-100%", 0.9, 1.0),
+]
+
+# _ATTENDANCE has two genuinely different populations layered in one table, and
+# every endpoint reading it must say explicitly which one it's using — silently
+# mixing them under one generic "attendance" label is exactly how a 5,536-row
+# mismatch (84,422 vs 78,886) went unlabelled between two dashboard numbers
+# that looked like they should describe the same thing. ALL_TRACKED is every
+# enrolment with attendance data for a real capstone subject+period (some of
+# these students attended classes but have zero assessment rows recorded for
+# that exact subject+period — early withdrawal or a cross-system data gap, not
+# a bug — that's real, informative attendance data and dropping it would throw
+# information away). WITH_OUTCOME is the strict subset that also has a real
+# PASS/FAIL target, the only population an attendance-vs-outcome comparison
+# can honestly be computed on.
+POPULATION_ALL_TRACKED  = "all attendance-tracked enrolments (course+period+year filtered) — includes students with no matching capstone assessment record for that subject+period"
+POPULATION_WITH_OUTCOME = "enrolments with BOTH attendance data AND a matching capstone assessment record (a real PASS/FAIL target)"
+
+
+@app.get("/api/dashboard/attendance-distribution", tags=["Dashboard"])
+async def attendance_distribution(
+    subject:   Optional[str] = Query(None),
+    trimester: Optional[str] = Query(None),
+    year:      Optional[str] = Query(None),
+    user: dict = Depends(get_current_user),
+):
+    """Return count of enrolments in each attendance-rate band. Population: ALL attendance-tracked enrolments, not restricted to those with a matching assessment record — see POPULATION_ALL_TRACKED."""
+    if _ATTENDANCE is None or _ATTENDANCE.empty:
+        return {"data": [{"band": b, "count": 0} for b, _, _ in ATTENDANCE_BANDS], "population": POPULATION_ALL_TRACKED, "n": 0}
+
+    df = _query_filter(_role_filter(_ATTENDANCE.copy(), user), subject, trimester, year)
+    df = df.dropna(subset=["ATTENDANCE_RATE"])
+
+    result = []
+    for band, lo, hi in ATTENDANCE_BANDS:
+        count = int(((df["ATTENDANCE_RATE"] >= lo) & (df["ATTENDANCE_RATE"] <= hi)).sum())
+        result.append({"band": band, "count": count})
+    return {
+        "data": result,
+        "mean_attendance_rate": _safe(round(df["ATTENDANCE_RATE"].mean() * 100, 1)) if not df.empty else None,
+        "population": POPULATION_ALL_TRACKED,
+        "n": int(len(df)),
+    }
+
+
+@app.get("/api/dashboard/attendance-outcome", tags=["Dashboard"])
+async def attendance_outcome(
+    subject:   Optional[str] = Query(None),
+    trimester: Optional[str] = Query(None),
+    year:      Optional[str] = Query(None),
+    user: dict = Depends(get_current_user),
+):
+    """Return attendance-rate vs pass/fail outcome correlation for the current scope. Population: only enrolments with a matching assessment record — see POPULATION_WITH_OUTCOME."""
+    empty = {"correlation": None, "mean_attendance_pass": None, "mean_attendance_fail": None, "n": 0, "population": POPULATION_WITH_OUTCOME}
+    if _ATTENDANCE is None or _ATTENDANCE.empty or "PASS" not in _ATTENDANCE.columns:
+        return empty
+
+    df = _query_filter(_role_filter(_ATTENDANCE.copy(), user), subject, trimester, year)
+    df = df.dropna(subset=["ATTENDANCE_RATE", "PASS"])
+    if df.empty:
+        return empty
+
+    corr = df["ATTENDANCE_RATE"].corr(df["PASS"])
+    return {
+        "correlation":          _safe(round(corr, 3)) if corr is not None else None,
+        "mean_attendance_pass": _safe(round(df.loc[df["PASS"] == 1, "ATTENDANCE_RATE"].mean() * 100, 1)),
+        "mean_attendance_fail": _safe(round(df.loc[df["PASS"] == 0, "ATTENDANCE_RATE"].mean() * 100, 1)),
+        "n": int(len(df)),
+        "population": POPULATION_WITH_OUTCOME,
+    }
+
+
+@app.get("/api/dashboard/attendance-by-subject", tags=["Dashboard"])
+async def attendance_by_subject(user: dict = Depends(get_current_user)):
+    """Return average attendance rate per subject, sorted ascending. Admin sees all subjects; Lecturer sees only their assigned subjects (via _role_filter). Population: ALL attendance-tracked enrolments — see POPULATION_ALL_TRACKED."""
+    if _ATTENDANCE is None or _ATTENDANCE.empty or "SUBJECTCODE" not in _ATTENDANCE.columns:
+        return {"data": [], "population": POPULATION_ALL_TRACKED}
+
+    df = _role_filter(_ATTENDANCE.copy(), user).dropna(subset=["ATTENDANCE_RATE"])
+    result = (
+        df.groupby("SUBJECTCODE")["ATTENDANCE_RATE"]
+        .agg(["mean", "count"])
+        .reset_index()
+        .rename(columns={"mean": "avg_attendance_rate", "count": "n"})
+    )
+    result["avg_attendance_rate"] = (result["avg_attendance_rate"] * 100).round(1)
+    result = result.sort_values("avg_attendance_rate")
+    return {"data": result.to_dict("records"), "population": POPULATION_ALL_TRACKED}
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Explorer Routes
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1218,17 +1849,35 @@ def _str_val(val) -> str:
     return str(val)
 
 
+def _attach_attendance_rate(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Join ATTENDANCE_RATE onto a row-level (per-assessment-item) DataFrame at
+    the student-subject-period level — one attendance rate per record,
+    matching that record's enrolment, not a new per-session breakdown (this
+    is Explorer, which is assessment-record-level, not session-level).
+    Rows with no matching attendance data (or if _ATTENDANCE never loaded)
+    get ATTENDANCE_RATE = NaN, handled downstream via _safe().
+    """
+    if _ATTENDANCE is None or _ATTENDANCE.empty or "ATTENDANCE_RATE" not in _ATTENDANCE.columns:
+        df = df.copy()
+        df["ATTENDANCE_RATE"] = None
+        return df
+    att_keys = _ATTENDANCE[["STUDENTID_MASKED", "SUBJECTCODE", "STUDYPERIOD", "ATTENDANCE_RATE"]]
+    return df.merge(att_keys, on=["STUDENTID_MASKED", "SUBJECTCODE", "STUDYPERIOD"], how="left")
+
+
 def _explorer_filter(
-    df:              pd.DataFrame,
-    subject:         Optional[str] = None,
-    assessment_type: Optional[str] = None,
-    passed:          Optional[str] = None,
-    trimester:       Optional[str] = None,
-    search:          Optional[str] = None,
-    country:         Optional[str] = None,
-    gender:          Optional[str] = None,
-    age_group:       Optional[str] = None,
-    is_admin:        bool           = False,
+    df:               pd.DataFrame,
+    subject:          Optional[str] = None,
+    assessment_type:  Optional[str] = None,
+    passed:           Optional[str] = None,
+    trimester:        Optional[str] = None,
+    search:           Optional[str] = None,
+    country:          Optional[str] = None,
+    gender:           Optional[str] = None,
+    age_group:        Optional[str] = None,
+    is_admin:         bool           = False,
+    attendance_band:  Optional[str] = None,
 ) -> pd.DataFrame:
     """Apply Explorer-specific filters including admin-only demographic filters."""
     if "MARKPERCENT" in df.columns:
@@ -1245,6 +1894,13 @@ def _explorer_filter(
         df = df[df["STUDYPERIOD"] == trimester]
     if search and "STUDENTID_MASKED" in df.columns:
         df = df[df["STUDENTID_MASKED"].astype(str).str.contains(search, case=False, na=False)]
+    if attendance_band and "ATTENDANCE_RATE" in df.columns:
+        if attendance_band == "low":
+            df = df[df["ATTENDANCE_RATE"] < 0.5]
+        elif attendance_band == "medium":
+            df = df[(df["ATTENDANCE_RATE"] >= 0.5) & (df["ATTENDANCE_RATE"] < 0.8)]
+        elif attendance_band == "high":
+            df = df[df["ATTENDANCE_RATE"] >= 0.8]
     if is_admin:
         if country and "COUNTRY_MASKED" in df.columns:
             df = df[df["COUNTRY_MASKED"] == country]
@@ -1262,6 +1918,7 @@ def _row_to_record(row: dict, is_admin: bool) -> dict:
         passed = bool(float(mp) >= 50) if mp is not None else False
     except (TypeError, ValueError):
         passed = False
+    att_rate = _safe(row.get("ATTENDANCE_RATE"))
     record: dict = {
         "student_id":      _str_val(row.get("STUDENTID_MASKED")),
         "subject":         _str_val(row.get("SUBJECTCODE")),
@@ -1272,6 +1929,7 @@ def _row_to_record(row: dict, is_admin: bool) -> dict:
         "max_mark":        _safe(row.get("MAXMARK")),
         "weighting":       _safe(row.get("WEIGHTING")),
         "passed":          passed,
+        "attendance_rate": round(att_rate * 100, 1) if att_rate is not None else None,
     }
     if is_admin:
         record["country"]   = _str_val(row.get("COUNTRY_MASKED"))
@@ -1292,6 +1950,7 @@ async def explorer_records(
     country:         Optional[str] = Query(None),
     gender:          Optional[str] = Query(None),
     age_group:       Optional[str] = Query(None),
+    attendance_band: Optional[str] = Query(None, description="low (<50%) / medium (50-79%) / high (80%+)"),
     user: dict = Depends(get_current_user),
     db:   AsyncSession = Depends(get_db),
 ):
@@ -1301,9 +1960,10 @@ async def explorer_records(
 
     is_admin = user.get("role") in {"Head of Technology", "Head of School"}
     df = _role_filter(_DATA.copy(), user)
+    df = _attach_attendance_rate(df)
     df = _explorer_filter(
         df, subject, assessment_type, passed, trimester,
-        search, country, gender, age_group, is_admin,
+        search, country, gender, age_group, is_admin, attendance_band,
     )
 
     total       = len(df)
@@ -1311,7 +1971,7 @@ async def explorer_records(
     start       = (page - 1) * page_size
     page_df     = df.iloc[start: start + page_size]
 
-    if any([subject, assessment_type, passed, trimester, search, country, gender, age_group]):
+    if any([subject, assessment_type, passed, trimester, search, country, gender, age_group, attendance_band]):
         await _append_audit_db(db, user_uid=user["sub"], action_type="Data Access",
                                status="Success", detail="Explorer records viewed")
     return {
@@ -1446,6 +2106,7 @@ async def explorer_export(
     country:         Optional[str] = Query(None),
     gender:          Optional[str] = Query(None),
     age_group:       Optional[str] = Query(None),
+    attendance_band: Optional[str] = Query(None, description="low (<50%) / medium (50-79%) / high (80%+)"),
     user: dict = Depends(require_head_of_school),
     db:   AsyncSession = Depends(get_db),
 ):
@@ -1453,16 +2114,17 @@ async def explorer_export(
     if _DATA is None or _DATA.empty:
         raise HTTPException(404, "No data loaded")
 
+    df = _attach_attendance_rate(_DATA.copy())
     df = _explorer_filter(
-        _DATA.copy(), subject, assessment_type, passed, trimester,
-        search, country, gender, age_group, is_admin=True,
+        df, subject, assessment_type, passed, trimester,
+        search, country, gender, age_group, is_admin=True, attendance_band=attendance_band,
     )
 
     filters_used = [f"{k}={v}" for k, v in [
         ("subject", subject), ("assessment_type", assessment_type),
         ("passed",  passed),  ("trimester",       trimester),
         ("country", country), ("gender",           gender),
-        ("age_group", age_group),
+        ("age_group", age_group), ("attendance_band", attendance_band),
     ] if v]
     filter_str = ", ".join(filters_used) or "none"
 
@@ -1470,6 +2132,10 @@ async def explorer_export(
         db, user_uid=user["sub"], action_type="Export", status="Success",
         detail=f"Exported {len(df):,} records with filters: {filter_str}",
     )
+
+    if "ATTENDANCE_RATE" in df.columns:
+        df = df.copy()
+        df["ATTENDANCE_RATE"] = (df["ATTENDANCE_RATE"] * 100).round(1)  # match MARKPERCENT's 0-100 scale, not raw 0-1
 
     buf   = io.StringIO()
     df.to_csv(buf, index=False)
@@ -1545,6 +2211,16 @@ async def predict_outcome(
 
     assessments_used_dicts = [a.model_dump() for a in req.assessments_used]
 
+    # attendance_rate: if the caller (What-If simulator, or an older client)
+    # didn't supply one, default to this subject's real average
+    # ATTENDANCE_RATE rather than silently using 0 or requiring every
+    # hypothetical scenario to specify it. attendance_rate_is_default in the
+    # response lets the frontend show this was a default, not user input.
+    attendance_rate_is_default = req.attendance_rate is None
+    attendance_rate = req.attendance_rate
+    if attendance_rate_is_default:
+        attendance_rate = _subject_average_attendance_rate(req.subject)
+
     # Coverage tier decides which model serves this request — never trust
     # req.total_weight_recorded for this decision, only the raw items actually
     # submitted, for the same reason partial_weighted_score is never trusted
@@ -1595,6 +2271,7 @@ async def predict_outcome(
             total_weight_recorded=   req.total_weight_recorded,
             weight_complete=         req.weight_complete,
             assessments_used=        assessments_used_dicts,
+            attendance_rate=         attendance_rate,
         )
     else:  # "partial" — 50-99% coverage, genuinely mid-term
         result = ml_predict_partial(
@@ -1602,10 +2279,13 @@ async def predict_outcome(
             study_period=     req.study_period,
             trimester_num=    req.trimester_num,
             assessments_used= assessments_used_dicts,
+            attendance_rate=  attendance_rate,
         )
 
     if "error" in result:
         raise HTTPException(503, "ML model not loaded. Run train_model.py first.")
+
+    result["attendance_rate_is_default"] = attendance_rate_is_default and result.get("attendance_rate_used") is not None
 
     if reliability == "mostly_clean":
         result["reliability_warning"] = (
@@ -1801,6 +2481,29 @@ def _calc_subject_analytics(subject: str, trimester: Optional[str]) -> dict:
             if s_avg is not None:
                 performance_trend.append({"period": p, "subject_avg": s_avg, "institution_avg": i_avg})
 
+    # Attendance — computed from _ATTENDANCE (enrolment-level: one row per
+    # student-subject-period), not from df_scope/df_subj (row-level: one row
+    # per assessment item) — averaging a per-enrolment rate over row-level
+    # data would bias toward enrolments with more recorded assessment items.
+    avg_attendance_rate = None
+    attendance_trend: list = []
+    if _ATTENDANCE is not None and not _ATTENDANCE.empty and "SUBJECTCODE" in _ATTENDANCE.columns:
+        att_subj = _ATTENDANCE[_ATTENDANCE["SUBJECTCODE"] == subject]
+        att_scope = (
+            att_subj[att_subj["STUDYPERIOD"] == trimester]
+            if trimester and "STUDYPERIOD" in att_subj.columns else att_subj
+        )
+        if not att_scope.empty:
+            avg_attendance_rate = round(float(att_scope["ATTENDANCE_RATE"].mean() * 100), 1)
+        if "STUDYPERIOD" in att_subj.columns:
+            for p in PERIODS_ORDER:
+                att_sp = att_subj[att_subj["STUDYPERIOD"] == p]
+                att_ip = _ATTENDANCE[_ATTENDANCE["STUDYPERIOD"] == p]
+                s_avg = round(float(att_sp["ATTENDANCE_RATE"].mean() * 100), 1) if not att_sp.empty else None
+                i_avg = round(float(att_ip["ATTENDANCE_RATE"].mean() * 100), 1) if not att_ip.empty else None
+                if s_avg is not None:
+                    attendance_trend.append({"period": p, "subject_avg": s_avg, "institution_avg": i_avg})
+
     return {
         "subject":               subject,
         "avg_mark":              avg_mark,
@@ -1816,6 +2519,8 @@ def _calc_subject_analytics(subject: str, trimester: Optional[str]) -> dict:
         "trimester_comparison":  trimester_comparison,
         "grade_distribution":    grade_distribution,
         "performance_trend":     performance_trend,
+        "avg_attendance_rate":   avg_attendance_rate,
+        "attendance_trend":      attendance_trend,
     }
 
 
@@ -2123,7 +2828,7 @@ async def subject_roster(
 ):
     """Return one row per student for a subject+period: progress, weighted score, and risk band.
 
-    simulate_progress is a dev/demo-only override — Capstone_data_20260324.csv is a
+    simulate_progress is a dev/demo-only override — Capstone_data_20260729.csv is a
     closed, term-end dataset where every student already has 100% weighting recorded,
     so there's no real mid-semester partial-progress data to test against. When set,
     each student's real items are truncated to a simulated submission-order prefix

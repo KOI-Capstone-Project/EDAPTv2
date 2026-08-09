@@ -2,8 +2,9 @@
 EDAPT v2 — Honest threshold selection via a held-out validation split.
 
 FAIL_THRESHOLD (train_model.py) was originally chosen by sweeping thresholds
-directly against the TEST set (see evaluate_thresholds.py). That's test-set
-leakage for a tuning decision: the precision/recall reported for a threshold
+directly against the TEST set (the old approach, since removed as unused
+during a codebase cleanup — its role is preserved here as history). That's
+test-set leakage for a tuning decision: the precision/recall reported for a threshold
 could be optimistic simply because it was the best-looking option *for that
 specific test set*, not necessarily the best choice in general.
 
@@ -30,11 +31,9 @@ with it automatically.
 
 Usage (run from backend/, as a module — needed so its imports resolve the
 same way whether run standalone or imported by scheduled_retrain.py):
-    python -m app.ml.evaluate_thresholds   # (unchanged, still test-tuned)
     python -m app.ml.validate_threshold    # this script
 """
 
-import numpy as np
 from imblearn.over_sampling import SMOTE
 from sklearn.ensemble import RandomForestClassifier, VotingClassifier
 from sklearn.metrics import precision_score, recall_score, f1_score

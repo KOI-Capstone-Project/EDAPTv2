@@ -42,7 +42,6 @@ def main() -> None:
     s22 = subject_stats(t22)
     s23 = subject_stats(t23)
 
-    all_subjects = sorted(set(s22.index) | set(s23.index))
     only_22 = sorted(set(s22.index) - set(s23.index))
     only_23 = sorted(set(s23.index) - set(s22.index))
     both    = sorted(set(s22.index) & set(s23.index))

@@ -128,12 +128,19 @@ function Gauge({ pct }) {
 
 // Shared result rendering — used for both a real student's detail view and a
 // what-if hypothetical scenario. `result` shape: { subject, study_period,
-// probability, prediction, risk_band, assessments_used: [{type, mark_percent,
-// weighting}], total_weight_recorded, partial_weighted_score, model_name?,
+// probability, probability_calibrated?, prediction, risk_band,
+// safe_floor_percent?, assessments_used: [{type, mark_percent,
+// weighting}], total_weight_recorded, partial_weighted_score,
+// attendance_rate_used?, attendance_rate_is_default?, model_name?,
 // model_accuracy?, coverage_status?, estimate_type? }.
 export function PredictionResultPanel({ result, geminiLoading, geminiInsight }) {
   const isInsufficientData = result.coverage_status === 'insufficient_data';
   const isMidTerm          = result.estimate_type === 'mid-term estimate';
+  // Falls back to the historical defaults (75 mid-term / 65 complete-record)
+  // for older API responses (e.g. cached roster rows) that predate this
+  // field — matches predictor.py's _safe_floor() so the legend never shows
+  // a number the backend didn't actually use to decide the risk band.
+  const safeFloor = result.safe_floor_percent ?? (isMidTerm ? 75 : 65);
   const probColor = result.probability >= 65 ? '#059669' : result.probability >= 40 ? '#D97706' : '#DC2626';
   // The Assessment Breakdown table's "Total" row must sum exactly the
   // Contribution cells rendered directly above it — anything else reads as
@@ -161,6 +168,12 @@ export function PredictionResultPanel({ result, geminiLoading, geminiInsight }) 
           <RiskBadge band={result.risk_band} insufficientData={isInsufficientData} />
         </div>
       </div>
+
+      {result.attendance_rate_is_default && result.attendance_rate_used != null && (
+        <p style={{ margin: '-12px 0 16px', fontSize: 11, color: '#94A3B8', fontStyle: 'italic' }}>
+          ℹ Attendance rate defaulted to this subject's real average ({(result.attendance_rate_used * 100).toFixed(0)}%) — not a value you entered.
+        </p>
+      )}
 
       {isInsufficientData ? (
         <div style={{ textAlign: 'center', paddingBottom: 20, borderBottom: '0.5px solid #E2E8F0' }}>
@@ -255,7 +268,7 @@ export function PredictionResultPanel({ result, geminiLoading, geminiInsight }) 
         <p style={s.sectionLabel}>Risk Scale</p>
         {isMidTerm && (
           <p style={s.midTermBandNote}>
-            ⚠ Mid-term estimates use their own risk scale (Safe starts at 75%, not 65%)
+            ⚠ Mid-term estimates use their own risk scale (Safe starts at {safeFloor}%, not 65%)
             because this early-in-term model's percentages aren't yet on the same scale as
             a complete-record percentage — the same number wouldn't mean the same level of
             risk on both.
@@ -265,13 +278,13 @@ export function PredictionResultPanel({ result, geminiLoading, geminiInsight }) 
           {(isMidTerm
             ? [
                 { key: 'High Risk', label: 'High Risk', range: '0 – 39%',   bg: '#FEE2E2', text: '#991B1B', border: '#DC2626' },
-                { key: 'At Risk',   label: 'At Risk',   range: '40 – 74%',  bg: '#FEF9C3', text: '#854D0E', border: '#D97706' },
-                { key: 'Safe',      label: 'Safe',      range: '75 – 100%', bg: '#DCFCE7', text: '#166534', border: '#059669' },
+                { key: 'At Risk',   label: 'At Risk',   range: `40 – ${safeFloor - 1}%`,  bg: '#FEF9C3', text: '#854D0E', border: '#D97706' },
+                { key: 'Safe',      label: 'Safe',      range: `${safeFloor} – 100%`, bg: '#DCFCE7', text: '#166534', border: '#059669' },
               ]
             : [
                 { key: 'High Risk', label: 'High Risk', range: '0 – 39%',   bg: '#FEE2E2', text: '#991B1B', border: '#DC2626' },
-                { key: 'At Risk',   label: 'At Risk',   range: '40 – 64%',  bg: '#FEF9C3', text: '#854D0E', border: '#D97706' },
-                { key: 'Safe',      label: 'Safe',      range: '65 – 100%', bg: '#DCFCE7', text: '#166534', border: '#059669' },
+                { key: 'At Risk',   label: 'At Risk',   range: `40 – ${safeFloor - 1}%`,  bg: '#FEF9C3', text: '#854D0E', border: '#D97706' },
+                { key: 'Safe',      label: 'Safe',      range: `${safeFloor} – 100%`, bg: '#DCFCE7', text: '#166534', border: '#059669' },
               ]
           ).map(t => (
             <div key={t.key} style={{
@@ -340,6 +353,11 @@ export default function PredictorView({ isAdmin }) {
   const [whatIfMarks,           setWhatIfMarks]           = useState({});
   const [whatIfMarkErrors,      setWhatIfMarkErrors]      = useState({});
   const [whatIfWeightComplete,  setWhatIfWeightComplete]  = useState(true);
+  // Left blank by default — /api/predict fills in this subject's real
+  // average attendance rate server-side when omitted (attendance_rate_is_default
+  // in the response tells us to caption it as a default, not user input).
+  const [whatIfAttendanceRate,  setWhatIfAttendanceRate]  = useState('');
+  const [whatIfAttendanceError, setWhatIfAttendanceError] = useState(null);
   const [whatIfResult,          setWhatIfResult]          = useState(null);
   const [whatIfLoading,         setWhatIfLoading]         = useState(false);
   const [whatIfError,           setWhatIfError]           = useState(null);
@@ -563,6 +581,16 @@ export default function PredictorView({ isAdmin }) {
     });
   };
 
+  const handleWhatIfAttendanceChange = (value) => {
+    setWhatIfAttendanceRate(value);
+    const num = parseFloat(value);
+    setWhatIfAttendanceError(
+      value !== '' && (isNaN(num) || num < 0 || num > 100)
+        ? 'Attendance rate must be between 0 and 100.'
+        : null
+    );
+  };
+
   // Requires at least one filled field, not every field — the point of the
   // what-if tool is to test genuinely partial scenarios too (e.g. 2 of 5
   // assessments). Coverage below 50% still gets a real "insufficient data"
@@ -574,6 +602,7 @@ export default function PredictorView({ isAdmin }) {
     whatIfAssessmentTypes.length > 0 &&
     whatIfAssessmentTypes.some(a => whatIfMarks[a.assessmentType] !== undefined && whatIfMarks[a.assessmentType] !== '') &&
     Object.keys(whatIfMarkErrors).length === 0 &&
+    !whatIfAttendanceError &&
     !whatIfLoading;
 
   const fetchWhatIfGeminiInsight = async (predResult) => {
@@ -658,6 +687,9 @@ export default function PredictorView({ isAdmin }) {
       total_weight_recorded:   totalWeight,
       weight_complete:         whatIfWeightComplete,
       assessments_used:        assessmentsUsed,
+      // Left as null when blank — the backend fills in this subject's real
+      // average attendance rate rather than the frontend guessing one.
+      attendance_rate:         whatIfAttendanceRate !== '' ? parseFloat(whatIfAttendanceRate) / 100 : null,
     };
 
     try {
@@ -899,6 +931,29 @@ export default function PredictorView({ isAdmin }) {
                       )}
                     </div>
                   ))}
+
+                  {whatIfAssessmentTypes.length > 0 && (
+                    <div style={{ marginBottom: 8 }}>
+                      <div style={s.assessRow}>
+                        <span style={s.assessCode}>Attendance rate (%)</span>
+                        <input
+                          type="number" min="0" max="100" step="1"
+                          style={s.assessInput}
+                          placeholder="Subject average"
+                          value={whatIfAttendanceRate}
+                          onChange={e => handleWhatIfAttendanceChange(e.target.value)}
+                        />
+                      </div>
+                      {whatIfAttendanceError && (
+                        <p style={s.markError}>{whatIfAttendanceError}</p>
+                      )}
+                      {whatIfAttendanceRate === '' && (
+                        <p style={{ margin: '4px 0 0', fontSize: 11, color: '#94A3B8', fontStyle: 'italic' }}>
+                          Left blank — this subject's real average attendance rate will be used.
+                        </p>
+                      )}
+                    </div>
+                  )}
 
                   <button
                     style={{ ...s.predictBtn, opacity: !canPredictWhatIf ? 0.5 : 1, cursor: !canPredictWhatIf ? 'not-allowed' : 'pointer' }}

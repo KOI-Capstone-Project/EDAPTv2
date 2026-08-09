@@ -1,9 +1,19 @@
 """
 Generate anomaly report for KOI assessment weighting data.
 
-Reads:  data/Capstone_data_20260324.csv
+Reads:  data/Capstone_data_20260729.csv
 Writes: data/anomaly_report_for_ken.csv
         data/clean_subjects.csv
+
+NOTE: this predates and is superseded by scripts/identify_clean_subjects.py,
+which does the equivalent check at the correct granularity (per-enrolment,
+not per subject-period aggregate — this script's SUBJECTCODE+STUDYPERIOD
+grouping can call a subject-period "clean" even when individual students
+within it have incomplete records, exactly the failure mode
+identify_clean_subjects.py's docstring warns against). Not deleted here —
+unreferenced elsewhere in the codebase, but its outputs are named
+"for_ken", suggesting a real person may still consume them manually.
+Flagged for a real keep/remove decision, not removed unilaterally.
 """
 
 from pathlib import Path
@@ -12,7 +22,7 @@ import pandas as pd
 # ── Paths ─────────────────────────────────────────────────────────────────────
 
 ROOT     = Path(__file__).resolve().parent.parent
-DATA_IN  = ROOT / "data" / "Capstone_data_20260324.csv"
+DATA_IN  = ROOT / "data" / "Capstone_data_20260729.csv"
 OUT_ANOM = ROOT / "data" / "anomaly_report_for_ken.csv"
 OUT_CLEN = ROOT / "data" / "clean_subjects.csv"
 

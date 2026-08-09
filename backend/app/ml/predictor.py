@@ -1,13 +1,16 @@
 """EDAPT v2 — ML inference wrapper. Loads the live model version once at import time."""
 
-from pathlib import Path
 from typing import Optional
 
-import joblib
 import numpy as np
 
 from app.ml.train_model import FAIL_THRESHOLD
 from app.ml.model_registry import load_live_model, load_registry, get_live_entry
+from app.ml.sim_model_registry import (
+    load_live_model as load_live_sim_model,
+    load_registry as load_sim_registry,
+    get_live_entry as get_live_sim_entry,
+)
 from app.ml.explain import explain_prediction, MAIN_BACKGROUND, SIM_BACKGROUND
 
 # ── Load model packages at startup ────────────────────────────────────────────
@@ -31,25 +34,21 @@ LIVE_MODEL_VERSION: Optional[str] = _live_entry["version"] if _live_entry else N
 
 # Second model, trained on simulated mid-term partial-progress snapshots
 # (train_simulated_progress.py) — used only for genuinely partial records
-# (50-99% coverage). Optional: if missing, classify_coverage's "partial" tier
-# simply becomes unservable (predict_partial returns an error dict) rather
-# than the app failing to start.
-_SIM_PKG_PATH = Path(__file__).parent / "best_model_simulated_progress.pkl"
+# (50-99% coverage). Now comes from its own version registry
+# (sim_model_registry.py), not a hardcoded best_model_simulated_progress.pkl
+# path that train_simulated_progress.py overwrote directly and made live
+# immediately with no comparison or human review — a real gap found and
+# fixed urgently after the attendance-feature retrain went live ungated.
+# First run with no sim registry yet transparently migrates the existing
+# best_model_simulated_progress.pkl in as version 1, live from the start.
+_SIM_PACKAGE: Optional[dict] = load_live_sim_model()
+if _SIM_PACKAGE is None:
+    print("WARNING: No live simulated-progress model version found. Run "
+          "train_simulated_progress.py, then compare_and_promote_simulated.py "
+          "--promote to activate a version.")
 
-if _SIM_PKG_PATH.exists():
-    _SIM_PACKAGE: Optional[dict] = joblib.load(_SIM_PKG_PATH)
-else:
-    _SIM_PACKAGE = None
-    print(f"WARNING: simulated-progress ML model not found at {_SIM_PKG_PATH}. "
-          f"Run train_simulated_progress.py to enable mid-term estimates.")
-
-# This model isn't in the version registry (it's a separate, not-yet-deployed
-# family — see its own "deployed": False flag) so it has no registry version
-# id. Use its trained_at timestamp instead — still a stable, traceable
-# identifier back to a specific saved model package, just not a registry entry.
-SIM_MODEL_VERSION: Optional[str] = (
-    f"simulated_progress_{_SIM_PACKAGE['trained_at']}" if _SIM_PACKAGE else None
-)
+_live_sim_entry = get_live_sim_entry(load_sim_registry())
+SIM_MODEL_VERSION: Optional[str] = _live_sim_entry["version"] if _live_sim_entry else None
 
 # ── Coverage-based routing ───────────────────────────────────────────────────
 # >= COMPLETE_COVERAGE_THRESHOLD : best_model.pkl (today's behaviour, unchanged)
@@ -197,6 +196,17 @@ def _compute_risk_band(probability: float, threshold: float) -> str:
         return "High Risk"
 
 
+def _safe_floor(threshold: float) -> float:
+    """Same floor _compute_risk_band derives internally — exposed so callers
+    (the API response, then the frontend legend) can display the real
+    current value instead of a hardcoded one that silently goes stale
+    whenever a retrain re-selects a different threshold (as happened here:
+    the mid-term model's threshold moved 0.25 -> 0.30 during the Round 4
+    calibration retrain, which would have made a hardcoded "75%" legend
+    wrong without this)."""
+    return round(max(65, 100 * (1 - threshold)), 1)
+
+
 # ── Inference ─────────────────────────────────────────────────────────────────
 
 def predict(
@@ -215,6 +225,7 @@ def predict(
     total_weight_recorded:   float,
     weight_complete:         bool,
     assessments_used:        list,
+    attendance_rate:         Optional[float] = None,
 ) -> dict:
     """Return a prediction dict or an error dict if the model is not loaded."""
     if _PACKAGE is None:
@@ -223,13 +234,44 @@ def predict(
     model           = _PACKAGE["model"]
     subj_difficulty = _PACKAGE["subject_difficulty"].get(subject, 0.2)
 
-    # FEATURES order must match train_model.py FEATURES list exactly
-    feature_values = np.array([[
-        assess1_mark, assess1_weight, assess1_contribution,
-        assess2_mark, assess2_weight, assess2_contribution,
-        partial_weighted_score, partial_weight_coverage,
-        subj_difficulty, trimester_num,
-    ]])
+    # Feature vector is built from whatever _PACKAGE["features"] actually is
+    # (stored at training time — train_model.py's model_package["features"]),
+    # NOT a hardcoded column order here. This is deliberate: the live model
+    # can be an older version trained before ATTENDANCE_RATE existed (10
+    # features) or a newer registered-but-not-live candidate that includes
+    # it (11) — this function must keep working correctly for whichever one
+    # is actually live, without a code change at promotion time. A model
+    # requesting a feature this call wasn't given (e.g. a promoted
+    # attendance-aware model called with attendance_rate=None) fails loudly
+    # below rather than silently guessing a value.
+    available = {
+        "ASSESS1_MARK":            assess1_mark,
+        "ASSESS1_WEIGHT":          assess1_weight,
+        "ASSESS1_CONTRIBUTION":    assess1_contribution,
+        "ASSESS2_MARK":            assess2_mark,
+        "ASSESS2_WEIGHT":          assess2_weight,
+        "ASSESS2_CONTRIBUTION":    assess2_contribution,
+        "PARTIAL_WEIGHTED_SCORE":  partial_weighted_score,
+        "PARTIAL_WEIGHT_COVERAGE": partial_weight_coverage,
+        "SUBJECT_DIFFICULTY":      subj_difficulty,
+        "TRIMESTER_NUM":           trimester_num,
+        "ATTENDANCE_RATE":         attendance_rate,
+    }
+    # Fallback list matches train_model.FEATURES from before ATTENDANCE_RATE
+    # existed — only used for a legacy model package saved without its own
+    # "features" key (none currently in the registry, but a real fallback
+    # rather than an assumption that every package has this key).
+    _LEGACY_FEATURES = [
+        "ASSESS1_MARK", "ASSESS1_WEIGHT", "ASSESS1_CONTRIBUTION",
+        "ASSESS2_MARK", "ASSESS2_WEIGHT", "ASSESS2_CONTRIBUTION",
+        "PARTIAL_WEIGHTED_SCORE", "PARTIAL_WEIGHT_COVERAGE",
+        "SUBJECT_DIFFICULTY", "TRIMESTER_NUM",
+    ]
+    model_features = _PACKAGE.get("features", _LEGACY_FEATURES)
+    missing = [f for f in model_features if available.get(f) is None]
+    if missing:
+        return {"error": f"missing_required_feature: {missing[0]} is required by this model version but was not provided"}
+    feature_values = np.array([[available[f] for f in model_features]])
 
     # model.classes_ == [0, 1] where 0=Fail, 1=Pass (train_model.py's PASS target
     # encoding) — column 1 is P(Pass), column 0 is P(Fail). Verified directly
@@ -261,11 +303,13 @@ def predict(
         "probability":            probability,
         "prediction":             prediction,
         "risk_band":              risk_band,
+        "safe_floor_percent":     _safe_floor(FAIL_THRESHOLD),
         "subject_difficulty":     subj_difficulty,
         "num_assessments_used":   num_assessments,
         "total_weight_recorded":  total_weight_recorded,
         "weight_complete":        weight_complete,
         "partial_weighted_score": partial_weighted_score,
+        "attendance_rate_used":   attendance_rate if "ATTENDANCE_RATE" in model_features else None,
         "model_name":             _PACKAGE["model_name"],
         "model_accuracy":         _PACKAGE["accuracy"],
         "model_version":          LIVE_MODEL_VERSION,
@@ -280,6 +324,7 @@ def predict_partial(
     study_period:     str,
     trimester_num:    float,
     assessments_used: list,
+    attendance_rate:  Optional[float] = None,
 ) -> dict:
     """
     Mid-term estimate for a genuinely partial record (50-99% coverage) —
@@ -306,27 +351,70 @@ def predict_partial(
     a1_mark, a1_weight, a1_contrib, a2_mark, a2_weight, a2_contrib = _top2_by_weight(assessments_used)
     partial_weighted_score, partial_weight_coverage = compute_simulated_partial_score(assessments_used)
 
-    # FEATURES order must match train_model.py FEATURES list exactly (same order
-    # as predict() — build_simulated_progress_features() produces the same
-    # column set, just different values for the partial-score/coverage pair).
-    feature_values = np.array([[
-        a1_mark, a1_weight, a1_contrib,
-        a2_mark, a2_weight, a2_contrib,
-        partial_weighted_score, partial_weight_coverage,
-        subj_difficulty, trimester_num,
-    ]])
+    # Feature vector built from _SIM_PACKAGE["features"] (stored at training
+    # time), not a hardcoded column order — see predict()'s matching comment
+    # for why. attendance_rate here should already be truncated to the same
+    # coverage point as the marks (main.py's caller is responsible for that —
+    # passing a student's full/final attendance rate into a mid-term model
+    # would be the exact same leakage class train_simulated_progress.py's
+    # own truncation logic exists to prevent).
+    available = {
+        "ASSESS1_MARK":            a1_mark,
+        "ASSESS1_WEIGHT":          a1_weight,
+        "ASSESS1_CONTRIBUTION":    a1_contrib,
+        "ASSESS2_MARK":            a2_mark,
+        "ASSESS2_WEIGHT":          a2_weight,
+        "ASSESS2_CONTRIBUTION":    a2_contrib,
+        "PARTIAL_WEIGHTED_SCORE":  partial_weighted_score,
+        "PARTIAL_WEIGHT_COVERAGE": partial_weight_coverage,
+        "SUBJECT_DIFFICULTY":      subj_difficulty,
+        "TRIMESTER_NUM":           trimester_num,
+        "ATTENDANCE_RATE":         attendance_rate,
+    }
+    _LEGACY_FEATURES = [
+        "ASSESS1_MARK", "ASSESS1_WEIGHT", "ASSESS1_CONTRIBUTION",
+        "ASSESS2_MARK", "ASSESS2_WEIGHT", "ASSESS2_CONTRIBUTION",
+        "PARTIAL_WEIGHTED_SCORE", "PARTIAL_WEIGHT_COVERAGE",
+        "SUBJECT_DIFFICULTY", "TRIMESTER_NUM",
+    ]
+    model_features = _SIM_PACKAGE.get("features", _LEGACY_FEATURES)
+    missing = [f for f in model_features if available.get(f) is None]
+    if missing:
+        return {"error": f"missing_required_feature: {missing[0]} is required by this model version but was not provided"}
+    feature_values = np.array([[available[f] for f in model_features]])
 
     proba_arr   = model.predict_proba(feature_values)[0]
     proba_pass  = float(proba_arr[1])
     proba_fail  = float(proba_arr[0])
     probability = round(proba_pass * 100, 1)
 
+    # probability_calibrated: this model's raw P(pass) understates true pass
+    # likelihood by ~13pp on average (mean absolute calibration error) across
+    # the 10-90% range — see train_simulated_progress.py Step E and
+    # model_card.md's calibration writeup. Fit via Platt scaling on
+    # out-of-sample validation predictions, never on the data being scored
+    # here. This is deliberately an ADDITIONAL field, not a replacement for
+    # "probability"/"prediction"/"risk_band": swapping the risk band's Safe
+    # floor onto the calibrated scale (a mathematically consistent option —
+    # see _compute_risk_band's docstring on why threshold and probability
+    # must move together) would move mid-term's Safe floor from 70% to 95%,
+    # making "Safe" nearly unreachable — a real product-behaviour decision
+    # for lecturers/stakeholders to make deliberately, not one to ship as a
+    # side effect of a calibration fix.
+    calibrator = _SIM_PACKAGE.get("calibrator")
+    probability_calibrated = (
+        round((1 - float(calibrator.predict_proba([[proba_fail]])[0, 1])) * 100, 1)
+        if calibrator is not None else None
+    )
+
     prediction = "Fail" if proba_fail >= threshold else "Pass"
 
-    # risk_band is derived from THIS model's own threshold (0.25, not
-    # predict()'s 0.50) via _compute_risk_band — previously hardcoded to the
-    # same 65/40 split as predict() regardless of threshold, which could show
-    # "Safe" and "Fail" simultaneously (confirmed live: probability=73.1,
+    # risk_band is derived from THIS model's own honestly-validated threshold
+    # (re-selected on every retrain — currently 0.30, historically 0.25 — see
+    # _SIM_PACKAGE["decision_threshold"], not predict()'s fixed 0.50) via
+    # _compute_risk_band — previously hardcoded to the same 65/40 split as
+    # predict() regardless of threshold, which could show "Safe" and "Fail"
+    # simultaneously (confirmed live at the time: probability=73.1,
     # threshold=0.25 → Fail, but 73.1 >= the old hardcoded 65 → Safe). The
     # simulated-progress model's probabilities also run less confident on
     # average (verified: precision 0.23-0.57 across coverage bins vs. 0.77
@@ -344,13 +432,16 @@ def predict_partial(
         "subject":                subject,
         "study_period":           study_period,
         "probability":            probability,
+        "probability_calibrated": probability_calibrated,
         "prediction":             prediction,
         "risk_band":              risk_band,
+        "safe_floor_percent":     _safe_floor(threshold),
         "subject_difficulty":     subj_difficulty,
         "num_assessments_used":   len(assessments_used),
         "total_weight_recorded":  partial_weight_coverage * 100,
         "weight_complete":        False,
         "partial_weighted_score": partial_weighted_score,
+        "attendance_rate_used":   attendance_rate if "ATTENDANCE_RATE" in model_features else None,
         "model_name":             _SIM_PACKAGE["model_name"],
         "model_accuracy":         _SIM_PACKAGE["accuracy"],
         "model_version":          SIM_MODEL_VERSION,

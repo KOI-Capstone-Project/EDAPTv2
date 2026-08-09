@@ -194,6 +194,7 @@ export default function ExplorerView({ isLecturer }) {
   const [gender,     setGender]     = useState('');
   const [assessType, setAssessType] = useState('');
   const [passed,     setPassed]     = useState('');
+  const [attBand,    setAttBand]    = useState('');
   const [records,    setRecords]    = useState([]);
   const [total,      setTotal]      = useState(0);
   const [totalPages, setTotalPages] = useState(0);
@@ -216,6 +217,7 @@ export default function ExplorerView({ isLecturer }) {
       if (gender)     params.gender          = gender;
       if (assessType) params.assessment_type = assessType;
       if (passed)     params.passed          = passed;
+      if (attBand)    params.attendance_band = attBand;
       const res = await api.get('/api/explorer/records', { params });
       setRecords(res.data.data ?? []);
       setTotal(res.data.total ?? 0);
@@ -226,7 +228,7 @@ export default function ExplorerView({ isLecturer }) {
     } finally {
       setLoading(false);
     }
-  }, [search, subject, trimester, country, gender, assessType, passed]);
+  }, [search, subject, trimester, country, gender, assessType, passed, attBand]);
 
   useEffect(() => { fetchRecords(1); }, [fetchRecords]);
 
@@ -234,12 +236,12 @@ export default function ExplorerView({ isLecturer }) {
 
   const clearAll = () => {
     setSearch(''); setSubject(''); setTrimester('');
-    setCountry(''); setGender(''); setAssessType(''); setPassed('');
+    setCountry(''); setGender(''); setAssessType(''); setPassed(''); setAttBand('');
   };
 
   const colStyle = { fontSize: 12, color: '#475569', padding: '10px 12px', borderBottom: '0.5px solid #F0F4F8', whiteSpace: 'nowrap' };
   const thStyle  = { fontSize: 11, fontWeight: 600, color: '#94A3B8', padding: '10px 12px', borderBottom: '1px solid #E2E8F0', textTransform: 'uppercase', letterSpacing: 0.5, background: '#F8FAFC', whiteSpace: 'nowrap' };
-  const colCount = isLecturer ? 7 : 8;
+  const colCount = (isLecturer ? 7 : 8) + 1;
 
   return (
     <div style={s.page}>
@@ -307,6 +309,12 @@ export default function ExplorerView({ isLecturer }) {
             <option value="true">Pass only</option>
             <option value="false">Fail only</option>
           </select>
+          <select style={s.select} value={attBand} onChange={e => setAttBand(e.target.value)}>
+            <option value="">All attendance</option>
+            <option value="low">Low (&lt;50%)</option>
+            <option value="medium">Medium (50-79%)</option>
+            <option value="high">High (80%+)</option>
+          </select>
           <button type="submit" style={s.filterBtn}>Search</button>
           <button type="button" style={s.clearBtn} onClick={clearAll}>Clear</button>
         </form>
@@ -317,7 +325,7 @@ export default function ExplorerView({ isLecturer }) {
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={s.tableCard}>
             <div style={{ overflowX: 'auto' }}>
-              <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: isLecturer ? 580 : 700 }}>
+              <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: isLecturer ? 660 : 780 }}>
                 <thead>
                   <tr>
                     <th style={thStyle}>Student ID</th>
@@ -325,6 +333,7 @@ export default function ExplorerView({ isLecturer }) {
                     <th style={thStyle}>Assessment</th>
                     <th style={thStyle}>Mark %</th>
                     <th style={thStyle}>Result</th>
+                    <th style={thStyle}>Attendance</th>
                     <th style={thStyle}>Period</th>
                     {!isLecturer && <th style={thStyle}>Country</th>}
                     <th style={thStyle}></th>
@@ -349,6 +358,9 @@ export default function ExplorerView({ isLecturer }) {
                         {rec.mark_percent != null ? `${rec.mark_percent}%` : '—'}
                       </td>
                       <td style={colStyle}><PassBadge passed={rec.passed} /></td>
+                      <td style={{ ...colStyle, color: rec.attendance_rate != null && rec.attendance_rate < 50 ? '#DC2626' : '#475569' }}>
+                        {rec.attendance_rate != null ? `${rec.attendance_rate}%` : '—'}
+                      </td>
                       <td style={colStyle}>{rec.study_period ?? '—'}</td>
                       {!isLecturer && <td style={colStyle}>{rec.country ?? '—'}</td>}
                       <td style={{ ...colStyle, textAlign: 'right' }}>

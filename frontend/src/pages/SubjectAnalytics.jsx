@@ -161,6 +161,21 @@ export default function SubjectAnalytics() {
   }
   const trendData = Object.values(trendMap);
 
+  // Merge attendance trend by period, same shape as performance trend
+  const attTrendMap = {};
+  if (a) {
+    (a.attendance_trend || []).forEach(p => {
+      attTrendMap[p.period] = { period: p.period, [a.subject]: p.subject_avg, Institution: p.institution_avg };
+    });
+  }
+  if (b) {
+    (b.attendance_trend || []).forEach(p => {
+      if (!attTrendMap[p.period]) attTrendMap[p.period] = { period: p.period };
+      attTrendMap[p.period][b.subject] = p.subject_avg;
+    });
+  }
+  const attTrendData = Object.values(attTrendMap);
+
   // Merge assessment breakdown by type
   const typeMap = {};
   if (a) a.assessment_breakdown.forEach(ab => { typeMap[ab.type] = { type: ab.type, [a.subject]: ab.avg }; });
@@ -247,7 +262,7 @@ export default function SubjectAnalytics() {
           </div>
 
           {/* KPI row */}
-          <div style={{ ...s.kpiRow, gridTemplateColumns: b ? 'repeat(4, 1fr)' : 'repeat(4, 1fr)' }}>
+          <div style={{ ...s.kpiRow, gridTemplateColumns: b ? 'repeat(6, 1fr)' : 'repeat(5, 1fr)' }}>
             {b ? (
               <>
                 <KpiCard label={`${a.subject} — Avg Mark`} value={fmtPct(a.avg_mark)}
@@ -260,6 +275,8 @@ export default function SubjectAnalytics() {
                   change={diff(a.pass_rate, a.prev_pass_rate)} warn={a.pass_rate < 50} />
                 <KpiCard label={`${b.subject} — Pass Rate`} value={fmtPct(b.pass_rate)}
                   change={diff(b.pass_rate, b.prev_pass_rate)} warn={b.pass_rate < 50} />
+                <KpiCard label={`${a.subject} — Avg Attendance`} value={fmtPct(a.avg_attendance_rate)} />
+                <KpiCard label={`${b.subject} — Avg Attendance`} value={fmtPct(b.avg_attendance_rate)} />
               </>
             ) : (
               <>
@@ -273,6 +290,7 @@ export default function SubjectAnalytics() {
                   sub="≥40% is high difficulty" />
                 <KpiCard label="Enrolled Students" value={a.student_count}
                   sub={`Difficulty: ${a.difficulty}`} />
+                <KpiCard label="Avg Attendance" value={fmtPct(a.avg_attendance_rate)} />
               </>
             )}
           </div>
@@ -312,6 +330,26 @@ export default function SubjectAnalytics() {
               </ResponsiveContainer>
             </div>
           </div>
+
+          {/* Attendance trend */}
+          {attTrendData.length > 0 && (
+            <div style={s.card}>
+              <h3 style={s.chartTitle}>Attendance Trend</h3>
+              <ResponsiveContainer width="100%" height={220}>
+                <LineChart data={attTrendData}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#EEF0F4" vertical={false} />
+                  <XAxis dataKey="period" tick={{ fontSize: 11, fill: '#64748B' }} />
+                  <YAxis tick={{ fontSize: 11, fill: '#64748B' }} domain={[0, 100]} unit="%" />
+                  <Tooltip formatter={v => `${v}%`} />
+                  <Legend iconType="circle" iconSize={8} wrapperStyle={{ fontSize: 12 }} />
+                  <Line type="monotone" dataKey={a.subject} stroke={TEAL} strokeWidth={2} dot={{ r: 3 }} />
+                  {b && <Line type="monotone" dataKey={b.subject} stroke={ORANGE} strokeWidth={2} dot={{ r: 3 }} />}
+                  <Line type="monotone" dataKey="Institution" stroke={GRAY} strokeWidth={1.5}
+                    dot={{ r: 2 }} strokeDasharray="4 3" />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+          )}
 
           {/* Assessment breakdown */}
           {breakdownData.length > 0 && (

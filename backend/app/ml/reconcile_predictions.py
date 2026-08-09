@@ -8,23 +8,31 @@ actual_pass on any prior prediction rows for that enrolment from the real
 final grade.
 
 STANDARD PATH: reuses train_model.load_and_filter_raw() (SAFE_SUBJECTS +
-per-enrolment dirty-row filter, ATTEMPTNUMBER==1 only) and
-train_model.build_target() (FULL_WEIGHTED_FINAL >= 50) exactly as-is — so
-"reconciled via the standard path" always means "measured the exact same
-way training does." train_model.py, build_target(), and the training
-pipeline's clean-enrolment definition are NOT touched by this file — that
-attempt-1-only scope is a separate, bigger decision with its own tradeoffs
-(deliberately deferred, discussed elsewhere).
+per-enrolment dirty-row filter) and train_model.build_target()
+(FULL_WEIGHTED_FINAL >= 50) exactly as-is — so "reconciled via the standard
+path" always means "measured the exact same way training does."
+load_and_filter_raw() now collapses each enrolment to one representative
+row per ASSESSMENTTYPECODE across ATTEMPTNUMBER before this file ever sees
+it (see collapse_attempts_to_latest_per_type() in train_model.py) — a fix
+for a real bug where an attempt-1-only view either missed resit-only
+enrolments entirely or dropped attempt-1 components a partial resit didn't
+touch. This means the standard path below now resolves the large majority
+of resit cases correctly on its own, not just attempt-1 enrolments.
 
-RESIT FALLBACK (this file only, does not affect training): a student whose
-earliest recorded attempt for a subject+period isn't attempt 1 (e.g. a
-resit/repeat) is permanently invisible to the standard path — verified this
-happens (32 of 179 real ICT205/25.3 predictions). For predictions that don't
-resolve via the standard path, this retries using that student's LATEST
-recorded attempt for that subject+period instead, with the identical
-clean-weighting check (99-101) and PASS rule (>=50) — just applied to the
-latest attempt's rows instead of attempt 1's. Results from this fallback are
-tagged reconciled_via_resit=True and never silently merged with standard
+RESIT FALLBACK (this file only, does not affect training): originally added
+because a student whose earliest recorded attempt for a subject+period
+isn't attempt 1 was permanently invisible to the (then attempt-1-only)
+standard path — verified this happened for 32 of 179 real ICT205/25.3
+predictions at the time. With the standard path's own collapsing fix above,
+this fallback is likely mostly redundant now, but that hasn't been verified
+directly (i.e. re-measuring how many predictions still need it) — left
+in place, unverified, rather than assumed safe to remove. For any
+prediction that still doesn't resolve via the standard path, this retries
+using that student's LATEST recorded attempt for that subject+period
+instead, with the identical clean-weighting check (99-101) and PASS rule
+(>=50) — just applied to the latest attempt's rows instead of the
+collapsed set. Results from this fallback are tagged
+reconciled_via_resit=True and never silently merged with standard
 reconciliations in a way that hides which method was used.
 
 Usage:

@@ -175,6 +175,9 @@ export default function AdminDashboard() {
   const [passFail,    setPassFail]    = useState(null);
   const [intl,        setIntl]        = useState([]);
   const [difficulty,  setDifficulty]  = useState([]);
+  const [attDist,     setAttDist]     = useState(null);
+  const [attOutcome,  setAttOutcome]  = useState(null);
+  const [attBySubj,   setAttBySubj]   = useState(null);
   const [loading,     setLoading]     = useState(true);
   const [error,       setError]       = useState(null);
 
@@ -206,7 +209,7 @@ export default function AdminDashboard() {
       if (subjF) p.subject    = subjF;
       if (cgF)   p.classgroup = cgF;
 
-      const [sumR, grR, trR, asR, pfR, inR, diR] = await Promise.allSettled([
+      const [sumR, grR, trR, asR, pfR, inR, diR, adR, aoR, abR] = await Promise.allSettled([
         api.get('/api/dashboard/summary',               { params: p }),
         api.get('/api/dashboard/grade-distribution',    { params: p }),
         api.get('/api/dashboard/performance-trend',     { params: { subject: subjF || undefined, classgroup: cgF || undefined } }),
@@ -214,6 +217,9 @@ export default function AdminDashboard() {
         api.get('/api/dashboard/pass-fail',             { params: p }),
         api.get('/api/dashboard/international',         { params: { trimester: trimeF || undefined, year: yearF || undefined } }),
         api.get('/api/dashboard/difficulty-index'),
+        api.get('/api/dashboard/attendance-distribution', { params: p }),
+        api.get('/api/dashboard/attendance-outcome',      { params: p }),
+        api.get('/api/dashboard/attendance-by-subject'),
       ]);
 
       if (sumR.status === 'fulfilled') setSummary(sumR.value.data);
@@ -223,6 +229,9 @@ export default function AdminDashboard() {
       if (pfR.status  === 'fulfilled') setPassFail(pfR.value.data);
       if (inR.status  === 'fulfilled') setIntl(inR.value.data.data       || []);
       if (diR.status  === 'fulfilled') setDifficulty(diR.value.data.data || []);
+      if (adR.status  === 'fulfilled') setAttDist(adR.value.data);
+      if (aoR.status  === 'fulfilled') setAttOutcome(aoR.value.data);
+      if (abR.status  === 'fulfilled') setAttBySubj(abR.value.data.data || []);
 
       if ([sumR, grR, trR, asR, pfR, inR, diR].every(r => r.status === 'rejected')) {
         setError('Could not load dashboard data. Check that the backend is running.');
@@ -435,6 +444,75 @@ export default function AdminDashboard() {
           )}
         </ChartCard>
 
+        {/* Chart 7 — Attendance Rate Distribution */}
+        <ChartCard title="Attendance Rate Distribution">
+          {!attDist || attDist.data.every(d => d.count === 0) ? <NoData /> : (
+            <>
+              <ResponsiveContainer width="100%" height={280}>
+                <BarChart data={attDist.data} margin={{ top: 4, right: 12, left: 0, bottom: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" />
+                  <XAxis dataKey="band" tick={{ fontSize: 11 }} />
+                  <YAxis tick={{ fontSize: 11 }} />
+                  <Tooltip />
+                  <Bar dataKey="count" name="Enrolments" fill="#2E6E8E" radius={[3,3,0,0]} />
+                </BarChart>
+              </ResponsiveContainer>
+              <p style={s.chartFootnote}>
+                Mean {attDist.mean_attendance_rate}% · n={attDist.n?.toLocaleString()} · {attDist.population}
+              </p>
+            </>
+          )}
+        </ChartCard>
+
+        {/* Chart 8 — Attendance vs Outcome */}
+        <ChartCard title="Attendance vs Outcome">
+          {!attOutcome || attOutcome.n === 0 ? <NoData /> : (
+            <>
+              <ResponsiveContainer width="100%" height={280}>
+                <BarChart
+                  data={[
+                    { status: 'Pass', rate: attOutcome.mean_attendance_pass },
+                    { status: 'Fail', rate: attOutcome.mean_attendance_fail },
+                  ]}
+                  margin={{ top: 4, right: 12, left: 0, bottom: 0 }}
+                >
+                  <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" />
+                  <XAxis dataKey="status" tick={{ fontSize: 11 }} />
+                  <YAxis domain={[0, 100]} unit="%" tick={{ fontSize: 11 }} />
+                  <Tooltip formatter={v => `${v}%`} />
+                  <Bar dataKey="rate" name="Avg Attendance %" radius={[3,3,0,0]}>
+                    <Cell fill="#1D9E75" />
+                    <Cell fill="#E24B4A" />
+                  </Bar>
+                </BarChart>
+              </ResponsiveContainer>
+              <p style={s.chartFootnote}>
+                Correlation {attOutcome.correlation} · n={attOutcome.n?.toLocaleString()} · {attOutcome.population}
+              </p>
+            </>
+          )}
+        </ChartCard>
+
+        {/* Chart 9 — Attendance by Subject (lowest 20, admin only) */}
+        <ChartCard title="Attendance by Subject (lowest 20)">
+          {!attBySubj || attBySubj.length === 0 ? <NoData /> : (
+            <>
+              <div style={{ overflowY: 'auto', maxHeight: 320 }}>
+                <ResponsiveContainer width="100%" height={Math.max(260, Math.min(20, attBySubj.length) * 22)}>
+                  <BarChart layout="vertical" data={attBySubj.slice(0, 20)} margin={{ top: 4, right: 40, left: 0, bottom: 0 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" horizontal={false} />
+                    <XAxis type="number" domain={[0, 100]} unit="%" tick={{ fontSize: 10 }} />
+                    <YAxis type="category" dataKey="SUBJECTCODE" width={90} tick={{ fontSize: 10 }} />
+                    <Tooltip formatter={v => `${v}%`} />
+                    <Bar dataKey="avg_attendance_rate" name="Avg Attendance %" fill="#2E6E8E" radius={[0,3,3,0]} />
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+              <p style={s.chartFootnote}>{attDist?.population}</p>
+            </>
+          )}
+        </ChartCard>
+
       </div>}
     </div>
   );
@@ -492,4 +570,5 @@ const s = {
   chartGrid: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 20 },
   chartCard: { background: '#fff', border: '0.5px solid #DDE4EA', borderRadius: 12, padding: '20px' },
   chartTitle: { margin: '0 0 14px', fontSize: 14, fontWeight: 500, color: '#1A2E40' },
+  chartFootnote: { margin: '10px 0 0', fontSize: 10.5, color: '#8BA5B8', lineHeight: 1.4 },
 };

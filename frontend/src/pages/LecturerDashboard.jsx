@@ -116,6 +116,8 @@ export default function LecturerDashboard() {
   const [trend,      setTrend]      = useState([]);
   const [assessment, setAssessment] = useState([]);
   const [passFail,   setPassFail]   = useState([]);
+  const [attOutcome, setAttOutcome] = useState(null);
+  const [attBySubj,  setAttBySubj]  = useState(null);
   const [loading,    setLoading]    = useState(true);
   const [error,      setError]      = useState(null);
 
@@ -133,11 +135,15 @@ export default function LecturerDashboard() {
       api.get('/api/dashboard/performance-trend',     { params: p }),
       api.get('/api/dashboard/assessment-comparison', { params: p }),
       api.get('/api/dashboard/pass-fail',             { params: p }),
-    ]).then(([sumR, gradeR, trendR, assessR, pfR]) => {
+      api.get('/api/dashboard/attendance-outcome',    { params: p }),
+      api.get('/api/dashboard/attendance-by-subject'),
+    ]).then(([sumR, gradeR, trendR, assessR, pfR, aoR, abR]) => {
       if (sumR.status   === 'fulfilled') setSummary(sumR.value.data);
       if (gradeR.status === 'fulfilled') setGradeDist(gradeR.value.data.data   ?? []);
       if (assessR.status=== 'fulfilled') setAssessment(assessR.value.data.data ?? []);
       if (pfR.status    === 'fulfilled') setPassFail(pfR.value.data.breakdown   ?? []);
+      if (aoR.status    === 'fulfilled') setAttOutcome(aoR.value.data);
+      if (abR.status    === 'fulfilled') setAttBySubj(abR.value.data.data ?? []);
 
       if (trendR.status === 'fulfilled') {
         const raw = trendR.value.data.data ?? [];
@@ -357,6 +363,51 @@ export default function LecturerDashboard() {
             )}
           </ChartCard>
 
+          <ChartCard title="Attendance vs Outcome">
+            {noData || !attOutcome || attOutcome.n === 0 ? <NoData /> : (
+              <>
+                <ResponsiveContainer width="100%" height={260}>
+                  <BarChart
+                    data={[
+                      { status: 'Pass', rate: attOutcome.mean_attendance_pass },
+                      { status: 'Fail', rate: attOutcome.mean_attendance_fail },
+                    ]}
+                    margin={{ top: 8, right: 16, left: 0, bottom: 8 }}
+                  >
+                    <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" />
+                    <XAxis dataKey="status" tick={{ fontSize: 11 }} />
+                    <YAxis domain={[0, 100]} unit="%" tick={{ fontSize: 11 }} />
+                    <Tooltip formatter={v => `${v}%`} />
+                    <Bar dataKey="rate" name="Avg Attendance %" radius={[4,4,0,0]}>
+                      <Cell fill="#1D9E75" />
+                      <Cell fill="#E24B4A" />
+                    </Bar>
+                  </BarChart>
+                </ResponsiveContainer>
+                <p style={s.chartFootnote}>
+                  Correlation {attOutcome.correlation} · n={attOutcome.n?.toLocaleString()} · {attOutcome.population}
+                </p>
+              </>
+            )}
+          </ChartCard>
+
+          <ChartCard title="Attendance by Subject">
+            {noData || !attBySubj || attBySubj.length === 0 ? <NoData /> : (
+              <>
+                <ResponsiveContainer width="100%" height={Math.max(220, attBySubj.length * 26)}>
+                  <BarChart layout="vertical" data={attBySubj} margin={{ top: 8, right: 30, left: 0, bottom: 8 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" horizontal={false} />
+                    <XAxis type="number" domain={[0, 100]} unit="%" tick={{ fontSize: 10 }} />
+                    <YAxis type="category" dataKey="SUBJECTCODE" width={80} tick={{ fontSize: 10 }} />
+                    <Tooltip formatter={v => `${v}%`} />
+                    <Bar dataKey="avg_attendance_rate" name="Avg Attendance %" fill="#2E6E8E" radius={[0,4,4,0]} />
+                  </BarChart>
+                </ResponsiveContainer>
+                <p style={s.chartFootnote}>My assigned subject(s) only</p>
+              </>
+            )}
+          </ChartCard>
+
         </div>
       )}
 
@@ -432,6 +483,7 @@ const s = {
   chartGrid: { display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 20 },
   chartCard: { background: '#fff', border: '0.5px solid #DDE4EA', borderRadius: 12, padding: '20px' },
   chartTitle: { margin: '0 0 14px', fontSize: 14, fontWeight: 500, color: '#1A2E40' },
+  chartFootnote: { margin: '10px 0 0', fontSize: 10.5, color: '#8BA5B8', lineHeight: 1.4 },
 
   legendRow: { display: 'flex', alignItems: 'center', fontSize: 12, color: '#5A7A8A', marginBottom: 8 },
   dot: { display: 'inline-block', width: 10, height: 10, borderRadius: '50%', marginRight: 5 },

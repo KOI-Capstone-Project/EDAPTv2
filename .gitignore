@@ -48,6 +48,12 @@ yarn-error.log*
 *.h5
 ml_models/
 backend/app/ml/models/
+backend/app/ml/models_simulated/
+backend/app/ml/model_backups/
+backend/app/ml/attendance_features.csv
+backend/app/ml/column_review_decisions.json
+backend/app/ml/ingested_capstone.csv
+backend/app/ml/.ingest.lock
 
 # ── OS ───────────────────────────────────────────────────
 .DS_Store

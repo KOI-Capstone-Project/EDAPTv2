@@ -2,15 +2,16 @@
 Identify which subjects are safe for prediction based on per-enrolment
 assessment weighting completeness.
 
-An enrolment (one student's first attempt at one subject in one study
-period) is "clean" if its recorded WEIGHTING sums to 99-101 (allowing for
-rounding). A subject is classified by the share of its enrolments that
-are clean, not by whether any single subject-period aggregate hits 100
-exactly — a subject can have thousands of enrolments and still look
-"incomplete" under an aggregate check just because of a handful of rows
-with a data entry error.
+An enrolment (one student's final, resit-combined record for one subject in
+one study period — collapsed across ATTEMPTNUMBER at the assessment-type
+level, see below) is "clean" if its recorded WEIGHTING sums to 99-101
+(allowing for rounding). A subject is classified by the share of its
+enrolments that are clean, not by whether any single subject-period
+aggregate hits 100 exactly — a subject can have thousands of enrolments and
+still look "incomplete" under an aggregate check just because of a handful
+of rows with a data entry error.
 
-Reads:  data/Capstone_data_20260324.csv
+Reads:  data/Capstone_data_20260729.csv
 Writes: data/subject_reliability.json
         data/subject_reliability_report.csv
 """
@@ -23,7 +24,7 @@ import pandas as pd
 # ── Paths ─────────────────────────────────────────────────────────────────────
 
 ROOT     = Path(__file__).resolve().parent.parent
-DATA_IN  = ROOT / "data" / "Capstone_data_20260324.csv"
+DATA_IN  = ROOT / "data" / "Capstone_data_20260729.csv"
 OUT_JSON = ROOT / "data" / "subject_reliability.json"
 OUT_CSV  = ROOT / "data" / "subject_reliability_report.csv"
 
@@ -63,14 +64,27 @@ df["STUDYPERIOD"] = df["STUDYPERIOD"].apply(
     lambda x: str(round(float(x), 1)) if pd.notna(x) else ""
 )
 
-# ── First-attempt rows only ────────────────────────────────────────────────────
-
-first_attempt = df[df["ATTEMPTNUMBER"] == 1]
+# ── Collapse multi-attempt enrolments (assessment-type level) ─────────────────
+# An "ATTEMPTNUMBER == 1 only" filter (the old approach here) silently drops
+# any enrolment whose record starts at attempt 2 or later — 9,386 of 78,886
+# enrolments (11.9%) in the 20260729 data have no attempt-1 row at all — and
+# ignores resit contributions for every other enrolment. Mirrors
+# collapse_attempts_to_latest_per_type() in backend/app/ml/train_model.py:
+# for each (student, subject, period, assessment type) independently, keep
+# only the row(s) from whichever ATTEMPTNUMBER is highest for that type. This
+# reduces to "latest attempt only" when a resit replaces every type at once,
+# and correctly falls back to an earlier attempt for any type a resit didn't
+# touch — kept as an inline duplicate rather than a cross-package import so
+# this script stays runnable standalone, outside the backend's environment.
+winning_attempt = df.groupby(
+    ["STUDENTID_MASKED", "SUBJECTCODE", "STUDYPERIOD", "ASSESSMENTTYPECODE"]
+)["ATTEMPTNUMBER"].transform("max")
+collapsed = df[df["ATTEMPTNUMBER"] == winning_attempt]
 
 # ── Weight sum per enrolment (subject + period + student) ─────────────────────
 
 enrolments = (
-    first_attempt
+    collapsed
     .groupby(["SUBJECTCODE", "STUDYPERIOD", "STUDENTID_MASKED"])["WEIGHTING"]
     .sum()
     .reset_index()

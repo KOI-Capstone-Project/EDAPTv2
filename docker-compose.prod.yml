@@ -41,7 +41,16 @@ services:
     environment:
       DATABASE_URL: ${DATABASE_URL}
       ENVIRONMENT:  production
+      # Shared with the scheduler service below via the ingested_data_prod
+      # named volume, so a capstone CSV ingested through this container's
+      # /api/ingest/capstone/confirm is actually visible to the scheduler's
+      # separate process — prod's backend and scheduler don't otherwise
+      # share a filesystem (no ./backend bind mount in prod, unlike dev).
+      # See train_model.py's INGESTED_DATA_DIR docstring for the full story.
+      INGESTED_DATA_DIR: /shared_data
     # Source NOT mounted — image is the source of truth in prod
+    volumes:
+      - ingested_data_prod:/shared_data
     depends_on:
       db:
         condition: service_healthy
@@ -60,6 +69,12 @@ services:
   # or slow retrain can't affect API uptime. Needs its own ./data mount —
   # unlike the backend service above, this is the only prod service that
   # reads the raw training CSV directly (train_model.py's DATA_PATH).
+  #
+  # Also mounts ingested_data_prod (same named volume as backend, above) so
+  # a capstone file ingested through the API is actually picked up by this
+  # container's own DATA_PATH resolution on its next 24h cycle — previously
+  # a real, documented gap: this container had no way to see anything
+  # ingested through the backend container at all.
   scheduler:
     build:
       context: ./backend
@@ -70,8 +85,10 @@ services:
     environment:
       DATABASE_URL: ${DATABASE_URL}
       ENVIRONMENT:  production
+      INGESTED_DATA_DIR: /shared_data
     volumes:
       - ./data:/data:ro
+      - ingested_data_prod:/shared_data
     depends_on:
       db:
         condition: service_healthy
@@ -103,3 +120,8 @@ services:
 
 volumes:
   postgres_data_prod:
+  # Shared between backend and scheduler only — holds ingested_capstone.csv,
+  # written by POST /api/ingest/capstone/confirm, read by both containers'
+  # own DATA_PATH resolution (train_model.py). See backend/main.py's
+  # ingest_capstone_confirm() and train_model.py's INGESTED_DATA_DIR.
+  ingested_data_prod:

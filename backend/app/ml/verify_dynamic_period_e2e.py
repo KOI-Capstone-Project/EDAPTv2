@@ -23,7 +23,7 @@ students) rather than fabricated dummy data — then:
 
 Full isolation: DATA_PATH and the model registry paths are monkey-patched
 to a throwaway temp directory for the duration of this script. The real
-data/Capstone_data_20260324.csv and the real registry.json / live model
+data/Capstone_data_20260729.csv and the real registry.json / live model
 are never written to — only read once, up front, to fetch the real live
 entry for step 4's comparison.
 

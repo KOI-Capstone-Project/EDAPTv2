@@ -36,6 +36,19 @@ COPY scripts/ ./scripts/
 
 # Non-root user for security
 RUN addgroup --system edapt && adduser --system --ingroup edapt edapt
+
+# /shared_data is where docker-compose.prod.yml mounts the ingested_data_prod
+# named volume (backend + scheduler services — see train_model.py's
+# INGESTED_DATA_DIR). A fresh named volume is root-owned by default, which
+# the non-root `edapt` user below can't write to; Docker initializes a new
+# named volume's contents (including ownership) from whatever already exists
+# at the mount path in the image, so creating this directory with the right
+# ownership here — before the volume is mounted at container start — is what
+# makes it writable by `edapt` from first boot. Confirmed necessary directly:
+# without this, writing to a freshly-created ingested_data_prod volume as
+# the non-root edapt user failed with "Permission denied".
+RUN mkdir -p /shared_data && chown edapt:edapt /shared_data
+
 USER edapt
 
 EXPOSE 8000

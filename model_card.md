@@ -13,7 +13,7 @@ Verified directly against `backend/app/ml/models/registry.json` and live ablatio
 
 ## Training data
 
-- **Source**: `data/Capstone_data_20260324.csv`
+- **Source**: `data/archive/Capstone_data_20260324.csv` — **superseded**. The live model has not been retrained since this session's data refresh; see [Round 6](#round-6--the-513pp-recall-drop-investigated) for what changed and why the numbers below are no longer fully trustworthy on their own.
 - **Subjects used**: 124 of the institution's subjects — `fully_clean` (69) + `mostly_clean` (55) per `data/subject_reliability.json`'s per-enrolment reliability check, `TSL713` excluded (confirmed data-corruption case, CQ/IA weightings swapped by an earlier cleaning script)
 - **Date range**: all study periods before `25.3`, excluding the `23.1` pilot period (too few records to add signal)
 - **Row count**: 58,267 training rows (student-subject-period records, post-filtering)
@@ -35,10 +35,13 @@ Mid-to-late trimester risk flagging for lecturers and administrators — surfaci
 - **Resit history is not currently usable as a clean feature.** The clean-enrolment definition this pipeline uses (per-enrolment weighting sum on `ATTEMPTNUMBER==1` rows) structurally cannot represent a student's resit history as a distinct signal — reconciliation has a separate resit-fallback path (`reconcile_predictions.py`), but training itself does not.
 - **A related, newly-found (not previously documented) latent bug**: `build_target()` — the function that computes the ground-truth pass/fail label from raw marks — sums `MARKPERCENT × WEIGHTING` across **every** row for a student-subject-period with no `ATTEMPTNUMBER` filtering at all. Verified empirically: if a student has both an original attempt and a resit for the *same* assessment type, and that student's attempt-1-only rows already sum to a "clean" ~100% weighting, **both** attempts get summed into `FULL_WEIGHTED_FINAL` — effectively summing more than 100% of the subject's weighting and potentially flipping the pass/fail label in either direction. Checked against the real, current dataset: **this scenario currently affects 0 of the 271,981 rows** that survive the existing SAFE_SUBJECTS + enrolment-cleanliness filter — every real case where a same-type multi-attempt situation exists is *already* excluded by that filter for an unrelated reason (the attempt-1 rows alone don't sum to a clean ~100%). So this is a real bug in the code with **zero current impact on the live model**, not a guaranteed protection against future data. Not fixed as part of this exercise — training-target logic wasn't in scope for a diagnostic pass; flagging it here for a deliberate decision.
 - **Fairness finding on the age 0–20 group is a single observation, not a confirmed trend.** 139 records, fail-class recall 10.2 percentage points below the overall rate — flagged by the persisted bias audit, but only one independent (distinct training-period) audit has been run so far. `check_bias_persistence.py` exists specifically to track whether this recurs across future retrains before treating it as a real pattern.
+- **Gender: a real population-level pass-rate gap exists (F 86.10% vs. M 80.85%, 5.3pp, n=2,410 F / 5,516 M), and the live model's own fail-class recall gap by gender is smaller than it, not larger — F 87.10% vs. M 82.92% recall, a 4.18pp gap, both `flagged: false` in `registry.json` (well under the 10pp threshold).** The direction is the same in both — M has the lower pass rate at the population level and the lower fail-recall in the model — so this is not a case of the model manufacturing a new, independent bias out of a population fact that carried none; if anything the model's gap is the smaller of the two numbers. It is also not a case of the model fully correcting for the population difference either — the direction still lines up, it just doesn't compound it. Stated plainly, not flagged, because it isn't currently a flaggable finding under this project's own threshold.
 - **SMOTE vs. class-weighting, and ensemble vs. single-model, are current defaults — genuinely close calls, not clearly justified by performance alone.** ~~Removing SMOTE collapses fail-class precision at the currently-deployed 0.50 threshold (0.724 → 0.478)~~ **— this Round 1 claim was corrected in Round 2 (Issue 2 below): that comparison judged the no-SMOTE model at a threshold tuned for a *different* model's probability distribution. Given its own honestly re-validated threshold, the no-SMOTE model reaches P=0.686/R=0.819 — much closer to the SMOTE model's P=0.724/R=0.799, and its PR-AUC/ROC-AUC are marginally *higher*.** See the Round 2 Ablation Update section for the corrected verdict.
 - **The dual risk-scale UI (Round 3) is a display-level workaround, not a fix, for the mid-term model's calibration gap (Round 2's Calibration check).** The two models currently need separate risk scales specifically because their probability outputs don't mean the same thing at the same number — the mid-term model understates true pass likelihood by roughly 15–30 percentage points across the 10–90% range, so a "70%" from it and a "70%" from the complete-record model aren't comparable, and showing both against one shared 65%-Safe cutoff was exactly what produced the Fail/Safe contradiction Round 3 fixed. Giving mid-term predictions their own boundaries (Safe at 75%, not 65%) makes the label and the band agree with each other again, but it doesn't make the mid-term number mean the same thing as a complete-record number — it just moves the line to where this specific miscalibration currently sits. **Forward-looking guidance, not a claim about a guaranteed outcome**: if the Platt/isotonic calibration correction already flagged as future work (Calibration check, above) is implemented for the mid-term model, re-check at that point whether the two risk scales can be unified back into one — if calibration is fixed, the root cause of needing two scales goes away, but that should be re-tested against real held-out data when it happens, not assumed to follow automatically.
 
 ## Performance summary — current live model, held-out test period (`25.3`)
+
+**As of 2026-08-08: `0.8374` fail-class recall should not be cited as this model's current performance without this caveat.** Investigated and confirmed, not assumed ([Round 6](#round-6--the-513pp-recall-drop-investigated), including a 100%-traced mechanism, not a correlation): this number was partly earned against 205 real students' PASS labels that the refreshed data has since directly shown were wrong (Fail→Pass corrections, zero flips the other direction — traced to richer resit/attempt history now available for those students, not a labeling bug). Re-scoring this exact frozen model against corrected labels alone drops recall to 0.8230; a model retrained on the corrected data scores 0.7860. **`0.7860` is the more trustworthy current figure, not `0.8374`**, even though it's numerically lower — the table below is not wrong for what it measured at the time, but citing it today without this caveat overstates current performance.
 
 | Metric | Value |
 |---|---|
@@ -62,7 +65,9 @@ Mid-to-late trimester risk flagging for lecturers and administrators — surfaci
 
 A trivial rule (`average score to date < 50%` → flag at-risk, no ML) achieves **PR-AUC 0.8503** on the same validation set — within ~0.5–1 percentage point of the trained ensemble's 0.8556. **In plain terms**: most of this problem's predictive signal comes from the raw "how much have they scored so far" number itself, not from the ML model combining it cleverly with other features. What the trained model adds beyond the dumb baseline: (1) a genuinely smooth, continuous probability rather than a binary flag from a single crude cutoff, and (2) a usable precision/recall balance (72%/80%) at one operating point — the baseline can only trade precision for recall by moving its cutoff, and even its best cutoff (50%) sits at 50% precision / 89% recall, a much worse tradeoff than the trained model's.
 
-### Calibration check (Step 6), live model on the genuinely-held-out test period
+### Calibration check (Step 6), **complete-record model** (`predict()` / `best_model.pkl`), genuinely-held-out test period
+
+**Correction (Round 4 close-out): this table is the complete-record model's calibration, not the mid-term model's.** It was cross-referenced elsewhere in this document (Known Limitations, and the Round 3 dual-risk-scale writeup) as evidence for *"the mid-term model's calibration gap"* — that attribution was never actually checked and is wrong. Confirmed directly: this table's row count (7,916 across the 10 buckets) and ROC-AUC (0.974) match the complete-record model's test set (8,928 rows total; a fresh rerun on this session's refreshed data reproduces 8,928 rows and ROC-AUC 0.9662 — same shape, small drift consistent with the data refresh, not a different model). The mid-term/simulated-progress model's real test set is 33,990 rows with ROC-AUC ≈0.89 — an entirely different population, never represented in the table below. **The mid-term model's calibration had never actually been measured until Round 4, below** — this table only ever showed the complete-record model was miscalibrated too.
 
 | Predicted P(Pass) | N | Actual pass rate |
 |---|---|---|
@@ -201,3 +206,196 @@ Within each path, all three (label, band, gauge number) draw from one consistent
 Per the instructions, since the answer is (A), this is now surfaced in two places, not just documented here:
 - **`predictor.py`**: `_compute_risk_band`'s docstring states this explicitly (already present from Round 2).
 - **The UI**: `PredictorView.jsx`'s Risk Scale legend is no longer a single static legend — it now renders different ranges for a mid-term estimate (`0–39 / 40–74 / 75–100`) vs. a complete record (`0–39 / 40–64 / 65–100`), and shows a visible caption directly above the legend whenever a mid-term estimate is displayed: *"Mid-term estimate bands differ from final-record bands — Safe starts at 75% here (not 65%), matching this model's own separately-validated decision threshold (0.25, vs. 0.50 for a complete record)."* This is meant to be seen by a lecturer in the moment, not discovered by a bug report — verified live (frontend compiles, mid-term legend renders the shifted ranges and caption, complete-record legend is unchanged from before).
+
+## Round 4 — hyperparameter tuning check (XGBoost sub-model)
+
+**Question:** are the ensemble's current XGBoost hyperparameters (`n_estimators=200, max_depth=4, learning_rate=0.05`) near-optimal, or was a better configuration ever actually checked? They had never been tuned — they were the values chosen when the ensemble was first built. This check does not change what's live; it's a "checked, not assumed" pass, per the project's standing rule that the live model is never auto-promoted.
+
+**Step 1 — grid search on the validation split.** 36-point grid (`max_depth ∈ {3,4,5,6}`, `learning_rate ∈ {0.01,0.05,0.1}`, `n_estimators ∈ {100,200,300}`), RandomForest sub-model held fixed at its current config, SMOTE-resampled training set reused across all 36 XGBoost fits, evaluated on the honest validation split (`prepare_data_3way()`, never the test split) at the deployed threshold (0.5):
+
+| Config | Fail Recall | Fail Precision | Fail F1 | PR-AUC |
+|---|---|---|---|---|
+| Current live (depth=4, lr=0.05, n=200) | 0.7872 | 0.7205 | 0.7524 | 0.8566 |
+| Best by recall (depth=3, lr=0.01, n=100) | 0.8436 | 0.5917 | — | — |
+| **Pareto-dominant candidate (depth=3, lr=0.05, n=300)** | **0.7985** (+1.13pp) | **0.7209** (+0.04pp) | — | — |
+
+Of all 36 points, exactly 2 genuinely dominated the current config (equal-or-better on both recall and precision, strictly better on at least one — not a single-metric cherry-pick). `depth=3, lr=0.05, n_estimators=300` was the strongest: +1.13pp recall for effectively free (+0.04pp precision, not a tradeoff). This looked like a real, checked improvement.
+
+**Step 2 — registered it as a real candidate, not a hypothesis.** `train_model.py` was refactored to expose `XGB_PARAMS`/`RF_PARAMS` as named constants (behavior-neutral change — verified via full test suite, 21/21 passing before and after) so a candidate run could override them without touching the live defaults. The tuned config was run through the actual training pipeline (`train_model.main()`), producing a real registered version (`20260807_134847`, not live) with its own bias audit and metadata.
+
+**Step 3 — the comparison against live did not confirm the validation-split finding, for an honest, checked reason.** `compare_and_promote.py 20260807_134847` reported the candidate as **meaningfully worse** than live (recall −5.65pp). This was surprising given Step 1 — so it was checked further rather than reported at face value. The candidate differed from live in *two* ways at once: tuned hyperparameters, **and** training data (the candidate trained on this session's refreshed dataset, 65,903 rows, vs. live's 58,267 — a real data change, not a re-run of the same data). The registry comparison also evaluates on the held-out **test** split, not the validation split the grid search used. Three variables were confounded in one comparison.
+
+To isolate the hyperparameter effect alone, a second candidate (`20260807_135223`) was registered with the **unchanged default hyperparameters** on the **same refreshed data** — a same-data, same-split control:
+
+| Version | Data | Hyperparameters | Fail Precision | Fail Recall | Fail F1 |
+|---|---|---|---|---|---|
+| Live (`20260715_132655`) | old (58,267 rows) | default (depth=4, lr=0.05, n=200) | 0.7695 | 0.8374 | 0.8020 |
+| Control (`20260807_135223`) | **new** (65,903 rows) | default (depth=4, lr=0.05, n=200) | 0.7992 | 0.7860 | 0.7925 |
+| Tuned candidate (`20260807_134847`) | **new** (65,903 rows) | tuned (depth=3, lr=0.05, n=300) | 0.7948 | 0.7809 | 0.7878 |
+
+- **Isolated hyperparameter effect** (tuned − control, same data, same test split): precision −0.44pp, recall −0.51pp. Effectively a wash, if anything a slight regression — this **does not replicate** the +1.13pp recall / +0.04pp precision improvement found on the validation split in Step 1.
+- **Data-refresh effect alone** (control − live, same default hyperparameters, old vs. new data): precision +2.96pp, **recall −5.13pp**. This — not the hyperparameter tuning — is what actually drives the "meaningfully worse" verdict against live.
+
+**Conclusion: the current hyperparameters are near-optimal.** The apparent validation-split improvement in Step 1 did not hold up under a same-data, same-split, controlled re-check on the test split, so it's treated as within-noise for a single grid search rather than a real signal — a single 36-point grid on one validation split is not enough evidence to override a value that then fails to replicate under a cleaner comparison. **Both experimental versions remain registered but not live** (`20260807_134847`, `20260807_135223`) — neither was promoted, per the project's standing never-auto-promote rule. The genuinely interesting finding here is the **data-refresh effect**: retraining on this session's refreshed dataset alone (holding hyperparameters constant) shifts fail-recall down 5.13pp and fail-precision up 2.96pp relative to the currently-live model. That's a separate, real signal about the refreshed data's distribution — outside this check's scope, but worth flagging for whoever next reviews whether the live model should be retrained on current data (see README's Known Open Items).
+
+## Round 5 — mid-term-model calibration correction
+
+**Premise correction, first.** This task assumed "the mid-term model was found earlier to understate pass probability by 15-30pp" — that assumption traces to the Round 1/Step 6 calibration table above, which this pass confirmed is actually the **complete-record model's** calibration, mislabeled and cross-referenced elsewhere in this document as the mid-term model's. **The mid-term model's own calibration had never been measured before this round.** Checked directly rather than assumed.
+
+**Step 1 — measured the mid-term model's real calibration.** Fit the deployed-equivalent ensemble the same way `train_simulated_progress.py` always has (train+val, `<25.3`), scored the untouched TEST period (`25.3`, 33,990 simulated rows):
+
+| Predicted P(Pass) | N | Actual pass rate |
+|---|---|---|
+| 0–10% | 1,523 | 12.9% |
+| 10–20% | 664 | 44.1% |
+| 20–30% | 694 | 54.9% |
+| 30–40% | 769 | 69.1% |
+| 40–50% | 993 | 73.1% |
+| 50–60% | 1,747 | 86.2% |
+| 60–70% | 2,621 | 89.5% |
+| 70–80% | 4,381 | 93.7% |
+| 80–90% | 8,497 | 96.7% |
+| 90–100% | 12,101 | 98.9% |
+
+**Mean absolute calibration error (N-weighted): 13.33pp.** The premise turns out to be directionally correct by coincidence, not because it was ever actually checked — the mid-term model is even more miscalibrated than the complete-record model it got confused with (ROC-AUC 0.893 here vs. 0.966 for the complete-record model — a genuinely different, less confident model, consistent with predicting off partial records).
+
+**Step 2 — fit and applied a Platt-scaling calibrator.** Fit on the TRAIN-ONLY model's out-of-sample validation predictions (never on the data being evaluated, and never on TEST) — `LogisticRegression` on `(raw P(fail), true label)` pairs. Applied to the deployed model's TEST predictions:
+
+| Predicted P(Pass), calibrated | N | Actual pass rate |
+|---|---|---|
+| 10–20% | 1,125 | 4.8% |
+| 20–30% | 616 | 37.5% |
+| 30–40% | 467 | 46.0% |
+| 40–50% | 443 | 52.6% |
+| 50–60% | 412 | 59.2% |
+| 60–70% | 531 | 71.6% |
+| 70–80% | 770 | 72.9% |
+| 80–90% | 1,995 | 84.7% |
+| 90–100% | 27,631 | 96.5% |
+
+**Mean absolute calibration error drops from 13.33pp to 2.23pp.** ROC-AUC is unchanged (0.8933 before and after, as expected — Platt scaling is a strictly-monotonic transform, so it can't change ranking, only what number is displayed for a given rank).
+
+**Step 3 — implemented as an additive field, deliberately not a silent replacement.** Because Platt scaling is strictly monotonic, thresholding the *calibrated* probability at `calibrator(raw_threshold)` flags exactly the same students as thresholding the *raw* probability at `raw_threshold` — so the Fail/Pass label, recall, and precision are mathematically unchanged by calibration; only the displayed number can change. `train_simulated_progress.py` now fits and saves this calibrator into `best_model_simulated_progress.pkl` (`calibrator`, `calibrated_decision_threshold`, `calibration_mace_before_pp`/`_after_pp` — Step B2/E in that script). `predictor.py`'s `predict_partial()` exposes it as a new **`probability_calibrated`** field alongside the existing `probability` — verified directly: an ICT101 mid-term case (ME 45/50) returns `probability=63.9`, `probability_calibrated=92.1` — the raw number was understating this student's real pass likelihood by nearly 30 percentage points.
+
+**Why `probability`/`prediction`/`risk_band` were deliberately left untouched.** `_compute_risk_band`'s Safe floor is derived from whichever threshold produced the label (`max(65, 100×(1−threshold))`), by design (Round 3) — displaying a calibrated probability while still deriving the floor from the *raw* threshold would reopen the exact Fail/Safe contradiction Round 3 fixed. The consistent alternative — deriving the floor from the *calibrated* threshold too — was computed and checked: the mid-term model's decision threshold (currently 0.30, honestly re-validated on this session's refreshed data — it was 0.25 historically) corresponds to a calibrated fail-probability of just 0.054. Plugged into the same floor formula, that pushes the mid-term Safe floor from 70% to **95%**, not down toward the complete-record model's 65%. This is a real, re-tested finding (not the mid-term model being buggy — it's an honest consequence of validating that threshold for 80–85% recall: catching most true fails requires flagging students who are, on a calibrated basis, actually just an ~5% fail risk). Silently shipping a 95% Safe floor — where a mid-term prediction is "At Risk" unless the model is calibrated-confident to 95%+ — is a real product-behavior change for lecturers, not a small tweak, so it wasn't made unilaterally here.
+
+**Re-tested (not assumed): does calibration let the dual risk-scale UI collapse to one shared scale? No — it makes the two floors diverge further, not converge.**
+
+| | Safe floor before calibration | Safe floor if fully switched to calibrated probability |
+|---|---|---|
+| Complete-record model (`predict()`) | 65% (unchanged — out of this round's scope) | — |
+| Mid-term model (`predict_partial()`) | 70% (raw threshold 0.30) | **95%** (calibrated threshold 0.054) |
+
+The gap between the two models' Safe floors was 5pp before this round (65 vs. 70) and would become 30pp (65 vs. 95) if the mid-term model's risk band were switched onto the calibrated scale — the opposite of unification. Unifying the two scales for real would require calibrating *both* models consistently and likely redesigning `_compute_risk_band`'s floor formula itself (it wasn't built with calibrated probabilities in mind) — a bigger, more precisely-scoped follow-up than this round, flagged in README's Known Open Items rather than attempted here.
+
+**Also discovered as a side effect, fixed rather than left stale:** the frontend (`PredictorView.jsx`) hardcoded the mid-term Safe floor as `"75%"` in its legend text and band ranges — stale even before this round's threshold change (the actual value was already 70% once the threshold moved from 0.25 to 0.30 during this round's retrain on refreshed data, echoing Round 4's data-refresh finding). Fixed by exposing the real value from the backend (`predictor.py`'s new `_safe_floor()` helper → `safe_floor_percent` field on both `predict()` and `predict_partial()` responses) and reading it dynamically in the frontend instead of a hardcoded number, so this can't silently go stale again on the next retrain. Verified: `PredictorView.test.jsx`'s 3 existing tests still pass; full backend suite still 21/21 passing.
+
+## Round 6 — the 5.13pp recall drop, investigated
+
+Round 4's hyperparameter check found the live model's headline recall (0.8374) sits 5.13pp above a same-hyperparameter control retrained on refreshed data (0.7860), and flagged it for later review rather than explaining it. Investigated for real here.
+
+**Step 1 — confirm no period-label confound.** Both the live model (`20260715_132655`) and the control candidate (`20260807_135223`) report `validated_on: 25.3` — same nominal period, not a validation/test split mismatch. But their test-set `support` (fail count) differs: 953 (live) vs. 972 (control) — a direct signal that "period 25.3" doesn't mean the same underlying rows in both runs. Confirmed by directly rebuilding period `25.3`'s test set from the OLD archived file (`data/archive/Capstone_data_20260324.csv`) and the NEW refreshed file (`ingested_capstone.csv`) side by side:
+
+| | N | Fails | Fail rate |
+|---|---|---|---|
+| OLD data, period 25.3 | 8,934 | 1,183 | 13.24% |
+| NEW data, period 25.3 | 8,928 | 972 | 10.89% |
+
+**Step 2 — is this new students (calendar growth) or relabeled old ones?** Enrolment-key overlap (`STUDENTID_MASKED`+`SUBJECTCODE`): 8,928 of 8,934 old enrolments are also in the new set (only 6 old-only, 0 new-only). This is essentially the **same roster** — not new students joining as time passed. For the 8,928 common enrolments, the PASS label was compared directly: **205 flipped Fail→Pass, 0 flipped Pass→Fail.** Zero flips in the "wrong" direction rules out random noise or a symmetric relabeling artifact — this is a one-directional correction. Old fails within the common set: 1,177. New: 972. `1,177 − 205 = 972` — exact.
+
+**Step 3 — feature distributions barely moved; this is a label-derivation change, not a feature/input change.** Mean `ASSESS1_MARK`/`ASSESS2_MARK`/`PARTIAL_WEIGHTED_SCORE` for the common enrolments shifted by well under 1 point old→new. The features students are scored on didn't change — what changed is how `build_target()`'s full-assessment PASS computation resolves for a subset of enrolments. Initially only correlated with the resit-collapsing row-count difference (200 old vs. 214 new rows collapsed dataset-wide); **confirmed as the actual mechanism, not left as a correlation** — see Step 3b.
+
+**Step 3b — resit-collapsing confirmed as the mechanism, with a real overlap number, not an assumption.** Built the exact list of all 205 flipped `(student, subject)` enrolments, then independently built the exact list of enrolments whose winning-`ATTEMPTNUMBER`-per-assessment-type (the quantity `collapse_attempts_to_latest_per_type()` selects on) differs between the old and new raw data for period `25.3`. **Overlap: 205 of 205 (100%).** Every single flipped enrolment has a winning-attempt change; zero have unchanged winning attempts with some other explanation (checked directly: 0 enrolments had a same-attempt value change, 0 had an assessment-type-set change). Spot-checked three at random against the raw rows directly — the pattern is consistent and clear: the OLD extract only contains attempt 1 for these students (a failing attempt — e.g. `Student5095/MBA910`'s attempt 1 has a 0% mark on a 30%-weighted item), while the NEW extract additionally contains a later attempt (2, sometimes 3) for the *same* assessment types with materially better marks, which `collapse_attempts_to_latest_per_type()` correctly selects as the winner in the new data but couldn't in the old data because that attempt simply wasn't present in that extract. **The collapsing logic itself did not change and is not buggy in either version — it is working correctly on both inputs.** The mechanism is that the refreshed source data now contains resit/later-attempt records for these 205 students that the earlier extract didn't have, and the label correction is a direct, correct consequence of that richer attempt history becoming available.
+
+**Step 4 — explanation (a) vs (b), tested directly, not asserted.** Loaded the actual frozen `20260715_132655` model object (no retraining) and scored it against both test sets. There is no "retrained control evaluated on OLD data" row in the table below because the control candidate (`20260807_135223`) was only ever trained on the new data — the old data is superseded and scoring a new-data-trained model against old, now-known-to-be-wrong ground truth would not be a meaningful comparison (it would misleadingly penalize the model for correctly disagreeing with labels since shown to be incorrect):
+
+| | Precision | Recall | PR-AUC |
+|---|---|---|---|
+| Frozen live model on OLD 25.3 test (sanity check vs. registry's 0.7695/0.8374) | 0.7824 | 0.8419 | 0.9052 |
+| Frozen live model on NEW 25.3 test | 0.7326 | 0.8230 | 0.8770 |
+| Control candidate, retrained on NEW data, on NEW 25.3 test (registry) | 0.7992 | 0.7860 | — |
+
+**Conclusion — a quantified mix, not ambiguous.** The full 5.13pp gap decomposes into two real, measured components:
+- **~1.9pp (37%): pure ground-truth change.** Holding the model completely frozen, recall drops from 0.8419 to 0.8230 purely because the test set's labels were corrected. This alone rules out "the world drifted and the model is stale" (explanation a) as the primary story — nothing about calendar time or new students is involved, since the roster is 99.9% identical.
+- **~3.7pp (63%, the majority): a retraining effect.** Going from the frozen model (0.8230 on new test) to a model actually retrained on the new training data (0.7860 on the same new test set) accounts for the larger share. The new training data has the same one-directional Fail→Pass correction applied broadly (dataset-wide fail rate 12.02%→11.42%), so a model trained on it learns a genuinely different, less aggressive decision boundary for borderline early-mark cases — a real consequence of training on corrected labels, not a bug.
+
+**This is explanation (b), new-data correction — confirmed with a 100% overlap, not a correlation — and not (a), staleness in the "world changed" sense.** The one-directional 205-flip pattern (Fail→Pass, never the reverse), now traced to a confirmed, single mechanism (richer resit/attempt history in the new extract, correctly processed by unchanged, non-buggy resit-collapsing logic), is the signature of a genuine correction, not noise or a new bug introduced by the refresh.
+
+**Stated plainly, not softened: as of 2026-08-08, `0.8374` should not be cited as this model's current fail-class recall without this caveat attached.** It was partly earned against ground-truth labels for 205 real students that have since been directly shown wrong — not a hypothetical concern, a confirmed, 100%-traced one. **`0.7860` (the same architecture and hyperparameters, evaluated against the corrected labels) is the more trustworthy figure as of this date.** This is the same standard of directness this card already applies elsewhere (e.g. the SMOTE/ensemble findings above) — a number measured against since-corrected ground truth doesn't get to keep standing as "current performance" just because retraining hasn't happened yet.
+
+**Recommendation.** This is not normal period-to-period variance (a 100%-one-directional flip pattern isn't sampling noise) and it is not a new pipeline bug needing a fix before the next training run (the resit-collapsing logic is confirmed correct on both inputs — it's the *old* model/label pair that's out of date, not the new pipeline that's broken). The live model's headline recall number is **no longer an accurate representation of current performance** and should be re-validated. **Per the project's standing rule, nothing is promoted here — this is diagnosis only.** A real candidate reflecting the corrected data already exists in the registry (`20260807_135223`, not live); whether to promote it is a deliberate decision for whoever reviews this next, now backed by a fully-traced, quantified reason rather than an unexplained number.
+
+## Round 7 — attendance as a model feature + the recall regression, combined
+
+**Goal:** add `ATTENDANCE_RATE` (confirmed 0.32–0.62 correlation with outcomes, never previously used as a feature) to both models, and re-tune class-imbalance handling for the new label distribution, in one combined retrain — so both effects could be measured together against the Round 6 baseline (`0.7860` recall, corrected labels, no attendance). Registration only; nothing promoted for the complete-record model, per the standing rule (the mid-term model's status is different — see Step 7).
+
+### Step 1 — the class-imbalance hypothesis, checked before acting on it
+
+Training-set (not test-set) fail-class proportion: **12.42% (old data) → 12.24% (new data), a −0.18pp shift.** This is far smaller than the 2.35pp shift found in the *test* period specifically (Round 6) — the 205 label corrections are concentrated in the most-recently-added period, not spread proportionally across the training range. **Conclusion: re-tuning is not justified by this evidence, and was not performed.** Additionally, the current implementation is already self-adjusting and has no fixed ratio to "update": `SMOTE(random_state=42)` uses the default `sampling_strategy="auto"` (full 1:1 balance regardless of input ratio), and `RandomForestClassifier(class_weight="balanced")` recomputes weights from whatever `y` it's actually fit on, every time. Neither has a value baked in from "the old class balance."
+
+### Step 2 — ATTENDANCE_RATE added, with real correlation and match-rate checks first
+
+- **Feature selection**: `ATTENDANCE_RATE`, `UNEXPLAINED_ABSENCE_RATE`, and `ABSENCE_RATE` are constrained to sum to exactly 1.0 (`build_attendance_features.py`'s own assert) — any two fully determine the third. Real correlation matrix: ATTENDANCE_RATE vs UNEXPLAINED_ABSENCE_RATE = **−0.744**, vs ABSENCE_RATE = **−0.386**. Given the exact linear dependency, only `ATTENDANCE_RATE` was added — including two or three would be pure redundancy, not new signal.
+- **Match rate**: 100% (74,831/74,831 enrolments) for the complete-record model — no imputation needed, confirmed directly rather than assumed.
+- **Mid-term leakage boundary, explicit**: a student's full/final attendance rate is never used as an input to the mid-term model — the same leakage class as the earlier 100%-accuracy mid-term incident. `build_simulated_progress_features()` now truncates each enrolment's attendance sessions (sorted by `class_no, actv_no, cls_session_no` — the only ordering proxy available; this dataset has no real date field, the same limitation the DARBY building investigation ran into) to the *same achieved-coverage fraction* as that synthetic snapshot's marks. Only 46 of 287,174 synthetic snapshots (0.02%) truncated to zero available sessions; those were imputed with the population mean ATTENDANCE_RATE, reported, not silently dropped or zeroed.
+- **Serving-side wiring**: `predictor.py`'s `predict()`/`predict_partial()` now build their feature vector from `_PACKAGE["features"]`/`_SIM_PACKAGE["features"]` (stored at training time) rather than a hardcoded column order — this is what let the still-live 10-feature complete-record model keep working unchanged throughout this entire round, while the (now-live, see Step 7) 11-feature mid-term model works correctly too, with no code branch needed per model version.
+
+### Step 3 — imbalance handling: not re-tuned, per Step 1's own evidence
+
+No SMOTE/class-weight change was made. This is the honest consequence of Step 1, not a skipped step.
+
+### Step 4 — retrain and fair comparison
+
+Registered `20260808_110630` (attendance + Step 1's data, default hyperparameters, no imbalance retune) and compared against the Round 6 baseline and the frozen live model, all on the **identical** new-data period-25.3 test set (row-level identity confirmed: same `prepare_data()` call against the same `ingested_capstone.csv`, 8,928 rows in every case):
+
+| Model | Precision | Recall | PR-AUC |
+|---|---|---|---|
+| Frozen live (`20260715_132655`) on OLD test (sanity check) | 0.7824 | 0.8419 | 0.9052 |
+| Frozen live (`20260715_132655`) on NEW test | 0.7326 | 0.8230 | 0.8770 |
+| Corrected-labels-only candidate (`20260807_135223`, no attendance) | 0.7992 | 0.7860 | 0.8790 |
+| **Attendance + corrected-labels candidate (`20260808_110630`)** | **0.7931** | **0.7809** | **0.8808** |
+
+**Plain answer, not rounded up: attendance does not recover the lost recall.** Recall actually moved slightly further away from the frozen-live-on-new-data figure (0.7809 vs. the no-attendance candidate's 0.7860 — a further −0.51pp), still 4.21pp below 0.8230. Precision also ticked down slightly (−0.61pp). The one real, positive signal is PR-AUC: 0.8790 → 0.8808, a small but genuine (fixed random seeds — not run-to-run noise) ranking-quality improvement. **Interpretation: attendance carries real but weak signal (consistent with SHAP ranking it mid-pack, Step 5) that marginally improves ranking quality without improving classification at the current 0.5 threshold — it is not the fix for the Round 6 recall regression, which remains a real, open item.** `compare_and_promote.py 20260808_110630` against the original live model: precision +0.0236, recall **−0.0565**, verdict **MEANINGFULLY WORSE** — consistent with, not a new instance of, the already-documented Round 6 data-refresh effect (most of the "worse" verdict traces to the corrected labels, not to attendance).
+
+### Step 5 — SHAP verified for real, without touching the still-live model's cache
+
+Mean |SHAP value| for `ATTENDANCE_RATE`, computed against the new candidate directly (not the cached production background — see below), ranked over 50 real test rows:
+
+| Rank | Feature | Mean \|SHAP\| |
+|---|---|---|
+| 1 | PARTIAL_WEIGHTED_SCORE | 0.1009 |
+| 2 | ASSESS1_MARK | 0.0461 |
+| 3 | ASSESS2_MARK | 0.0422 |
+| 4 | TRIMESTER_NUM | 0.0212 |
+| 5 | ASSESS1_CONTRIBUTION | 0.0197 |
+| **6** | **ATTENDANCE_RATE** | **0.0144** |
+| 7 | PARTIAL_WEIGHT_COVERAGE | 0.0143 |
+| 8 | SUBJECT_DIFFICULTY | 0.0122 |
+| 9–11 | ASSESS2_CONTRIBUTION, ASSESS2_WEIGHT, ASSESS1_WEIGHT | 0.0093 / 0.0055 / 0.0051 |
+
+**A real, mid-tier factor — 6th of 11, not buried.** Reconstruction check (`base_value + sum(shap_values) ≈ model output`) holds: max deviation 6.01e-08 over 50 rows.
+
+**Deliberately NOT applied to the production `shap_background_main.pkl`.** That cache is shared globally with whatever model is currently live — at the time of this check, the complete-record live model was still the old, un-promoted 10-feature version. Overwriting the cache with an 11-column background would have broken every real, live complete-record explanation with a shape mismatch. Verified in isolation instead: a fresh 100-row background sampled in-memory from the candidate's own training data, never written to disk.
+
+### Step 6 — What-If Simulator UI
+
+Added an "Attendance rate (%)" field to the What-If form, matching the existing FE/ME/CP/GR/TX style. Left blank by default; `/api/predict` fills in that subject's real average `ATTENDANCE_RATE` (from `_ATTENDANCE`, the same `build_attendance_features()` output already loaded at startup) when omitted, and reports `attendance_rate_is_default: true` in the response — the frontend shows an explicit caption ("Attendance rate defaulted to this subject's real average (X%) — not a value you entered") whenever that happens, never silently.
+
+**Verified the prediction actually shifts, with a real example** (called the live `predict()` code path directly against the new candidate, not a mocked function): same borderline marks (FE 48/50, ME 52/30 — a case near the decision boundary, chosen deliberately since a confident case has little room to move):
+
+| Attendance | Probability | Prediction |
+|---|---|---|
+| 90% | 57.7% | **Pass** |
+| 70% | 45.1% | Fail |
+| 50% | 43.3% | Fail |
+| 40% | 42.6% | Fail |
+| 20% | 40.8% | Fail |
+
+A 16.9-percentage-point swing that flips the actual Pass/Fail label — real, meaningful influence, not a token wiring exercise.
+
+### Step 7 — tests, registration, and an honest note on what actually went live
+
+- **Backend: 21/21 passing** — but not on the first run. Retraining the mid-term/simulated-progress model (see below) broke `test_predict_shap_explanation_matches_live_model` (SHAP reconstruction check failing, `sum_check_ok: False`) because `shap_background_simulated.pkl` still had 10 columns against an now-11-feature live model. Caught, diagnosed, and fixed by regenerating that one background file (and only that one — `shap_background_main.pkl` deliberately left alone, see Step 5). Re-ran after the fix: 21/21.
+- **Frontend: 3/3 passing.**
+- **Complete-record model: registered, NOT live.** `20260808_110630` is a real, registered candidate; `compare_and_promote.py` reports it MEANINGFULLY WORSE than the original live version (see Step 4); nothing was promoted.
+- **Mid-term/simulated-progress model: this one IS now live, not just registered — by this model family's existing, established behavior, not a new decision made here.** `best_model_simulated_progress.pkl` has no promotion gate (documented earlier this session, Rounds 4–5) — running `train_simulated_progress.py` to add attendance overwrites the file `predictor.py` loads directly, the same way the calibration and hyperparameter work in Rounds 4–5 did. Stated plainly so this isn't discovered later as a surprise: real mid-term predictions now require and use attendance data, and the model itself was refit on the current (corrected-label) data as a side effect, with a re-selected decision threshold and a freshly-fit Platt calibrator, all captured in this same retrain.

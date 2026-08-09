@@ -36,6 +36,7 @@ constants to update by hand.
 """
 
 import json
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -50,17 +51,88 @@ from xgboost import XGBClassifier
 # ── Paths ─────────────────────────────────────────────────────────────────────
 
 SCRIPT_DIR       = Path(__file__).resolve().parent
-DATA_PATH        = SCRIPT_DIR.parent.parent.parent / "data" / "Capstone_data_20260324.csv"
+_ARCHIVED_DATA_PATH  = SCRIPT_DIR.parent.parent.parent / "data" / "Capstone_data_20260729.csv"
+# main.py's POST /api/ingest/capstone/confirm writes newly-ingested capstone
+# data here (not to _ARCHIVED_DATA_PATH — data/ is mounted read-only in the
+# container, ./data:/data:ro in docker-compose.yml, so that path can never
+# be written to from inside a container). Without this override,
+# check_new_period.py / scheduled_retrain.py (both read DATA_PATH from
+# disk, run as a genuinely separate process — see
+# backend/scripts/retrain_loop.sh's `python -m app.ml.scheduled_retrain`,
+# a fresh invocation every 24h cycle, not a long-lived import) would never
+# see anything ingested through the UI, only the archived file's original
+# contents — the two retrain paths (ingestion-triggered vs. scheduled)
+# would silently disagree about what "the current data" even is.
+#
+# Resolved once, here, at import time — correct for any fresh process
+# (the scheduler's every-24h invocation, or a one-off `python -m
+# app.ml.check_new_period`) as long as ingestion has already run at least
+# once and left this file behind. A long-lived process that imported this
+# module BEFORE a later ingestion (the main API server, which imports this
+# once at startup and keeps running) won't see a same-request update this
+# way — that path is separately, correctly handled by
+# ingest_capstone_confirm() temporarily monkey-patching this exact
+# DATA_PATH attribute for the duration of its own retrain check.
+#
+# Prod fix: in docker-compose.prod.yml, the backend and scheduler containers
+# do NOT otherwise share a filesystem (prod images bake the source in rather
+# than bind-mounting it), so a file written inside the backend container at
+# a path under SCRIPT_DIR would be invisible to the prod scheduler container.
+# Fixed by making the ingested-override directory itself configurable via
+# INGESTED_DATA_DIR — defaults to SCRIPT_DIR (this file's own directory),
+# which preserves dev's existing behavior unchanged (dev bind-mounts
+# ./backend:/app into both services, so SCRIPT_DIR was already shared there).
+# In prod, INGESTED_DATA_DIR is set to a path backed by a named Docker volume
+# mounted into BOTH the backend and scheduler services — see
+# docker-compose.prod.yml's `ingested_data_prod` volume — so the same
+# directory is now genuinely shared in prod too, not just in dev.
+#
+# A Postgres-backed version of this (storing the ingested CSV as a row,
+# alongside predictions/audit_logs/users which already live there) was
+# considered as the more architecturally consistent fix, but would require
+# every DATA_PATH consumer (train_model.py, check_new_period.py,
+# scheduled_retrain.py) to switch from
+# pd.read_csv(path) to pd.read_csv(io.BytesIO(...)) against a DB-fetched
+# blob, plus write-side changes in main.py's ingest_capstone_confirm() and
+# lock-handling changes to keep it consistent with the existing
+# PendingIngest/.ingest.lock pattern — a bigger, cross-cutting change than
+# this pass's scope. The shared-volume fix below is a real, complete,
+# smaller-blast-radius fix for the same gap; the Postgres approach remains
+# a valid future improvement, documented here precisely enough to implement
+# without re-investigation: add an `ingested_data_files` table (kind text
+# primary key, csv_bytes bytea, updated_at timestamptz — same shape as
+# PendingIngest), write to it instead of INGESTED_DATA_DIR in
+# ingest_capstone_confirm(), and change DATA_PATH resolution in this file
+# from a Path to a small loader function that fetches from Postgres if a row
+# exists, else falls back to _ARCHIVED_DATA_PATH.
+INGESTED_DATA_DIR       = Path(os.environ.get("INGESTED_DATA_DIR", str(SCRIPT_DIR)))
+_INGESTED_OVERRIDE_PATH = INGESTED_DATA_DIR / "ingested_capstone.csv"
+DATA_PATH = _INGESTED_OVERRIDE_PATH if _INGESTED_OVERRIDE_PATH.exists() else _ARCHIVED_DATA_PATH
+
 RELIABILITY_PATH = SCRIPT_DIR.parent.parent.parent / "data" / "subject_reliability.json"
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
 PILOT_PERIOD = "23.1"
 
+# Ensemble sub-model hyperparameters. Checked via a real grid search
+# (max_depth in {3,4,5,6}, learning_rate in {0.01,0.05,0.1}, n_estimators
+# in {100,200,300} for XGBoost, evaluated on the honest validation split —
+# never the test split) — see model_card.md's Hyperparameter tuning check
+# for the full comparison. Named constants (not inline literals in main())
+# specifically so a candidate run can override them without editing this
+# file — main() reads these, doesn't hardcode the numbers itself.
+XGB_PARAMS = dict(n_estimators=200, max_depth=4, learning_rate=0.05,
+                   random_state=42, eval_metric="logloss", verbosity=0)
+RF_PARAMS  = dict(n_estimators=200, max_depth=6, class_weight="balanced",
+                   random_state=42, n_jobs=-1)
+
 # Fail-class decision threshold applied to predict_proba() in predictor.py.
-# 0.55 was originally chosen by sweeping directly against the T3 2025 TEST set
-# (evaluate_thresholds.py), which is test-set leakage for a tuning decision.
-# validate_threshold.py re-selected the threshold honestly, using a model
+# 0.55 was originally chosen by sweeping directly against the T3 2025 TEST
+# set (the old approach — since removed as unused code; see
+# validate_threshold.py's docstring for the full history), which is
+# test-set leakage for a tuning decision. validate_threshold.py re-selected
+# the threshold honestly, using a model
 # trained only on <25.2 and swept against a held-out 25.2 validation split —
 # that process picked 0.50, not 0.55. 0.50 gives recall 0.837 / precision
 # 0.770 on the T3 2025 test set (vs. 0.822 / 0.805 at 0.55 — the gap is real
@@ -85,7 +157,66 @@ FEATURES     = [
     "PARTIAL_WEIGHT_COVERAGE",
     "SUBJECT_DIFFICULTY",
     "TRIMESTER_NUM",
+    "ATTENDANCE_RATE",
 ]
+
+# ── Attendance feature ─────────────────────────────────────────────────────
+# Only ATTENDANCE_RATE (H / total sessions) is used as a model feature, not
+# UNEXPLAINED_ABSENCE_RATE or ABSENCE_RATE. Checked, not assumed: the three
+# rates are constrained to sum to exactly 1.0 (build_attendance_features.py's
+# own assert), so any two fully determine the third — including all three
+# would feed the model two features that are an exact linear function of a
+# third, pure redundancy with no new information, not just "somewhat
+# correlated." Real correlation matrix (this session, on the current
+# ingested data): ATTENDANCE_RATE vs UNEXPLAINED_ABSENCE_RATE = -0.744,
+# vs ABSENCE_RATE = -0.386 — ATTENDANCE_RATE alone captures the "presence"
+# signal without the redundancy.
+ATTENDANCE_PATH = SCRIPT_DIR.parent.parent.parent / "data" / "masked_attendance.csv"
+_ATTENDANCE_VALID_PERIOD_CODES = {"T1", "T2", "T3"}
+_ATTENDANCE_PERIOD_CODE_TO_NUM = {"T1": "1", "T2": "2", "T3": "3"}
+_attendance_raw_cache: dict = {}
+
+
+def load_attendance_raw(capstone_raw: pd.DataFrame) -> pd.DataFrame:
+    """
+    Load and filter masked_attendance.csv to raw, per-session rows (NOT
+    aggregated to a rate yet) — same filtering as
+    build_attendance_features.py (T1/T2/T3 period codes, subjects/years
+    present in the current capstone data), but returning individual
+    sessions with class_no/actv_no/cls_session_no so callers can truncate
+    to a coverage point before aggregating (needed for the mid-term model —
+    see build_simulated_progress_features()). Cached per capstone_raw id()
+    so repeated calls within one training run don't re-read/re-filter a
+    2.5M-row CSV each time.
+    """
+    cache_key = id(capstone_raw)
+    if cache_key in _attendance_raw_cache:
+        return _attendance_raw_cache[cache_key]
+
+    att = pd.read_csv(ATTENDANCE_PATH)
+    capstone_subjects = set(capstone_raw["SUBJECTCODE"].unique())
+    capstone_years = set(capstone_raw["YEAR"].astype(str).unique())
+    att["year"] = att["year"].astype(str)
+    mask = (
+        att["study_period_code"].isin(_ATTENDANCE_VALID_PERIOD_CODES)
+        & att["course"].isin(capstone_subjects)
+        & att["year"].isin(capstone_years)
+    )
+    att = att[mask].copy()
+    att["STUDYPERIOD"] = att["year"].str[-2:] + "." + att["study_period_code"].map(_ATTENDANCE_PERIOD_CODE_TO_NUM)
+    att = att.rename(columns={"course": "SUBJECTCODE"})
+    att = att[["STUDENTID_MASKED", "SUBJECTCODE", "STUDYPERIOD", "class_no", "actv_no", "cls_session_no", "attendance_code"]]
+
+    _attendance_raw_cache.clear()  # only ever need one capstone_raw's worth cached at a time
+    _attendance_raw_cache[cache_key] = att
+    return att
+
+
+def _attendance_rate_from_rows(rows: pd.DataFrame):
+    """ATTENDANCE_RATE (H / total) for a subset of attendance rows, or None if empty."""
+    if len(rows) == 0:
+        return None
+    return float((rows["attendance_code"] == "H").sum()) / len(rows)
 
 # ── Step 1 — Feature Engineering ──────────────────────────────────────────────
 
@@ -165,7 +296,30 @@ def build_early_features(df: pd.DataFrame) -> pd.DataFrame:
             "PARTIAL_WEIGHT_COVERAGE": (a1_weight + a2_weight) / 100,
             "TRIMESTER_NUM":           float(period),
         })
-    return pd.DataFrame(rows)
+    feat = pd.DataFrame(rows)
+
+    # Complete-record model — this is a closed, 100%-recorded snapshot (same
+    # premise as the docstring above), so the FULL attendance rate for the
+    # enrolment is safe to use here; no partial-coverage truncation needed
+    # (contrast with build_simulated_progress_features() below, which must
+    # truncate attendance the same way it truncates marks).
+    attendance_raw = load_attendance_raw(df)
+    att_rate = (
+        attendance_raw.groupby(["STUDENTID_MASKED", "SUBJECTCODE", "STUDYPERIOD"])["attendance_code"]
+        .apply(lambda s: (s == "H").mean())
+        .rename("ATTENDANCE_RATE")
+        .reset_index()
+    )
+    feat = feat.merge(att_rate, on=["STUDENTID_MASKED", "SUBJECTCODE", "STUDYPERIOD"], how="left")
+    unmatched = feat["ATTENDANCE_RATE"].isna().sum()
+    if unmatched:
+        fallback = feat["ATTENDANCE_RATE"].mean()
+        print(f"  WARNING: {unmatched} of {len(feat):,} enrolments have no matching attendance "
+              f"data — imputed with the population mean ATTENDANCE_RATE ({fallback:.4f}), not dropped.")
+        feat["ATTENDANCE_RATE"] = feat["ATTENDANCE_RATE"].fillna(fallback)
+    else:
+        print(f"  Attendance match: 100% ({len(feat):,}/{len(feat):,} enrolments) — no imputation needed.")
+    return feat
 
 
 def build_simulated_progress_features(raw: pd.DataFrame, seed: int = 42) -> pd.DataFrame:
@@ -195,12 +349,35 @@ def build_simulated_progress_features(raw: pd.DataFrame, seed: int = 42) -> pd.D
     """
     rng = np.random.default_rng(seed)
     bins = [(15.0, 30.0), (30.0, 50.0), (50.0, 70.0), (70.0, 90.0)]
+
+    # Pre-group attendance once for O(1) lookup inside the loop below — a
+    # 2.5M-row CSV would be far too slow to re-filter per (enrolment, bin).
+    # Sorted by (class_no, actv_no, cls_session_no) as a proxy for
+    # chronological order within the term — there is no real date field in
+    # this dataset (the same limitation the DARBY building investigation in
+    # README's Known Open Items ran into). LEAKAGE BOUNDARY: only a PREFIX
+    # of each enrolment's session list (matching marks' achieved_coverage
+    # fraction below) is ever used here — the enrolment's full/final
+    # attendance rate is never touched inside this function, exactly the
+    # same category of bug as the mid-term leakage incident this project
+    # already caught once (using a complete-record quantity to train a
+    # partial-record model).
+    attendance_raw = load_attendance_raw(raw).sort_values(["class_no", "actv_no", "cls_session_no"])
+    attendance_groups = {
+        key: grp["attendance_code"].values
+        for key, grp in attendance_raw.groupby(["STUDENTID_MASKED", "SUBJECTCODE", "STUDYPERIOD"])
+    }
+    population_attendance_rate = float((attendance_raw["attendance_code"] == "H").mean())
+    attendance_empty_truncations = 0
+    attendance_total_snapshots = 0
+
     rows = []
     for (student, subject, period, country), grp in raw.groupby(
         ["STUDENTID_MASKED", "SUBJECTCODE", "STUDYPERIOD", "COUNTRY_MASKED"]
     ):
         grp_seq = grp.sort_values("STUDYPACKAGEASSESSMENTID").reset_index(drop=True)
         cum_seq = grp_seq["WEIGHTING"].cumsum()
+        att_codes = attendance_groups.get((student, subject, period))
 
         for lo, hi in bins:
             cutoff = float(rng.uniform(lo, hi))
@@ -222,6 +399,22 @@ def build_simulated_progress_features(raw: pd.DataFrame, seed: int = 42) -> pd.D
 
             partial_weighted_score  = float((included["MARKPERCENT"] * included["WEIGHTING"] / 100).sum())
             achieved_coverage       = float(included["WEIGHTING"].sum())  # percent, before /100
+            coverage_fraction       = achieved_coverage / 100
+
+            # Attendance truncated to the SAME achieved-coverage fraction as
+            # marks for this specific synthetic snapshot — a session-count
+            # prefix, not the enrolment's full attendance history.
+            attendance_total_snapshots += 1
+            if att_codes is not None and len(att_codes) > 0:
+                n_included = round(coverage_fraction * len(att_codes))
+                truncated_codes = att_codes[:n_included]
+            else:
+                truncated_codes = np.array([])
+            if len(truncated_codes) > 0:
+                attendance_rate = float((truncated_codes == "H").mean())
+            else:
+                attendance_empty_truncations += 1
+                attendance_rate = population_attendance_rate
 
             rows.append({
                 "STUDENTID_MASKED":        student,
@@ -237,9 +430,16 @@ def build_simulated_progress_features(raw: pd.DataFrame, seed: int = 42) -> pd.D
                 "PARTIAL_WEIGHTED_SCORE":  partial_weighted_score,
                 "PARTIAL_WEIGHT_COVERAGE": achieved_coverage / 100,
                 "TRIMESTER_NUM":           float(period),
+                "ATTENDANCE_RATE":         attendance_rate,
                 "SIM_CUTOFF_BIN":          f"{int(lo)}-{int(hi)}%",
                 "SIM_ACHIEVED_COVERAGE":   achieved_coverage,
             })
+
+    if attendance_total_snapshots:
+        print(f"  Attendance: {attendance_empty_truncations:,} of {attendance_total_snapshots:,} synthetic "
+              f"snapshots ({attendance_empty_truncations / attendance_total_snapshots * 100:.1f}%) had zero "
+              f"attendance sessions within their truncated coverage window — imputed with the population "
+              f"mean ATTENDANCE_RATE ({population_attendance_rate:.4f}), not dropped or silently zeroed.")
     return pd.DataFrame(rows)
 
 
@@ -253,10 +453,44 @@ def compute_subject_difficulty(raw_train: pd.DataFrame) -> dict:
 
 # ── Data preparation (shared by main() and standalone evaluation scripts) ──────
 
+def collapse_attempts_to_latest_per_type(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Collapse each enrolment (student+subject+period) down to one representative
+    row per ASSESSMENTTYPECODE, combining across ATTEMPTNUMBER at the
+    assessment-type level rather than the whole-enrolment level.
+
+    A naive "keep only the latest ATTEMPTNUMBER's rows" rule is correct when a
+    resit fully replaces every assessment type from the prior attempt, but
+    silently drops components when a resit only adds/replaces SOME types (e.g.
+    a supplementary exam on top of an otherwise-unchanged attempt 1) — the
+    resat type resolves to attempt 2 while every other type is lost entirely,
+    even though attempt 1's marks for those types are still the true, final
+    record. Confirmed via direct trace against the 20260729 data: of 1,335
+    enrolments with >1 ATTEMPTNUMBER, 11 are this "partial resit" shape
+    (concentrated in MBA903, 7 of 11) — a naive latest-attempt-only collapse
+    would wrongly zero out their untouched components.
+
+    The fix: for each (student, subject, period, type) combination independently,
+    take the row(s) from whichever ATTEMPTNUMBER is the highest FOR THAT TYPE.
+    This reduces to the old "latest attempt only" behaviour automatically when
+    every type moves together (full-replacement resits), and correctly falls
+    back to attempt 1 for any type the resit didn't touch. A type that
+    genuinely repeats within one attempt (e.g. TSL718 records "DA" twice per
+    attempt, at 30% and 70% weighting, for two distinct components sharing one
+    type code) is preserved as-is, since both rows share the same winning
+    ATTEMPTNUMBER and neither is dropped.
+    """
+    winning_attempt = df.groupby(
+        ["STUDENTID_MASKED", "SUBJECTCODE", "STUDYPERIOD", "ASSESSMENTTYPECODE"]
+    )["ATTEMPTNUMBER"].transform("max")
+    return df[df["ATTEMPTNUMBER"] == winning_attempt].reset_index(drop=True)
+
+
 def load_and_filter_raw():
     """
     Load the raw CSV and apply every filter that doesn't depend on where the
-    train/validation/test boundary falls: SAFE_SUBJECTS (fully_clean +
+    train/validation/test boundary falls: the attempt-collapsing fix (see
+    collapse_attempts_to_latest_per_type), SAFE_SUBJECTS (fully_clean +
     mostly_clean, minus TSL713), the enrolment-level dirty-weighting filter,
     and the 23.1 pilot period exclusion.
 
@@ -279,6 +513,11 @@ def load_and_filter_raw():
     raw["MARKPERCENT"] = pd.to_numeric(raw["MARKPERCENT"], errors="coerce")
     raw = raw.dropna(subset=["MARKPERCENT"])
     print(f"Raw rows: {len(raw):,}")
+
+    # ── Collapse multi-attempt enrolments (assessment-type level) ────────────
+    before_collapse = len(raw)
+    raw = collapse_attempts_to_latest_per_type(raw)
+    print(f"  Rows dropped by attempt-collapsing (superseded resit rows): {before_collapse - len(raw):,}")
 
     # ── Safe subject filter ──────────────────────────────────────────────────
     print("\n── Filtering to reliable subjects ──────────────────────────────────")
@@ -303,8 +542,15 @@ def load_and_filter_raw():
     # Drop those specific enrolments rather than the whole subject. This is a
     # no-op for fully_clean subjects, since 100% of their enrolments already
     # pass this check.
+    #
+    # No ATTEMPTNUMBER filter here — raw is already collapsed to one row per
+    # (enrolment, type) above, so summing WEIGHTING across every remaining row
+    # for an enrolment already reflects its true, resit-combined total. Using
+    # ATTEMPTNUMBER==1 only (the old approach) undercounted resit-only
+    # enrolments with no attempt-1 row at all, and ignored resit contributions
+    # for every other enrolment.
     enrolment_weight = (
-        raw[raw["ATTEMPTNUMBER"] == 1]
+        raw
         .groupby(["SUBJECTCODE", "STUDYPERIOD", "STUDENTID_MASKED"])["WEIGHTING"]
         .sum()
     )
@@ -362,8 +608,8 @@ def _build_features_and_target(raw: pd.DataFrame, difficulty_period_mask, featur
     is True, so it never sees validation or test period data.
 
     feature_builder defaults to build_early_features (top-2-by-weight, one row
-    per enrolment) for backward compatibility with main()/evaluate_thresholds.py/
-    validate_threshold.py. Pass build_simulated_progress_features to use the
+    per enrolment) for backward compatibility with main()/validate_threshold.py.
+    Pass build_simulated_progress_features to use the
     multi-snapshot truncated-progress approach instead (see
     train_simulated_progress.py).
     """
@@ -387,7 +633,7 @@ def _build_features_and_target(raw: pd.DataFrame, difficulty_period_mask, featur
 
 def prepare_data(feature_builder=build_early_features):
     """
-    Two-way split used by main() and evaluate_thresholds.py:
+    Two-way split used by main():
     Test  = the latest STUDYPERIOD present in the data (resolve_periods())
     Train = everything before it (excluding the 23.1 pilot period)
 
@@ -485,14 +731,8 @@ def main() -> None:
 
     # ── Step 4 — Ensemble ─────────────────────────────────────────────────────
     print("\n── Step 4: Training Ensemble ───────────────────────────────────────")
-    xgb = XGBClassifier(
-        n_estimators=200, max_depth=4, learning_rate=0.05,
-        random_state=42, eval_metric="logloss", verbosity=0,
-    )
-    rf = RandomForestClassifier(
-        n_estimators=200, max_depth=6, class_weight="balanced",
-        random_state=42, n_jobs=-1,
-    )
+    xgb = XGBClassifier(**XGB_PARAMS)
+    rf = RandomForestClassifier(**RF_PARAMS)
     ensemble = VotingClassifier(
         estimators=[("xgb", xgb), ("rf", rf)],
         voting="soft",
