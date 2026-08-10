@@ -51,8 +51,8 @@ _live_sim_entry = get_live_sim_entry(load_sim_registry())
 SIM_MODEL_VERSION: Optional[str] = _live_sim_entry["version"] if _live_sim_entry else None
 
 # ── Coverage-based routing ───────────────────────────────────────────────────
-# >= COMPLETE_COVERAGE_THRESHOLD : best_model.pkl (today's behaviour, unchanged)
-# MIN_COVERAGE_FOR_PREDICTION .. COMPLETE_COVERAGE_THRESHOLD : best_model_simulated_progress.pkl
+# >= COMPLETE_COVERAGE_THRESHOLD : live complete-record model (model_registry)
+# MIN_COVERAGE_FOR_PREDICTION .. COMPLETE_COVERAGE_THRESHOLD : live mid-term model (sim_model_registry)
 # < MIN_COVERAGE_FOR_PREDICTION : no prediction — "insufficient data yet"
 #
 # COMPLETE_COVERAGE_THRESHOLD is 99.5, not a strict ==100, purely as floating-
@@ -329,7 +329,7 @@ def predict_partial(
     """
     Mid-term estimate for a genuinely partial record (50-99% coverage) —
     routed here by classify_coverage(), never called directly for complete
-    records. Uses best_model_simulated_progress.pkl, and computes
+    records. Uses the live mid-term model version (sim_model_registry), and computes
     PARTIAL_WEIGHTED_SCORE/COVERAGE as a cumulative sum across ALL of
     assessments_used (compute_simulated_partial_score), not the top-2-only
     formula predict() uses — this model was trained on that definition

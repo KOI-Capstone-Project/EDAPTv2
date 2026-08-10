@@ -104,10 +104,14 @@ EDAPTv2/
 │   │       ├── check_bias_persistence.py        # Cross-retrain fairness-flag trend detection
 │   │       ├── verify_dynamic_period_e2e.py     # Isolated end-to-end test of dynamic period resolution
 │   │       ├── investigate_fail_rate_shift.py   # Diagnostic: period-over-period fail-rate investigation
-│   │       ├── best_model_simulated_progress.pkl  # Simulated-progress model artifact (not in the registry)
-│   │       └── models/
-│   │           ├── registry.json                # Version metadata, live pointer, promotion history
-│   │           └── model_<timestamp>.pkl         # One file per registered version
+│   │       ├── sim_model_registry.py             # Versioned registry for the mid-term model family
+│   │       ├── compare_and_promote_simulated.py  # Gated promotion / rollback CLI (mid-term)
+│   │       ├── models/                           # Complete-record model family
+│   │       │   ├── registry.json                # Version metadata, live pointer, promotion history
+│   │       │   └── model_<timestamp>.pkl         # One file per registered version
+│   │       └── models_simulated/                 # Mid-term model family (same layout)
+│   │           ├── registry.json
+│   │           └── model_<timestamp>.pkl
 │   ├── scripts/
 │   │   └── retrain_loop.sh            # Sidecar scheduler loop (scheduled_retrain.py → sleep 24h → repeat)
 │   ├── tests/
