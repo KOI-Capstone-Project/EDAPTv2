@@ -171,7 +171,9 @@ FEATURES     = [
 # ingested data): ATTENDANCE_RATE vs UNEXPLAINED_ABSENCE_RATE = -0.744,
 # vs ABSENCE_RATE = -0.386 — ATTENDANCE_RATE alone captures the "presence"
 # signal without the redundancy.
-ATTENDANCE_PATH = SCRIPT_DIR.parent.parent.parent / "data" / "masked_attendance.csv"
+# Stored gzipped (119MB -> 9MB, ~92% smaller). pd.read_csv() decompresses
+# .gz transparently, so this is a path change only — no read-side changes.
+ATTENDANCE_PATH = SCRIPT_DIR.parent.parent.parent / "data" / "masked_attendance.csv.gz"
 _ATTENDANCE_VALID_PERIOD_CODES = {"T1", "T2", "T3"}
 _ATTENDANCE_PERIOD_CODE_TO_NUM = {"T1": "1", "T2": "2", "T3": "3"}
 _attendance_raw_cache: dict = {}

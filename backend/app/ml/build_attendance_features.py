@@ -48,7 +48,8 @@ from app.ml.train_model import DATA_PATH, collapse_attempts_to_latest_per_type
 # ── Paths ─────────────────────────────────────────────────────────────────────
 
 SCRIPT_DIR       = Path(__file__).resolve().parent
-ATTENDANCE_PATH  = SCRIPT_DIR.parent.parent.parent / "data" / "masked_attendance.csv"
+# Stored gzipped (119MB -> 9MB) — pd.read_csv() handles .gz transparently.
+ATTENDANCE_PATH  = SCRIPT_DIR.parent.parent.parent / "data" / "masked_attendance.csv.gz"
 # NOT under data/ — that directory is mounted read-only in the backend
 # container (./data:/data:ro in docker-compose.yml), by design, to protect
 # the source CSVs from being overwritten by a pipeline script. This script

@@ -128,7 +128,7 @@ EDAPTv2/
 │       └── utils/auth.js
 ├── data/
 │   ├── Capstone_data_20260729.csv     # Raw source data (live — older snapshots in archive/)
-│   ├── masked_attendance.csv          # Raw attendance source data
+│   ├── masked_attendance.csv.gz       # Raw attendance source data (gzipped: 119MB → 9MB; pandas reads .gz directly)
 │   ├── subject_reliability.json       # fully_clean / mostly_clean / unreliable classification
 │   ├── subject_reliability_report.csv # Human-readable companion to subject_reliability.json
 │   └── archive/                       # Superseded raw-data snapshots, kept for before/after comparison
@@ -235,9 +235,20 @@ Use **User Management** (`/users`, super-admin only) to create additional accoun
 
 ## Loading Data
 
-The raw dataset (`data/Capstone_data_20260324.csv`) is loaded automatically into an in-memory pandas DataFrame **at backend startup** — this is the primary path, not a manual step. `POST /api/ingest` also still exists as a runtime override (upload a different CSV/XLSX without restarting the container), matching the original **Data Ingestion** page's behavior, but it's a secondary path now, not the only way data gets in.
+Two source files are loaded automatically into in-memory pandas DataFrames **at backend startup** — this is the primary path, not a manual step:
 
-### Expected Columns
+| File | Contents | Notes |
+|---|---|---|
+| `data/Capstone_data_20260729.csv` (~35MB) | Assessment marks, one row per assessment item | Earlier snapshots live in `data/archive/` |
+| `data/masked_attendance.csv.gz` (~9MB) | Class-session attendance, one row per student per session (2.5M rows) | **Stored gzipped** — 119MB uncompressed |
+
+**Why attendance is gzipped:** the raw file is 119MB, which exceeds GitHub's 100MB per-file hard limit and would make the repo unclonable without Git LFS. Gzip brings it to ~9MB (92% smaller) with no code cost — `pd.read_csv()` decompresses `.gz` transparently, so every consumer (`main.py` startup, `build_attendance_features.py`, `train_model.load_attendance_raw()`) just points at the `.gz` path. Verified identical: both files parse to the same 2,517,435 × 11 DataFrame (`.equals()` → `True`), with no meaningful read-time difference (0.9s vs 0.8s).
+
+To get a plain CSV back for inspection: `gunzip -c data/masked_attendance.csv.gz > /tmp/attendance.csv`.
+
+`POST /api/ingest` also still exists as a runtime override (upload a different CSV/XLSX without restarting the container), matching the original **Data Ingestion** page's behavior, but it's a secondary path now, not the only way data gets in. Uploads are plain CSVs — the gzip storage applies only to the checked-in copy.
+
+### Expected Columns — capstone marks
 
 | Column | Description |
 |--------|-------------|
@@ -251,6 +262,19 @@ The raw dataset (`data/Capstone_data_20260324.csv`) is loaded automatically into
 | `COUNTRY_MASKED` | Student's origin country (masked) |
 | `GENDERCODE` | Gender code |
 | `AGEGROUP` | Age group bracket |
+
+### Expected Columns — attendance
+
+| Column | Description |
+|--------|-------------|
+| `STUDENTID_MASKED` | Anonymised student identifier (joins to the capstone file) |
+| `course` | Subject code — renamed to `SUBJECTCODE` on load |
+| `year` + `study_period_code` | Combined into `STUDYPERIOD` on load (e.g. `2025` + `T3` → `25.3`) |
+| `attendance_code` | `H` = present, `N` = absent unexplained, `A` = absent authorised |
+| `class_no`, `actv_no`, `cls_session_no` | Class/activity/session identifiers — the only session-ordering signal available (there is no date field) |
+| `location_code`, `building`, `room` | Campus, building and room — used for the building/pass-rate analysis in Known Open Items |
+
+Only `ATTENDANCE_RATE` (share of `H`) is used as a model feature — see [Attendance as a model feature](#attendance-as-a-model-feature).
 
 ---
 
@@ -500,7 +524,7 @@ Stated plainly rather than rounded up or omitted:
 - **The prod scheduler sidecar was verified scoped** (image build, non-root permissions, error-resilience, and — this session — real cross-container file sharing with `backend_prod` via `docker compose -f docker-compose.prod.yml up db backend scheduler`), not against the full running prod stack (nginx/frontend-prod alongside it) — that fuller verification remains out of scope.
 - **Fixed: the two-phase ingestion flow's pending-upload handoff is now Postgres-backed (`PendingIngest`, `app/db/models.py`), not an in-memory dict.** Prod confirmed to run 4 gunicorn workers (`docker-compose.prod.yml`, `--workers 4`) — separate OS processes that don't share Python state, so the old in-memory dict would have made `analyze`/`confirm` unusable whenever a non-sticky load balancer routed them to different workers. Proven with a real cross-process test (`test_confirm_works_from_a_pending_row_it_never_wrote_itself`): a pending row is written via a completely independent DB session, never through the `analyze` endpoint, and `confirm` still succeeds — real proof it depends only on the shared DB row, not any in-process object.
 - **Fixed in both dev and prod: the scheduled retrain sidecar and ingestion-triggered retraining now agree on the current data file.** `train_model.DATA_PATH` resolves to `<INGESTED_DATA_DIR>/ingested_capstone.csv` (ingestion's writable copy) when present, falling back to the archived `data/Capstone_data_20260729.csv` otherwise — checked fresh at import time, so any independently-invoked process (a manual `check_new_period.py` run, or the scheduler's `python -m app.ml.scheduled_retrain`, a fresh process every 24h cycle) picks it up. Verified live in dev: ingested a small test file with a fake period (`99.2`), then ran `check_new_period.py` as a genuinely separate process — it reported `Latest period in raw data: 99.2`, not the archived file's `25.3`. **The prod gap is now fixed, not just documented**: `INGESTED_DATA_DIR` is a new env var (defaults to this file's own directory, preserving dev's existing bind-mount behavior unchanged) that `docker-compose.prod.yml` sets to `/shared_data` for both the `backend` and `scheduler` services, backed by a new named volume (`ingested_data_prod`) mounted into both — genuinely shared in prod now, not just baked-source-per-container. Verified against real prod images, not assumed: built `Dockerfile.prod`, brought up `db` + `backend` + `scheduler` from `docker-compose.prod.yml` (scoped — nginx/frontend-prod intentionally excluded, per this pass's own scope boundary), wrote a file from inside `backend_prod` into `/shared_data`, and read it back from inside `scheduler_prod` — succeeded, and `scheduler_prod`'s own `train_model.DATA_PATH` correctly resolved to the shared file once present. **A real permissions bug was caught and fixed in the process**: a fresh named volume is root-owned by default, which the non-root `edapt` user (`Dockerfile.prod`) couldn't write to — first attempt failed with `Permission denied`. Fixed by creating `/shared_data` with correct ownership in the image *before* `USER edapt` — Docker initializes a new named volume's ownership from whatever already exists at the mount path, so this makes it writable from first boot. Re-verified after the fix: write/read succeeded cleanly. A Postgres-backed version of this (storing the ingested CSV as a row instead of a shared-volume file, alongside `predictions`/`audit_logs`/`users`) was considered as the more architecturally consistent long-term option and is documented precisely enough to implement later without re-investigation in `train_model.py`'s `INGESTED_DATA_DIR` docstring — not done here since it touches every `DATA_PATH` consumer (`train_model.py`, `check_new_period.py`, `scheduled_retrain.py`) plus the ingest-confirm write path, a larger change than this pass's scope.
-- **`location_code`, `building`, and `room` (from `masked_attendance.csv`) show real variation in pass rate — partially, not fully, explained by which subjects are taught where.** The raw, unconditional `building` pass-rate spread is 9.7pp (78.2%–87.9%), but checked directly against the obvious confound: 128 of 129 subjects are taught in 2+ buildings, so a subject-adjusted comparison (each enrolment's PASS residual against its own subject's mean, averaged per building) is possible and was run. Result: the spread shrinks to 5.19pp (46% shrinkage) — subject explains roughly half the raw effect, but a real, subject-independent signal remains. That remainder is concentrated almost entirely in one building (`DARBY`, −4.58pp even after adjustment) — the other five buildings cluster within ~1.2pp of each other post-adjustment, so this isn't a smooth "building quality" gradient, it's specific to DARBY.
+- **`location_code`, `building`, and `room` (from `masked_attendance.csv.gz`) show real variation in pass rate — partially, not fully, explained by which subjects are taught where.** The raw, unconditional `building` pass-rate spread is 9.7pp (78.2%–87.9%), but checked directly against the obvious confound: 128 of 129 subjects are taught in 2+ buildings, so a subject-adjusted comparison (each enrolment's PASS residual against its own subject's mean, averaged per building) is possible and was run. Result: the spread shrinks to 5.19pp (46% shrinkage) — subject explains roughly half the raw effect, but a real, subject-independent signal remains. That remainder is concentrated almost entirely in one building (`DARBY`, −4.58pp even after adjustment) — the other five buildings cluster within ~1.2pp of each other post-adjustment, so this isn't a smooth "building quality" gradient, it's specific to DARBY.
 
 **DARBY was investigated directly — one candidate cause ruled out, one real-but-weak candidate found, one uncheckable, no full explanation found.** DARBY is 99.99% `location_code=NC` (essentially the sole in-person NC-campus building), so campus was the obvious next suspect — checked directly using `ONL`, the one building with a genuine NC/SC split: within `ONL` alone, NC vs SC residuals are virtually identical (−0.0078 vs −0.0075), and DARBY vs other NC-campus records (holding campus constant) still shows a real gap (−0.046 vs −0.010) — **campus is ruled out**, DARBY's effect isn't a campus effect wearing a building label. Class size was checked next: DARBY's average class size (13.6 students/session, the smallest of all 6 buildings) correlates with the subject-adjusted residual at r=0.11 across the whole dataset — real but weak (~1% of variance), directionally consistent with DARBY's gap but nowhere near sufficient to fully explain a −6.5pp session-group-level residual gap on its own. Time-of-day couldn't be checked at all — the data has no clock-time field, only `cls_session_no` (a within-activity sequence number, not a real time). **Honest conclusion: no full explanation found** — campus is ruled out, class size is a real partial contributor, and DARBY's remaining gap is unexplained by what's available in this dataset. A real, deliberate follow-up task if pursued further would need a data source this project doesn't have (actual class scheduling/time-of-day data), not a re-analysis of what's already here.
 - **This entire feature set is uncommitted** on `sangam_dev` relative to `main` — see the note at the top of this file.

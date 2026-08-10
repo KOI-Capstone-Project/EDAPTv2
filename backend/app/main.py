@@ -67,9 +67,11 @@ LOCKOUT_MINUTES:      int       = 15
 OTP_EXPIRY_MINUTES:   int       = 10
 MAX_UPLOAD_BYTES:     int       = 50 * 1024 * 1024
 # Attendance is recorded per class session, not per assessment — the real
-# masked_attendance.csv is ~125MB (2.5M rows) vs. the capstone file's ~36MB
-# (327K rows) for the same population, so it needs its own, higher cap
-# rather than sharing the capstone upload's 50MB limit.
+# attendance file is ~119MB uncompressed (2.5M rows) vs. the capstone file's
+# ~36MB (327K rows) for the same population, so it needs its own, higher cap
+# rather than sharing the capstone upload's 50MB limit. This cap applies to
+# what a user UPLOADS (a plain CSV); the checked-in copy is stored gzipped
+# (masked_attendance.csv.gz, ~9MB) and read directly by pandas.
 MAX_ATTENDANCE_UPLOAD_BYTES: int = 200 * 1024 * 1024
 
 # ── ML model (loaded once at startup) ────────────────────────────────────────
@@ -322,7 +324,7 @@ except Exception as _e:
 # an attendance-vs-outcome correlation means the same "pass" everywhere else
 # in this project means.
 _ATTENDANCE: Optional[pd.DataFrame] = pd.DataFrame()
-_ATTENDANCE_PATH = Path(__file__).parent.parent.parent / "data" / "masked_attendance.csv"
+_ATTENDANCE_PATH = Path(__file__).parent.parent.parent / "data" / "masked_attendance.csv.gz"
 try:
     from app.ml.train_model import collapse_attempts_to_latest_per_type, build_target
     from app.ml.build_attendance_features import build_attendance_features
