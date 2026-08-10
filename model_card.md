@@ -442,3 +442,66 @@ The two results genuinely point in opposite directions: attendance gives the mid
 The complete-record model already sees a student's *entire* graded record — `PARTIAL_WEIGHTED_SCORE` alone dominates its SHAP attributions (0.1009 mean |SHAP|, more than double the next feature). When the marks signal is that complete and that strong, there is little independent variance left for attendance to explain, so adding it mostly adds noise at a fixed threshold. The mid-term model, by construction, sees only a truncated 15–90% slice of the marks — a deliberately weaker primary signal — which leaves more room for a second, partly-independent behavioural signal to contribute. Its much lower PR-AUC (0.68 vs. the complete-record model's 0.88) reflects how much harder its task is, and a harder task is where an extra weak signal has the most room to help.
 
 Stated as a hypothesis because it hasn't been isolated: confirming it would need something like an ablation across truncation levels (does attendance's contribution shrink monotonically as coverage rises toward 100%?), which was not run. The measured facts are the two deltas above and the SHAP ranking; the explanation connecting them is inference.
+
+## Round 9 — why every retrain "underperformed" the frozen model (it didn't)
+
+Three independent retrains this session — corrected labels only, corrected + tuned hyperparameters, corrected + attendance — all landed at 0.78–0.79 fail-class recall, while the frozen live model **re-scored** (not retrained) on the same corrected test set scored 0.8230. That convergence across three unrelated changes pointed at the corrected data itself rather than at any one change. Investigated for a mechanism rather than attempting a fourth retrain.
+
+### First correction: the training labels changed far more than previously measured
+
+Earlier rounds counted 205 flips because they only looked at period `25.3` (the test period). Across **all** periods there are **428** label flips, **223 of them inside the training range** — and, as before, **every single one is Fail→Pass, zero in the reverse direction**. Training-set fail count: **7,815 → 7,570** (−245: the 223 flips plus 22 enrolments dropped by the refreshed extract's filters). Round 7's "−0.18pp, barely moved" figure was measured on the 3-way split (which excludes `25.2`, where 143 of the flips live) and understated the change to the 2-way training split the retrains actually use (11.854% → 11.487%).
+
+### Step 1 — the shrinking-minority-class hypothesis, tested with a matched control. Ruled out.
+
+Same number of fails removed, differing only in *which* rows. All four trained identically (10 features, same SMOTE/ensemble config) and evaluated on the same corrected test set:
+
+| Variant | Train fails | Precision | Recall | F1 | PR-AUC |
+|---|---|---|---|---|---|
+| BASELINE — old data, old labels | 7,815 | 0.7423 | 0.8179 | 0.7783 | 0.8781 |
+| **RANDOM** — 223 *randomly chosen* fails flipped to Pass | 7,592 | 0.7352 | **0.8169** | 0.7739 | 0.8772 |
+| **REAL** — the 223 *genuinely corrected* enrolments flipped | 7,592 | 0.7848 | **0.7881** | 0.7864 | 0.8777 |
+| NEW — fully corrected training data | 7,570 | 0.7992 | 0.7860 | 0.7925 | 0.8790 |
+
+Removing 223 fails **at random** costs **0.10pp** of recall — nothing. Applying the **same number** of *real* corrections costs **2.98pp**. **Quantity is ruled out**; the identity of those specific rows is doing all the work. Note also that REAL (0.7881) lands essentially on NEW (0.7860), so the training-set corrections account for nearly the whole difference between an old-trained and new-trained model.
+
+### Step 2 — the corrected enrolments are systematically borderline passers. Supported.
+
+Feature means for the 428 corrected enrolments versus the two reference populations (as labelled now):
+
+| Feature | Corrected (428) | Still-Fail | Ordinary Pass |
+|---|---|---|---|
+| `PARTIAL_WEIGHTED_SCORE` | 40.90 | 17.87 | 45.67 |
+| `ASSESS1_MARK` | 56.06 | 21.16 | 63.96 |
+| `ASSESS2_MARK` | 69.62 | 34.27 | 71.05 |
+| `SUBJECT_DIFFICULTY` | 0.21 | 0.23 | 0.16 |
+
+On every input feature the corrected rows look **much more like passers than like fails** — `ASSESS2_MARK` is essentially identical to ordinary passers. Their final weighted scores confirm they are *weak* passers: median 61.7 vs. 68.3 for ordinary passers, with **43.0%** falling in the 50–60 band versus **21.9%** of ordinary passers — roughly double the concentration just above the 50 pass mark.
+
+**This yields a coherent mechanism.** Under the old labels, those 428 pass-looking enrolments were marked Fail. That is label noise pointing in one consistent direction, and training on it taught the model that a set of clearly pass-like feature patterns meant "fail" — biasing its boundary toward predicting Fail. A boundary biased toward Fail mechanically **inflates recall and depresses precision**. Correcting the labels removes that false lesson, so the model becomes more conservative about calling Fail: recall down, precision up. The controlled experiment shows exactly that signature — REAL corrections moved recall −2.98pp and precision **+4.25pp**.
+
+### Step 3 — the frozen model's 0.8230 is an operating point, not superiority
+
+All four models on the identical corrected test set, at their deployed 0.50 threshold:
+
+| Model | Feat | Precision | Recall | F1 | PR-AUC |
+|---|---|---|---|---|---|
+| **Frozen live, re-scored (not retrained)** | 10 | **0.7326** | **0.8230** | **0.7752** | **0.8770** |
+| Retrain: corrected labels only | 10 | 0.7992 | 0.7860 | **0.7925** | 0.8790 |
+| Retrain: corrected + tuned hyperparameters | 10 | 0.7948 | 0.7809 | 0.7878 | 0.8781 |
+| Retrain: corrected + attendance | 11 | 0.7931 | 0.7809 | 0.7869 | **0.8808** |
+
+**The frozen model is last on F1 and last on PR-AUC.** It leads on exactly one metric — recall — which is the metric this project has emphasized most, and precisely the metric a Fail-biased boundary inflates. Its precision is ~6.7pp *below* every retrain.
+
+Decisive check: sweeping the corrected-labels retrain's threshold down to **0.405** matches the frozen model's recall (0.8261 vs. 0.8230) at precision **0.7333 vs. 0.7326** — equal-or-better on *both* metrics simultaneously. **The frozen model does not dominate at any operating point.** The 5.13pp "recall gap" is a difference in where each model's threshold sits on essentially the same (slightly better) precision–recall curve, not a difference in capability.
+
+### Conclusion — (b), with the gap reframed as not being a regression at all
+
+The evidence supports **(b): the corrected enrolments are systematically borderline cases**, and the mechanism is specifically that the *old* labels contained one-directional noise that biased the old model toward predicting Fail. Explanation (a), pure class-imbalance/quantity, is ruled out by the random-control experiment (0.10pp vs. 2.98pp). No estimated split between mechanisms is needed — the control isolates it cleanly.
+
+The stronger conclusion, which supersedes how earlier rounds framed this: **there is no recall regression to fix.** The retrains are not worse models. They are better-calibrated to corrected ground truth, they beat the frozen model on F1 and PR-AUC, and at matched recall they match or beat it on precision. The frozen model's 0.8230 was partly *earned by learning mislabeled data* — which is the same conclusion Round 6 reached about that number being measured against wrong ground truth, now extended: it was not only *measured* against bad labels, it was *trained* on them.
+
+**Recommendation.** No further retraining or resampling work is warranted for this gap — the diagnosis is complete and nothing is broken. Practically:
+- **Keep the live model as-is for now** — nothing was promoted or changed by this investigation, per the standing rule.
+- **If 0.82+ recall is an operational requirement**, the lever is the decision threshold on a corrected-data model (≈0.405 reproduces it at equal precision), not more training data — and it should go through `validate_threshold.py` honestly rather than being set from this test-set sweep, which would be test-set tuning.
+- **More data is not the blocker.** A genuinely new study period would help the model generally, but it is not needed to close this specific gap, because the gap is not a capability deficit.
+- **Flagged for whoever reviews promotion next**: `compare_and_promote.py`'s gate refuses anything whose fail-class precision *or* recall drops >3pp against live. The corrected-labels retrain trips that rule on recall (−5.13pp) despite being better on F1, better on PR-AUC, and equal-or-better at matched recall. The gate would therefore block a genuinely better model. That is a real limitation of a fixed-threshold, single-metric-drop criterion, not a reason to `--force` past it casually — it deserves a deliberate decision about whether the gate should also consider F1/PR-AUC or evaluate at a matched operating point.
