@@ -398,4 +398,47 @@ A 16.9-percentage-point swing that flips the actual Pass/Fail label — real, me
 - **Backend: 21/21 passing** — but not on the first run. Retraining the mid-term/simulated-progress model (see below) broke `test_predict_shap_explanation_matches_live_model` (SHAP reconstruction check failing, `sum_check_ok: False`) because `shap_background_simulated.pkl` still had 10 columns against an now-11-feature live model. Caught, diagnosed, and fixed by regenerating that one background file (and only that one — `shap_background_main.pkl` deliberately left alone, see Step 5). Re-ran after the fix: 21/21.
 - **Frontend: 3/3 passing.**
 - **Complete-record model: registered, NOT live.** `20260808_110630` is a real, registered candidate; `compare_and_promote.py` reports it MEANINGFULLY WORSE than the original live version (see Step 4); nothing was promoted.
-- **Mid-term/simulated-progress model: this one IS now live, not just registered — by this model family's existing, established behavior, not a new decision made here.** `best_model_simulated_progress.pkl` has no promotion gate (documented earlier this session, Rounds 4–5) — running `train_simulated_progress.py` to add attendance overwrites the file `predictor.py` loads directly, the same way the calibration and hyperparameter work in Rounds 4–5 did. Stated plainly so this isn't discovered later as a surprise: real mid-term predictions now require and use attendance data, and the model itself was refit on the current (corrected-label) data as a side effect, with a re-selected decision threshold and a freshly-fit Platt calibrator, all captured in this same retrain.
+- **Mid-term/simulated-progress model: this one went live immediately, not just registered — by this model family's behavior at the time, not a new decision made here.** `best_model_simulated_progress.pkl` had no promotion gate (documented earlier this session, Rounds 4–5) — running `train_simulated_progress.py` to add attendance overwrote the file `predictor.py` loads directly, the same way the calibration and hyperparameter work in Rounds 4–5 did. Stated plainly so this isn't discovered later as a surprise: real mid-term predictions now require and use attendance data, and the model itself was refit on the current (corrected-label) data as a side effect, with a re-selected decision threshold and a freshly-fit Platt calibrator, all captured in this same retrain. **Since fixed — see Round 8**: this model family now has a real promotion gate (`sim_model_registry.py` / `compare_and_promote_simulated.py`), so an ungated retrain can no longer go live.
+
+## Round 8 — mid-term promotion gate, and confirming its comparison wasn't confounded
+
+Two things happened after Round 7: the missing promotion gate for the mid-term model family was built, and the comparison that justified keeping the attendance version live was re-checked for a specific confound rather than taken at face value.
+
+### The gate (context for the comparison below)
+
+`train_simulated_progress.py` had no promotion gate — it overwrote `best_model_simulated_progress.pkl` directly, live immediately, with no versioning, comparison, or rollback path. Round 7's attendance retrain went live that way. Fixed with `sim_model_registry.py` + `compare_and_promote_simulated.py`, mirroring the complete-record model's register-then-explicitly-promote pattern and reusing its identical >3pp refuse-if-worse threshold; `predictor.py` now loads the live mid-term model from that registry rather than a hardcoded path. Full account in README's [Mid-semester prediction](README.md) section, including the fact that no backup of the pre-attendance version existed and it was recoverable only by chance from an unrelated Docker image layer.
+
+### The confound question
+
+The pre-attendance baseline (`20260808_030637`) was recovered from a Docker image, not from a controlled experiment — so it was **not** self-evident that it had been trained on the same corrected-label data as the attendance version (`20260808_113534`). If it predated this session's 205 Fail→Pass label corrections, then its reported +0.67pp recall advantage would be a tangled "pre-correction vs post-correction *and* attendance" result, not a clean attendance effect. This matters because the complete-record model showed the label correction **alone** moves recall by −3.7pp — an effect large enough to swamp a +0.67pp signal entirely.
+
+**Checked directly, two independent ways. The comparison is clean.**
+
+**Evidence 1 — the test set fingerprints differ sharply between the two data vintages, and both versions carry the post-correction one.** Rebuilding the simulated-progress split from each raw file:
+
+| Raw data | Sim-progress test rows | Test fails |
+|---|---|---|
+| PRE-correction (`data/archive/Capstone_data_20260324.csv`) | 34,028 | **4,516** |
+| POST-correction (`ingested_capstone.csv`) | 33,990 | **3,725** |
+
+Both registered mid-term versions store `classification_report["Fail"]["support"] = 3725.0` — an exact match to the post-correction split, and nowhere near the pre-correction 4,516. A pre-correction baseline could not report 3,725.
+
+**Evidence 2 — the recovered baseline's stored metrics reproduce exactly when re-scored on the current corrected test set.** Scoring both model objects head-to-head on the identical current test set returned precision 0.3365 / recall 0.8140 for the recovered version and 0.3390 / 0.8207 for the attendance version — matching each version's own stored `classification_report` to four decimal places. A model whose stored report had been computed against a *different* (pre-correction) test set would not reproduce its own numbers on this one.
+
+**Conclusion: both mid-term versions were trained and evaluated on the same corrected-label data, differing only in the presence of `ATTENDANCE_RATE` (10 features vs. 11).** The Round 7 / gate-promotion figures stand as a genuine, isolated attendance effect:
+
+| | Precision | Recall | F1 | PR-AUC |
+|---|---|---|---|---|
+| Mid-term, corrected labels, **no** attendance (`20260808_030637`) | 0.3365 | 0.8140 | 0.4761 | 0.6779 |
+| Mid-term, corrected labels, **with** attendance (`20260808_113534`) | 0.3390 | 0.8207 | 0.4798 | 0.6812 |
+| Delta | +0.25pp | **+0.67pp** | +0.37pp | +0.33pp |
+
+No new training run was needed to resolve this, and nothing was promoted or changed as a result — this was verification of an existing report's validity, not a promotion decision.
+
+### Why attendance helps the mid-term model but not the complete-record one — a plausible reading, not a proven mechanism
+
+The two results genuinely point in opposite directions: attendance gives the mid-term model a small all-metric improvement (+0.67pp recall), while for the complete-record model it was a wash-to-slightly-negative (−0.51pp recall, Round 7 Step 4). A reasonable interpretation, consistent with the SHAP evidence but **not** established causally here:
+
+The complete-record model already sees a student's *entire* graded record — `PARTIAL_WEIGHTED_SCORE` alone dominates its SHAP attributions (0.1009 mean |SHAP|, more than double the next feature). When the marks signal is that complete and that strong, there is little independent variance left for attendance to explain, so adding it mostly adds noise at a fixed threshold. The mid-term model, by construction, sees only a truncated 15–90% slice of the marks — a deliberately weaker primary signal — which leaves more room for a second, partly-independent behavioural signal to contribute. Its much lower PR-AUC (0.68 vs. the complete-record model's 0.88) reflects how much harder its task is, and a harder task is where an extra weak signal has the most room to help.
+
+Stated as a hypothesis because it hasn't been isolated: confirming it would need something like an ablation across truncation levels (does attendance's contribution shrink monotonically as coverage rises toward 100%?), which was not run. The measured facts are the two deltas above and the SHAP ranking; the explanation connecting them is inference.
