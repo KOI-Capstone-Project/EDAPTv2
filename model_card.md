@@ -453,7 +453,12 @@ Earlier rounds counted 205 flips because they only looked at period `25.3` (the 
 
 ### Step 1 — the shrinking-minority-class hypothesis, tested with a matched control. Ruled out.
 
-Same number of fails removed, differing only in *which* rows. All four trained identically (10 features, same SMOTE/ensemble config) and evaluated on the same corrected test set:
+Same number of fails removed, differing only in *which* rows. All four trained identically and evaluated on the same corrected test set.
+
+**Experimental setup, stated explicitly so these numbers aren't mistaken for the earlier candidates':**
+- **`ATTENDANCE_RATE` was deliberately excluded** — all four variants use the pre-attendance **10-feature** set. This is intentional: the point is to isolate the label-noise variable, so the attendance variable is held out entirely rather than varied alongside it. **These numbers are therefore not directly comparable to the +attendance candidate (0.7809)**, which differs by both feature set and labels.
+- **The `NEW` variant is an exact reproduction, which validates the setup**: 0.7992 / 0.7860 on 65,903 training rows reproduces registered candidate `20260807_135223` (0.7992 / 0.7860, 65,903 rows) to four decimals. The corrected-data arm of this experiment is therefore the same experiment as the earlier round, not a differently-configured one.
+- **`BASELINE` is *not* a re-creation of the frozen live model**, and shouldn't be read as one. The live model (`20260715_132655`, trained 2026-07-15) reports **58,267** training rows, which matches neither the two-way (65,925) nor three-way (55,352) split of the oldest archive still on disk — so the exact extract it was trained on is no longer recoverable. `BASELINE` is the closest available reconstruction of an old-labels model ("train on the oldest data we still have, with its original labels"), which is why it lands *near* but not *on* the frozen model: recall 0.8179 vs. 0.8230, precision 0.7423 vs. 0.7326. That both old-label models sit in the same high-recall/low-precision corner is the point; exact reproduction was neither possible nor required.
 
 | Variant | Train fails | Precision | Recall | F1 | PR-AUC |
 |---|---|---|---|---|---|
@@ -462,7 +467,23 @@ Same number of fails removed, differing only in *which* rows. All four trained i
 | **REAL** — the 223 *genuinely corrected* enrolments flipped | 7,592 | 0.7848 | **0.7881** | 0.7864 | 0.8777 |
 | NEW — fully corrected training data | 7,570 | 0.7992 | 0.7860 | 0.7925 | 0.8790 |
 
-Removing 223 fails **at random** costs **0.10pp** of recall — nothing. Applying the **same number** of *real* corrections costs **2.98pp**. **Quantity is ruled out**; the identity of those specific rows is doing all the work. Note also that REAL (0.7881) lands essentially on NEW (0.7860), so the training-set corrections account for nearly the whole difference between an old-trained and new-trained model.
+Applying the **same number** of *real* corrections costs **2.98pp** of recall. The single random draw shown above cost 0.10pp — but a single draw is not evidence, so it was repeated.
+
+**Repeated with 25 independent random draws** (different rows each time, otherwise identical method):
+
+| | Recall effect vs. BASELINE |
+|---|---|
+| RANDOM, mean of 25 draws | **−0.70pp** (std 0.44pp) |
+| RANDOM, range across draws | −1.54pp to +0.10pp (recall 0.8025–0.8189) |
+| **REAL** (the 223 actual corrections) | **−2.98pp** (recall 0.7881) |
+| Z-score of REAL vs. the random distribution | **−5.20** |
+| Random draws reaching REAL's effect | **0 of 25** (REAL falls below every draw's minimum) |
+
+**This corrects the single-draw reading in one respect and strengthens the conclusion in another.** The correction: removing 223 fails at random is *not* costless — it averages −0.70pp, and the seed-42 draw (−0.10pp) happened to sit at the mild end of the distribution, understating the quantity component. So quantity accounts for roughly **0.70 of the 2.98pp (≈23%)**, not zero.
+
+The strengthening: the remaining **≈2.28pp (≈77%)** is attributable to *which* rows were corrected, and REAL sits **5.2 standard deviations** outside the random distribution, below all 25 draws. Precision shows the same separation — random draws move it +0.35pp on average (0.7458 vs. 0.7423 baseline) while the real corrections move it **+4.25pp** (0.7848). **Explanation (a), pure quantity, is ruled out as the primary driver at high confidence**, though it is a real minor contributor rather than nil. Note also that REAL (0.7881) lands essentially on NEW (0.7860), so the training-set corrections account for nearly the whole difference between an old-trained and new-trained model.
+
+*(Empirical one-sided p is reported as 0.0385 only because it is bounded below by 1/(25+1) at this sample size; the z-score of −5.20 is the more informative statistic here.)*
 
 ### Step 2 — the corrected enrolments are systematically borderline passers. Supported.
 
@@ -496,12 +517,32 @@ Decisive check: sweeping the corrected-labels retrain's threshold down to **0.40
 
 ### Conclusion — (b), with the gap reframed as not being a regression at all
 
-The evidence supports **(b): the corrected enrolments are systematically borderline cases**, and the mechanism is specifically that the *old* labels contained one-directional noise that biased the old model toward predicting Fail. Explanation (a), pure class-imbalance/quantity, is ruled out by the random-control experiment (0.10pp vs. 2.98pp). No estimated split between mechanisms is needed — the control isolates it cleanly.
+The evidence supports **(b): the corrected enrolments are systematically borderline cases**, and the mechanism is specifically that the *old* labels contained one-directional noise that biased the old model toward predicting Fail. Explanation (a), pure class-imbalance/quantity, is ruled out **as the primary driver** by the repeated random-control experiment — but it is a real minor contributor, not nil. The 25-draw control gives an estimated split: **≈23% of the effect (0.70 of 2.98pp) is quantity, ≈77% (2.28pp) is the identity of the corrected rows**, with REAL sitting 5.2 standard deviations outside the random distribution. So this is technically **(c), a combination with a quantified split**, dominated by (b).
 
 The stronger conclusion, which supersedes how earlier rounds framed this: **there is no recall regression to fix.** The retrains are not worse models. They are better-calibrated to corrected ground truth, they beat the frozen model on F1 and PR-AUC, and at matched recall they match or beat it on precision. The frozen model's 0.8230 was partly *earned by learning mislabeled data* — which is the same conclusion Round 6 reached about that number being measured against wrong ground truth, now extended: it was not only *measured* against bad labels, it was *trained* on them.
 
-**Recommendation.** No further retraining or resampling work is warranted for this gap — the diagnosis is complete and nothing is broken. Practically:
-- **Keep the live model as-is for now** — nothing was promoted or changed by this investigation, per the standing rule.
-- **If 0.82+ recall is an operational requirement**, the lever is the decision threshold on a corrected-data model (≈0.405 reproduces it at equal precision), not more training data — and it should go through `validate_threshold.py` honestly rather than being set from this test-set sweep, which would be test-set tuning.
-- **More data is not the blocker.** A genuinely new study period would help the model generally, but it is not needed to close this specific gap, because the gap is not a capability deficit.
-- **Flagged for whoever reviews promotion next**: `compare_and_promote.py`'s gate refuses anything whose fail-class precision *or* recall drops >3pp against live. The corrected-labels retrain trips that rule on recall (−5.13pp) despite being better on F1, better on PR-AUC, and equal-or-better at matched recall. The gate would therefore block a genuinely better model. That is a real limitation of a fixed-threshold, single-metric-drop criterion, not a reason to `--force` past it casually — it deserves a deliberate decision about whether the gate should also consider F1/PR-AUC or evaluate at a matched operating point.
+### (a) What the evidence supports — stated separately from what was decided
+
+**On every axis checked, the corrected-labels model matches or exceeds the currently-live model.** Not "comparable" — better or equal on each measure taken:
+
+| Axis | Live (frozen, re-scored) | Corrected-labels retrain | Verdict |
+|---|---|---|---|
+| F1 @0.50 | 0.7752 | **0.7925** | retrain better |
+| PR-AUC | 0.8770 | **0.8790** | retrain better |
+| Precision @0.50 | 0.7326 | **0.7992** | retrain better |
+| Recall @0.50 | **0.8230** | 0.7860 | live better *at this threshold only* |
+| Precision at *matched* recall (~0.823) | 0.7326 | **0.7333** | retrain equal-or-better |
+
+The single axis where the live model leads disappears once the operating point is equalised. Read plainly: **the evidence points toward replacing the live model with a corrected-labels model, threshold-tuned**, not toward keeping it. Nothing found in Rounds 6–9 argues for the live model on the merits; its one apparent advantage is traceable to having been trained on labels since shown to be wrong.
+
+### (b) What was actually decided today — a scope boundary, not a conclusion
+
+**The live model was left live.** This is a decision about scope, and should not be read as the evidence's verdict:
+
+- This task was scoped as diagnosis only, with an explicit instruction not to promote or change the live model. That instruction was followed.
+- Promotion additionally requires a proper `validate_threshold.py` run to select the operating point honestly. The ≈0.405 threshold above was found by sweeping the **test** set, which is exactly the test-set tuning this project rejected in Round 1 — it is adequate to prove the models are equivalent at matched recall, and *not* adequate to set a deployed threshold.
+- Promotion would also have to clear `compare_and_promote.py`'s gate, which refuses anything whose fail-class precision *or* recall drops >3pp against live. The corrected-labels retrain trips that on recall (−5.13pp) despite winning on F1, PR-AUC and matched-recall precision. **The gate would block a model the evidence favours** — a real limitation of a fixed-threshold, single-metric-drop criterion, and a reason for a deliberate decision about the gate itself rather than a casual `--force`.
+
+So: **(a) the evidence favours a corrected-labels model; (b) acting on that needs an honest threshold selection and a gate decision, neither of which was in scope here.** Those are two different statements and this section keeps them apart deliberately.
+
+**Also settled by this round:** no further retraining or resampling work is warranted for the "gap" itself — it is not a capability deficit, so a genuinely new study period, while useful for the model generally, is not required to close it.
