@@ -115,8 +115,8 @@ EDAPTv2/
 │   ├── scripts/
 │   │   └── retrain_loop.sh            # Sidecar scheduler loop (scheduled_retrain.py → sleep 24h → repeat)
 │   ├── tests/
-│   │   ├── test_smoke.py              # 13 tests
-│   │   └── test_ingestion_e2e.py      # 8 tests (21 total)
+│   │   ├── test_smoke.py              # 15 tests
+│   │   └── test_ingestion_e2e.py      # 8 tests (23 total)
 │   ├── Dockerfile.dev
 │   └── Dockerfile.prod
 ├── frontend/
@@ -460,7 +460,7 @@ docker exec edaptv2_backend python3 -m app.ml.check_bias_persistence
 docker exec edaptv2_backend pytest tests/ -v
 ```
 
-**21 tests, all passing** as of this README (confirmed live, not assumed — `test_smoke.py`'s 13 plus `test_ingestion_e2e.py`'s 8) — covering health/auth, the three coverage-tier prediction paths, server-side recomputation of partial scores (regression test for the train/serve consistency bug), SHAP explanation consistency for both models, the Fail/Safe risk-band contradiction fix (both an HTTP-level reproduction of the reported bug and a pure unit-level invariant sweep across five threshold values), the two-phase ingestion flow's Postgres-backed pending-row handoff (including a real cross-process lock-contention test and a TTL-expiry test against a genuinely backdated row), and column classification.
+**23 tests, all passing** as of this README (regenerated via `pytest --collect-only`, not hand-typed — `test_smoke.py`'s 15 plus `test_ingestion_e2e.py`'s 8) — covering health/auth, the three coverage-tier prediction paths, server-side recomputation of partial scores (regression test for the train/serve consistency bug), SHAP explanation consistency for both models, the Fail/Safe risk-band contradiction fix (both an HTTP-level reproduction of the reported bug and a pure unit-level invariant sweep across five threshold values), the two-phase ingestion flow's Postgres-backed pending-row handoff (including a real cross-process lock-contention test and a TTL-expiry test against a genuinely backdated row), and column classification.
 
 ---
 
@@ -539,13 +539,40 @@ Stated plainly rather than rounded up or omitted:
 
 ---
 
+## Testing Practices — a real outage the suite missed
+
+A complete prediction outage ran undetected across several rounds of "21/21 passing, verified live" reporting. It is documented here rather than quietly fixed, because the cause was structural and the same shape of gap could hide other failures.
+
+**What broke.** After an 11-feature (attendance-using) model went live, the roster endpoint was still calling the model without `attendance_rate`. `predict()` returns an error dict for a missing required feature, and the roster endpoint folds that into `probability: None` rather than raising — so every row came back `HTTP 200` with `probability: null`. The mid-term tier had been broken this way since its model was promoted; the complete-record tier broke when its model was promoted later. An unrelated promotion exposed it.
+
+**Why 21 green tests missed it.** Every prediction test posted hand-built `assessments_used` to `/api/predict` — the path where *the client supplies every feature*. **No test touched `/api/subjects/{subject}/roster`**, the path where *the server assembles features* from stored data (`_DATA` marks + `_ATTENDANCE` lookups) before calling the model. The suite covered one half of the serving surface and reported it as coverage of the whole. Nothing asserted a probability was non-null, either — only status codes, routing and labels.
+
+**Same-shape risks elsewhere** (server-assembles-features paths with no equivalent test): `/api/subjects/{subject}/analytics`, the attendance analytics endpoints, and the dashboard endpoints beyond `/api/dashboard/summary`. These are not known to be broken — they are named because they sit in the same blind spot.
+
+**Fixed with a test proven to catch it.** `test_roster_complete_record_returns_real_predictions_not_nulls` and `test_roster_midterm_tier_returns_real_predictions_not_nulls` hit the real endpoint as a client would, for a subject/period discovered from live data, and assert every scorable row gets a real probability. Both were verified by deliberately re-introducing the bug: **both failed, then passed again once the wiring was restored** (and the restored file was confirmed byte-identical to the committed fix). A test that has never been seen to fail is not evidence.
+
+**Going forward: any endpoint that assembles model features server-side needs a test that calls it as a real client and asserts on the prediction value, not just the status code.** HTTP 200 with a null payload is exactly what this suite was blind to.
+
+## Source-control note — a claimed fix that was never on disk
+
+The roster wiring above was reported as written in an earlier round, then found missing. Investigated against real history rather than assumed:
+
+`git log --all -- backend/app/main.py` shows the file in 3 commits this session. Searching each for the wiring: commit `0d0b3e5` and `addb00e` each contain exactly **two** `attendance_rate=` call-site arguments — both in `/api/predict` — and their roster branch calls the model with none. The distinctive roster comments appear in **no commit before `e80d357`** (the fix). **The wiring was therefore never committed, and never on disk at commit time — there was no revert.** An earlier note in this project speculated that an editor or workflow might be reverting `main.py`; that is ruled out and was wrong.
+
+Checked for mechanisms that could discard uncommitted work: **no git hooks** (only `.sample` files), **no `git checkout`/`reset`/`clean`/`stash` in any repo script**, and the dev `Dockerfile` does not `COPY` app source over the `./backend:/app` bind mount. No mechanism found. The honest conclusion is that the edit was reported as applied but never persisted — a tooling/process failure on the authoring side, not a repository defect.
+
+**Mitigation, since no environment cause exists to fix:** commit at the end of each unit of work rather than batching many rounds into one commit, and verify a claimed change is actually present (`grep` the file, or `git show <commit>:<path>`) before reporting it as done — the check that finally caught this.
+
 ## Documentation Practices
 
-This project has hit the same failure mode three times in one session: a hand-typed number or claim in documentation went stale after the underlying code or data changed, and stood uncorrected until something else forced a re-check.
+This project has hit the same failure mode five times in one session: a hand-typed number or claim in documentation went stale after the underlying code or data changed, and stood uncorrected until something else forced a re-check.
 
 1. A file-tree entry claimed `test_smoke.py` had "11 backend tests" — actually 21, across two files, by the time it was checked.
 2. `README.md` asserted `LecturerAIInsights.jsx` "exists... but is not imported or referenced anywhere in App.js" — the file had already been deleted (commit `5fd48d8`, before this session began), and its deletion was already documented in `CHANGELOG.md`. The claim was never true at any point during this session; it was written without checking the filesystem first.
 3. `model_card.md`/`README.md` cited the live model's fail-class recall (`0.8374`) as current performance without qualification, after a data refresh had already corrected 205 real students' labels and measurably changed what that number means — see the recall-gap finding above.
+
+4. A prediction outage sat behind 21 green tests for several rounds while being reported as "verified live" — the suite exercised `/api/predict` but never the roster path (see [Testing Practices](#testing-practices--a-real-outage-the-suite-missed) above). "Tests pass" is only evidence for what the tests actually execute.
+5. A fix was reported as applied and was never on disk (see [Source-control note](#source-control-note--a-claimed-fix-that-was-never-on-disk) above) — reported-done is not the same as verified-present.
 
 **Going forward: any numeric claim in `README.md` or `model_card.md` (test counts, row counts, recall/precision/F1 figures, file-existence claims) should be regenerated from a live command at the moment the documentation is written or updated — `pytest --collect-only`, `git log`/`git cat-file -e`, a real script run against current data — never hand-typed or carried forward from a previous version of the document without re-verification.** A number that was true when written is not the same guarantee as a number that's true now; this project's own history in this section is the evidence for why that distinction matters.
 

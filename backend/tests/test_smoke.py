@@ -395,3 +395,102 @@ def test_compute_risk_band_never_contradicts_threshold():
             would_be_fail = proba_fail >= threshold
             assert not (band == "Safe" and would_be_fail), \
                 f"threshold={threshold} probability={probability}: band=Safe but would be Fail"
+
+
+# ── Roster serving path ──────────────────────────────────────────────────────
+# Every other prediction test above posts hand-built assessments_used to
+# /api/predict, so they exercise the client-supplies-everything path only.
+# NOTHING covered the roster endpoint, where the SERVER assembles features
+# from stored data (_DATA marks + _ATTENDANCE lookups) before calling the
+# model. That blind spot let a real outage run undetected: after an
+# 11-feature (attendance-using) model went live, the roster endpoint was
+# still calling the model without attendance_rate, so every row came back
+# probability=null while the whole suite stayed green. These two tests
+# close that gap — they assert real predictions come back, not just HTTP 200.
+
+def _first_subject_period_with_data():
+    """Pick a real subject+period from live data rather than hardcoding one,
+    so this test doesn't rot when the dataset is refreshed."""
+    from app.main import _DATA
+    df = _DATA.dropna(subset=["MARKPERCENT"])
+    grp = df.groupby(["SUBJECTCODE", "STUDYPERIOD"]).size().sort_values(ascending=False)
+    for (subject, period), _ in grp.items():
+        from app.main import _subject_reliability_category
+        if _subject_reliability_category(subject) != "unreliable":
+            return subject, period
+    raise AssertionError("no usable subject/period found in the loaded dataset")
+
+
+@pytest.mark.asyncio
+async def test_roster_complete_record_returns_real_predictions_not_nulls():
+    """The roster's complete-record tier must return actual probabilities.
+
+    Regression test for a real outage: a null probability here means the
+    server-side feature assembly failed (e.g. a feature the live model
+    requires wasn't passed), which the endpoint swallows into
+    probability=None rather than raising.
+    """
+    subject, period = _first_subject_period_with_data()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        token = await _login(client)
+        response = await client.get(
+            f"/api/subjects/{subject}/roster",
+            params={"study_period": period},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    rows = payload.get("roster", payload) if isinstance(payload, dict) else payload
+    assert isinstance(rows, list) and rows, f"roster returned no rows for {subject}/{period}"
+
+    scorable = [r for r in rows if r.get("coverage_status") != "insufficient_data"]
+    assert scorable, "no scorable rows — cannot verify predictions are being produced"
+    scored = [r for r in scorable if r.get("probability") is not None]
+    assert scored, (
+        f"every scorable roster row came back with probability=None for "
+        f"{subject}/{period} — the server-side prediction path is broken even "
+        f"though the endpoint returned HTTP 200"
+    )
+    assert len(scored) == len(scorable), (
+        f"only {len(scored)}/{len(scorable)} scorable rows got a probability"
+    )
+    r = scored[0]
+    assert 0.0 <= r["probability"] <= 100.0
+    assert r["prediction"] in {"Pass", "Fail"}
+    assert r["risk_band"] in {"Safe", "At Risk", "High Risk"}
+
+
+@pytest.mark.asyncio
+async def test_roster_midterm_tier_returns_real_predictions_not_nulls():
+    """Same guarantee for the mid-term tier, reached via simulate_progress.
+
+    This tier was silently broken for longer than the complete-record one —
+    it needs its own coverage, since it uses a different model, a different
+    feature-assembly path (coverage-truncated attendance) and a different
+    threshold.
+    """
+    subject, period = _first_subject_period_with_data()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        token = await _login(client)
+        response = await client.get(
+            f"/api/subjects/{subject}/roster",
+            params={"study_period": period, "simulate_progress": 60},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    rows = payload.get("roster", payload) if isinstance(payload, dict) else payload
+    midterm = [r for r in rows if r.get("estimate_type") == "mid-term estimate"]
+    assert midterm, "simulate_progress produced no mid-term rows to check"
+    scored = [r for r in midterm if r.get("probability") is not None]
+    assert scored, (
+        f"every mid-term roster row came back with probability=None for "
+        f"{subject}/{period} — the mid-term serving path is broken despite HTTP 200"
+    )
+    assert len(scored) == len(midterm), (
+        f"only {len(scored)}/{len(midterm)} mid-term rows got a probability"
+    )
