@@ -2937,6 +2937,22 @@ async def subject_roster(
                 a2_weight = 0.0
             a2_contrib = a2_mark * a2_weight / 100
 
+            # This student's real, full attendance rate — safe for a
+            # complete record (same closed-snapshot premise
+            # build_early_features() relies on). Falls back to the subject
+            # average only if this enrolment has no attendance row.
+            attendance_rate = None
+            if _ATTENDANCE is not None and not _ATTENDANCE.empty and "ATTENDANCE_RATE" in _ATTENDANCE.columns:
+                match = _ATTENDANCE[
+                    (_ATTENDANCE["STUDENTID_MASKED"] == student_id)
+                    & (_ATTENDANCE["SUBJECTCODE"] == subject)
+                    & (_ATTENDANCE["STUDYPERIOD"] == study_period)
+                ]
+                if not match.empty:
+                    attendance_rate = float(match["ATTENDANCE_RATE"].iloc[0])
+            if attendance_rate is None:
+                attendance_rate = _subject_average_attendance_rate(subject)
+
             result = ml_predict(
                 subject=                 subject,
                 study_period=            study_period,
@@ -2953,14 +2969,27 @@ async def subject_roster(
                 total_weight_recorded=   cumulative_weighting,
                 weight_complete=         cumulative_weighting >= period_total_weight,
                 assessments_used=        assessments_used,
+                attendance_rate=         attendance_rate,
             )
             estimate_type = None
         else:  # "partial" — 50-99% coverage, genuinely mid-term
+            # Attendance truncated to the SAME coverage fraction this
+            # student's marks have reached — never the full/final rate,
+            # which would leak end-of-term information into a mid-term
+            # estimate (see _truncated_attendance_rate's docstring).
+            coverage_fraction = cumulative_weighting / period_total_weight if period_total_weight else 0.0
+            attendance_rate = _truncated_attendance_rate(
+                str(student_id), subject, study_period, coverage_fraction
+            )
+            if attendance_rate is None:
+                attendance_rate = _subject_average_attendance_rate(subject)
+
             result = ml_predict_partial(
                 subject=          subject,
                 study_period=     study_period,
                 trimester_num=    trimester_num,
                 assessments_used= assessments_used,
+                attendance_rate=  attendance_rate,
             )
             estimate_type = "mid-term estimate"
 

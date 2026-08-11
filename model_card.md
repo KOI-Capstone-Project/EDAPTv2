@@ -6,17 +6,18 @@ Verified directly against `backend/app/ml/models/registry.json` and live ablatio
 
 | | |
 |---|---|
-| Registry version | `20260715_132655` (live) |
+| Registry version | `20260808_110630` (live as of 2026-08-11 — see [Round 10](#round-10--final-combined-candidate-promoted)) |
 | Architecture | Soft-voting ensemble: XGBoost + Random Forest (`sklearn.ensemble.VotingClassifier`) |
 | Class-imbalance handling | SMOTE oversampling on the training split |
-| Decision threshold | 0.50 — chosen via a held-out validation split (`validate_threshold.py`), not by sweeping the test set directly |
+| Feature set | 11 features, including `ATTENDANCE_RATE` |
+| Decision threshold | 0.50 — held-out validation selection put the honest value at 0.475, inside this project's own 0.03 noise band, so the deployed 0.50 was deliberately left unchanged (Round 10) |
 
 ## Training data
 
-- **Source**: `data/archive/Capstone_data_20260324.csv` — **superseded**. The live model has not been retrained since this session's data refresh; see [Round 6](#round-6--the-513pp-recall-drop-investigated) for what changed and why the numbers below are no longer fully trustworthy on their own.
+- **Source**: the current, corrected extract (`ingested_capstone.csv`, refreshed from `data/Capstone_data_20260729.csv`). The live model **is** trained on the corrected labels as of Round 10 — the 428 Fail→Pass corrections documented in Rounds 6/9 are reflected in its training data.
 - **Subjects used**: 124 of the institution's subjects — `fully_clean` (69) + `mostly_clean` (55) per `data/subject_reliability.json`'s per-enrolment reliability check, `TSL713` excluded (confirmed data-corruption case, CQ/IA weightings swapped by an earlier cleaning script)
 - **Date range**: all study periods before `25.3`, excluding the `23.1` pilot period (too few records to add signal)
-- **Row count**: 58,267 training rows (student-subject-period records, post-filtering)
+- **Row count**: 65,903 training rows (student-subject-period records, post-filtering)
 - **Validated on**: study period `25.3` (held out, never seen during training)
 
 ## Intended use
@@ -41,7 +42,9 @@ Mid-to-late trimester risk flagging for lecturers and administrators — surfaci
 
 ## Performance summary — current live model, held-out test period (`25.3`)
 
-**As of 2026-08-08: `0.8374` fail-class recall should not be cited as this model's current performance without this caveat.** Investigated and confirmed, not assumed ([Round 6](#round-6--the-513pp-recall-drop-investigated), including a 100%-traced mechanism, not a correlation): this number was partly earned against 205 real students' PASS labels that the refreshed data has since directly shown were wrong (Fail→Pass corrections, zero flips the other direction — traced to richer resit/attempt history now available for those students, not a labeling bug). Re-scoring this exact frozen model against corrected labels alone drops recall to 0.8230; a model retrained on the corrected data scores 0.7860. **`0.7860` is the more trustworthy current figure, not `0.8374`**, even though it's numerically lower — the table below is not wrong for what it measured at the time, but citing it today without this caveat overstates current performance.
+**Superseded by Round 10 — the table below described the previous live model (`20260715_132655`) and is retained as history.** The current live model's figures are in [Round 10](#round-10--final-combined-candidate-promoted). The caveat that follows explains why the old model was replaced.
+
+**As of 2026-08-08: `0.8374` fail-class recall should not be cited as current performance.** Investigated and confirmed, not assumed ([Round 6](#round-6--the-513pp-recall-drop-investigated), including a 100%-traced mechanism, not a correlation): this number was partly earned against 205 real students' PASS labels that the refreshed data has since directly shown were wrong (Fail→Pass corrections, zero flips the other direction — traced to richer resit/attempt history now available for those students, not a labeling bug). Re-scoring this exact frozen model against corrected labels alone drops recall to 0.8230; a model retrained on the corrected data scores 0.7860. **`0.7860` is the more trustworthy current figure, not `0.8374`**, even though it's numerically lower — the table below is not wrong for what it measured at the time, but citing it today without this caveat overstates current performance.
 
 | Metric | Value |
 |---|---|
@@ -546,3 +549,60 @@ The single axis where the live model leads disappears once the operating point i
 So: **(a) the evidence favours a corrected-labels model; (b) acting on that needs an honest threshold selection and a gate decision, neither of which was in scope here.** Those are two different statements and this section keeps them apart deliberately.
 
 **Also settled by this round:** no further retraining or resampling work is warranted for the "gap" itself — it is not a capability deficit, so a genuinely new study period, while useful for the model generally, is not required to close it.
+
+## Round 10 — final combined candidate, promoted
+
+The decision round. Rounds 6–9 established that the old live model's headline recall was inflated by label noise it had been trained on; this round judges every complete-record candidate at an **honestly-derived threshold** on the full metric set, and reaches an actual promotion decision rather than deferring again.
+
+### Premise correction first
+
+The task framed `20260808_110630` as an "attendance-only" candidate and asked for a *new* combined one. It was already the combined candidate: **11 features including `ATTENDANCE_RATE`, trained on the 65,903-row corrected data** (verified from the saved package, since this registry's metadata does not store `features`). Training another would have produced a duplicate, so the existing candidate was used.
+
+### Honest threshold selection — the real gap this round closed
+
+Every candidate had been sitting at the inherited default of 0.50; none had been threshold-validated. Selection followed this project's own established criterion (`validate_threshold.py`): fit on **train only**, sweep on the held-out **validation period (25.2)**, take the threshold whose validation recall lands in 0.80–0.85 and maximises precision within that band. Each candidate got its own sweep using its own feature set *and* its own hyperparameters. The test set was never used for selection — the 0.405 figure from Round 9 was a test-set sweep and was correctly rejected as invalid for this purpose.
+
+All three candidates selected **0.475**. Max-F1 on validation would have chosen ~0.60–0.70, deliberately not used — the band criterion is the project's established rule and changing it mid-decision would have been convenient rather than honest.
+
+### Full comparison — same corrected test set, each at its own honest threshold
+
+| Model | Threshold | Precision | Recall | F1 | PR-AUC |
+|---|---|---|---|---|---|
+| Frozen live `20260715_132655` | 0.500 (historic) | 0.7319 | **0.8230** | 0.7748 | 0.8763 |
+| Corrected labels only `20260807_135223` | 0.475 | **0.7701** | 0.7994 | **0.7845** | 0.8773 |
+| Corrected + tuned hyperparams `20260807_134847` | 0.475 | 0.7682 | 0.7942 | 0.7810 | 0.8760 |
+| **Corrected + attendance `20260808_110630`** | 0.475 | 0.7622 | 0.8014 | 0.7813 | **0.8796** |
+
+At honest thresholds the recall gap **largely closes** — 2.16pp between the combined candidate and the frozen model, inside this project's own 3pp noise band — while precision improves ~3pp. The three retrains are within 0.2–0.8pp of each other on every metric, i.e. mutually indistinguishable by that same standard. The combined candidate holds the **best PR-AUC of all four**, the threshold-independent measure.
+
+### The promotion decision: promoted, with `--force`, deliberately
+
+`20260808_110630` **is now the live complete-record model.** The gate returned MEANINGFULLY WORSE and was overridden. The justification is recorded in the registry's `promotion_history` entry itself, not only here:
+
+1. **The gate's comparison was invalid.** It compares stored `classification_report`s — live's was measured on the **old pre-correction test set (support = 953 fails)**, the candidate's on the **corrected set (support = 972)**. Its −5.65pp recall delta compares metrics computed against different ground truth, so it is not a real comparison. This is the gate limitation flagged in Round 9, now concretely demonstrated.
+2. **On the same test set at the same 0.50 threshold**, the candidate wins precision 0.7931 vs. 0.7326 (**+6.05pp**), F1 0.7869 vs. 0.7752, PR-AUC 0.8808 vs. 0.8770; it trails only on recall.
+3. **At matched recall it strictly dominates**: R=0.8241 / P=0.7362 versus the frozen model's R=0.8230 / P=0.7326.
+4. **The old model was trained on labels since proven wrong** for 428 enrolments (Rounds 6/9) — it is not merely behind, it learned one-directional noise.
+5. **Best PR-AUC of the four candidates.**
+
+`FAIL_THRESHOLD` was deliberately **left at 0.50**: the honest validation-derived value (0.475) differs by 0.025, inside `validate_threshold.py`'s own 0.03 "not a meaningful shift" band. Changing it would contradict the project's stated rule for a change smaller than its own noise threshold.
+
+### A real regression this promotion exposed, found and fixed
+
+Promoting an 11-feature model made attendance a hard serving requirement — and verification (not assumption) caught that **the roster endpoint was not passing it**. Both branches returned `probability: null` for every student:
+
+- the **mid-term** branch had been silently broken since the mid-term model was promoted in an earlier round — not caused by this promotion, only revealed by it;
+- the **complete-record** branch broke the moment this promotion landed.
+
+The helper functions existed but had no callers — the wiring was absent from the file despite having been written earlier. Re-applied to both branches (real per-student attendance for complete records; coverage-truncated attendance for mid-term, preserving the leakage boundary), then verified end-to-end: **39/39 rows scored on both paths**, where both had been 0/39.
+
+`shap_background_main.pkl` was also regenerated to 11 columns as part of the promotion — the same shape-mismatch that broke SHAP when the mid-term model was promoted, avoided here by doing it deliberately rather than discovering it later. SHAP reconstruction on the new live model holds at 6.01e-08, with `ATTENDANCE_RATE` at rank 6 of 11 (mean |SHAP| 0.0144), unchanged from its rank in the same model measured in Round 7.
+
+### Live state after this round
+
+| Family | Live version | Features | Threshold | Threshold provenance |
+|---|---|---|---|---|
+| Complete-record | `20260808_110630` | 11 (with attendance) | 0.50 | Honest sweep chose 0.475; inside the 0.03 noise band, so unchanged |
+| Mid-term | `20260808_113534` | 11 (with attendance) | 0.30 | Validation sweep in `train_simulated_progress.py` — confirmed honest (train-only fit, swept on 25.2, test never touched) |
+
+Both families now have one clearly-justified live model, each promoted through its own gate with the decision recorded. Backend 21/21 and frontend 3/3 passing.
