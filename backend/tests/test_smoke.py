@@ -494,3 +494,134 @@ async def test_roster_midterm_tier_returns_real_predictions_not_nulls():
     assert len(scored) == len(midterm), (
         f"only {len(scored)}/{len(midterm)} mid-term rows got a probability"
     )
+
+
+# ── Cross-endpoint agreement ────────────────────────────────────────────────
+# The two tests above prove each endpoint works on its own. They cannot catch
+# the two endpoints being individually fine but disagreeing with each other —
+# which is exactly what happened: /api/predict ignored req.student_id and used
+# the SUBJECT AVERAGE attendance rate (0.6220) for a real student whose own
+# rate the roster correctly used (0.6923). Same person, two numbers, depending
+# which screen you opened. Same class of bug as the Fail/Safe contradiction.
+
+def _student_with_distinct_attendance():
+    """Find a real complete-record enrolment whose own attendance rate differs
+    materially from its subject average, so 'used the student's value' and
+    'used the subject average' are actually distinguishable. Derived from live
+    data rather than hardcoded so it survives a dataset refresh — the original
+    reported case was Student0 / ACC705 / 23.2 (own 0.6923, subject avg 0.6220).
+    """
+    from app.main import (_DATA, _subject_reliability_category,
+                          _student_full_attendance_rate,
+                          _subject_average_attendance_rate, _period_total_weight)
+
+    df = _DATA.dropna(subset=["MARKPERCENT"])
+    for (student_id, subject, period), grp in df.groupby(
+        ["STUDENTID_MASKED", "SUBJECTCODE", "STUDYPERIOD"]
+    ):
+        if _subject_reliability_category(subject) == "unreliable":
+            continue
+        total = _period_total_weight(subject, period)
+        recorded = grp.drop_duplicates(subset=["ASSESSMENTTYPECODE"])["WEIGHTING"].sum()
+        if not total or recorded < total:          # complete-record tier only
+            continue
+        own = _student_full_attendance_rate(str(student_id), subject, period)
+        avg = _subject_average_attendance_rate(subject)
+        if own is None or avg is None or abs(own - avg) < 0.02:
+            continue
+        return str(student_id), subject, period, own, avg, grp
+    raise AssertionError(
+        "no enrolment found whose own attendance rate differs from its subject "
+        "average — cannot distinguish the two behaviours"
+    )
+
+
+@pytest.mark.asyncio
+async def test_predict_and_roster_agree_on_a_real_students_attendance():
+    """/api/predict and the roster must resolve attendance identically.
+
+    Regression test for a real inconsistency: for the same real student,
+    the roster used that student's own attendance rate while /api/predict
+    fell back to the subject average, because /api/predict never looked at
+    req.student_id. Both now go through _resolve_attendance_rate().
+
+    Asserts the fallback is genuinely a fallback: a student who HAS an
+    attendance record must never be scored against the subject average, and
+    attendance_rate_is_default must be False for them.
+    """
+    student_id, subject, period, own_rate, subject_avg, grp = \
+        _student_with_distinct_attendance()
+
+    grp_sorted = grp.sort_values("WEIGHTING", ascending=False).reset_index(drop=True)
+    assessments_used = [
+        {"type": str(r["ASSESSMENTTYPECODE"]),
+         "mark_percent": float(r["MARKPERCENT"]),
+         "weighting": float(r["WEIGHTING"])}
+        for _, r in grp_sorted.iterrows()
+    ]
+    a1 = grp_sorted.iloc[0]
+    a1_mark, a1_weight = float(a1["MARKPERCENT"]), float(a1["WEIGHTING"])
+    if len(grp_sorted) > 1:
+        a2 = grp_sorted.iloc[1]
+        a2_mark, a2_weight = float(a2["MARKPERCENT"]), float(a2["WEIGHTING"])
+    else:
+        a2_mark, a2_weight = 0.0, 0.0
+
+    body = {
+        "student_id":              student_id,
+        "subject":                 subject,
+        "study_period":            period,
+        "trimester_num":           float(period),
+        "assess1_mark":            a1_mark,
+        "assess1_weight":          a1_weight,
+        "assess1_contribution":    a1_mark * a1_weight / 100,
+        "assess2_mark":            a2_mark,
+        "assess2_weight":          a2_weight,
+        "assess2_contribution":    a2_mark * a2_weight / 100,
+        "partial_weighted_score":  a1_mark * a1_weight / 100 + a2_mark * a2_weight / 100,
+        "partial_weight_coverage": (a1_weight + a2_weight) / 100,
+        "num_assessments":         len(assessments_used),
+        "total_weight_recorded":   sum(a["weighting"] for a in assessments_used),
+        "weight_complete":         True,
+        "assessments_used":        assessments_used,
+        # deliberately NOT sending attendance_rate — the server must resolve it
+    }
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        token = await _login(client)
+        headers = {"Authorization": f"Bearer {token}"}
+        roster_resp = await client.get(
+            f"/api/subjects/{subject}/roster",
+            params={"study_period": period}, headers=headers,
+        )
+        predict_resp = await client.post("/api/predict", json=body, headers=headers)
+
+    assert roster_resp.status_code == 200, roster_resp.text
+    assert predict_resp.status_code == 200, predict_resp.text
+
+    rows = roster_resp.json()["roster"]
+    row = next((r for r in rows if r["student_id"] == student_id), None)
+    assert row is not None, f"{student_id} missing from the {subject}/{period} roster"
+    predict_data = predict_resp.json()
+
+    assert row["attendance_rate_used"] == pytest.approx(own_rate, abs=1e-6), (
+        f"roster scored {student_id} with {row['attendance_rate_used']} instead of "
+        f"that student's own attendance rate {own_rate}"
+    )
+    assert predict_data["attendance_rate_used"] == pytest.approx(own_rate, abs=1e-6), (
+        f"/api/predict scored {student_id} with "
+        f"{predict_data['attendance_rate_used']} instead of that student's own "
+        f"rate {own_rate} (subject average is {subject_avg}) — the endpoints have "
+        f"drifted apart again"
+    )
+    assert predict_data["attendance_rate_used"] != pytest.approx(subject_avg, abs=1e-6), (
+        "/api/predict fell back to the subject average for a student who has a "
+        "real attendance record"
+    )
+    assert row["attendance_rate_used"] == pytest.approx(
+        predict_data["attendance_rate_used"], abs=1e-9
+    ), "the two endpoints report different attendance for the same student"
+    assert predict_data["attendance_rate_is_default"] is False, (
+        "attendance_rate_is_default must be False when a real per-student rate "
+        "was used — the frontend shows a 'defaulted' notice based on this flag"
+    )

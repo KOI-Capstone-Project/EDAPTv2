@@ -175,6 +175,79 @@ def _subject_average_attendance_rate(subject: str) -> Optional[float]:
         return None
     return float(subj_rows["ATTENDANCE_RATE"].mean())
 
+
+def _student_full_attendance_rate(student_id: str, subject: str, study_period: str) -> Optional[float]:
+    """This enrolment's real, full-term ATTENDANCE_RATE from _ATTENDANCE — the
+    complete-record counterpart to _truncated_attendance_rate. Safe only for a
+    complete record (the same closed-snapshot premise build_early_features()
+    relies on). Returns None if this enrolment has no attendance row at all."""
+    if _ATTENDANCE is None or _ATTENDANCE.empty or "ATTENDANCE_RATE" not in _ATTENDANCE.columns:
+        return None
+    match = _ATTENDANCE[
+        (_ATTENDANCE["STUDENTID_MASKED"] == student_id)
+        & (_ATTENDANCE["SUBJECTCODE"] == subject)
+        & (_ATTENDANCE["STUDYPERIOD"] == study_period)
+    ]
+    if match.empty:
+        return None
+    return float(match["ATTENDANCE_RATE"].iloc[0])
+
+
+def _resolve_attendance_rate(
+    student_id:        Optional[str],
+    subject:           str,
+    study_period:      str,
+    coverage_fraction: Optional[float] = None,
+) -> tuple[Optional[float], bool]:
+    """THE single source of truth for "what attendance rate does this prediction use?"
+
+    Both /api/predict and /api/subjects/{subject}/roster resolve attendance
+    through this one function. They previously each did their own lookup, and
+    they drifted: the roster used a real student's own rate while /api/predict
+    fell back to the subject average for that same student, so the same person
+    got two different attendance values depending on which endpoint was called
+    (same class of bug as the Fail/Safe risk-band contradiction). Keep this the
+    only place that makes the decision.
+
+    coverage_fraction distinguishes the two legitimate tiers, and it is NOT
+    optional-by-taste — passing None for a genuinely mid-term prediction would
+    feed it that student's full/final attendance, i.e. end-of-term leakage:
+      - None  -> complete record: this enrolment's real full-term rate.
+      - float -> mid-term: rate truncated to the same coverage fraction the
+                 student's marks have reached (see _truncated_attendance_rate).
+
+    Returns (rate, is_subject_average_default). The subject average is a genuine
+    last resort, used only when this enrolment has NO attendance record at all —
+    never as a substitute for a lookup that could have succeeded. On the current
+    dataset 0 of 78,886 enrolments miss, so this should not fire for a real
+    student; it exists for future ingested files that may not match as cleanly.
+    A caller that already has an explicit rate (a What-If scenario specifying
+    one) must not call this at all — that value wins outright.
+    """
+    rate = None
+    if student_id is not None:
+        if coverage_fraction is None:
+            rate = _student_full_attendance_rate(str(student_id), subject, study_period)
+        else:
+            rate = _truncated_attendance_rate(str(student_id), subject, study_period, coverage_fraction)
+    if rate is not None:
+        return rate, False
+    return _subject_average_attendance_rate(subject), True
+
+
+def _period_total_weight(subject: str, study_period: str) -> float:
+    """Total assessment weighting defined for a subject+period, de-duplicated by
+    assessment type. Shared by the roster and /api/predict so both derive the
+    same coverage fraction (and therefore the same mid-term attendance
+    truncation) for the same enrolment."""
+    if _DATA is None or _DATA.empty:
+        return 0.0
+    df = _DATA[(_DATA["SUBJECTCODE"] == subject) & (_DATA["STUDYPERIOD"] == study_period)]
+    df = df.dropna(subset=["MARKPERCENT"])
+    if df.empty:
+        return 0.0
+    return float(df.drop_duplicates(subset=["ASSESSMENTTYPECODE"])["WEIGHTING"].sum())
+
 # ── Gemini ────────────────────────────────────────────────────────────────────
 
 class ResourceExhausted(Exception):
@@ -2213,16 +2286,6 @@ async def predict_outcome(
 
     assessments_used_dicts = [a.model_dump() for a in req.assessments_used]
 
-    # attendance_rate: if the caller (What-If simulator, or an older client)
-    # didn't supply one, default to this subject's real average
-    # ATTENDANCE_RATE rather than silently using 0 or requiring every
-    # hypothetical scenario to specify it. attendance_rate_is_default in the
-    # response lets the frontend show this was a default, not user input.
-    attendance_rate_is_default = req.attendance_rate is None
-    attendance_rate = req.attendance_rate
-    if attendance_rate_is_default:
-        attendance_rate = _subject_average_attendance_rate(req.subject)
-
     # Coverage tier decides which model serves this request — never trust
     # req.total_weight_recorded for this decision, only the raw items actually
     # submitted, for the same reason partial_weighted_score is never trusted
@@ -2246,6 +2309,29 @@ async def predict_outcome(
                 f"assessments have been marked."
             ),
         }
+
+    # attendance_rate: an explicitly-supplied value (What-If specifying one)
+    # always wins. Otherwise resolve it through _resolve_attendance_rate — the
+    # SAME function the roster uses — so a real, identified student gets their
+    # own real attendance rate here, not the subject average. This endpoint
+    # used to ignore req.student_id entirely and go straight to the subject
+    # average, which meant the detail view and the roster reported different
+    # attendance for the same person; see _resolve_attendance_rate's docstring.
+    # The tier matters: a mid-term prediction must be truncated to this
+    # student's current coverage, never scored against their final attendance.
+    if req.attendance_rate is not None:
+        attendance_rate, attendance_rate_is_default = req.attendance_rate, False
+    else:
+        if coverage_tier == "complete":
+            coverage_fraction = None
+        else:
+            total_weight = _period_total_weight(req.subject, req.study_period)
+            coverage_fraction = (
+                cumulative_weighting_recorded / total_weight if total_weight else 0.0
+            )
+        attendance_rate, attendance_rate_is_default = _resolve_attendance_rate(
+            req.student_id, req.subject, req.study_period, coverage_fraction
+        )
 
     if coverage_tier == "complete":
         # ── UNCHANGED — existing top-2, best_model.pkl path. Do not touch. ──
@@ -2873,9 +2959,10 @@ async def subject_roster(
         raise HTTPException(404, f"No data for subject {subject} in period {study_period}.")
     df_period = df_period.dropna(subset=["MARKPERCENT"])
 
-    period_total_weight = (
-        df_period.drop_duplicates(subset=["ASSESSMENTTYPECODE"])["WEIGHTING"].sum()
-    )
+    # Shared with /api/predict so both endpoints derive the same coverage
+    # fraction — and therefore the same mid-term attendance truncation — for
+    # the same enrolment.
+    period_total_weight = _period_total_weight(subject, study_period)
     trimester_num = float(study_period)
 
     roster = []
@@ -2937,21 +3024,14 @@ async def subject_roster(
                 a2_weight = 0.0
             a2_contrib = a2_mark * a2_weight / 100
 
-            # This student's real, full attendance rate — safe for a
-            # complete record (same closed-snapshot premise
-            # build_early_features() relies on). Falls back to the subject
-            # average only if this enrolment has no attendance row.
-            attendance_rate = None
-            if _ATTENDANCE is not None and not _ATTENDANCE.empty and "ATTENDANCE_RATE" in _ATTENDANCE.columns:
-                match = _ATTENDANCE[
-                    (_ATTENDANCE["STUDENTID_MASKED"] == student_id)
-                    & (_ATTENDANCE["SUBJECTCODE"] == subject)
-                    & (_ATTENDANCE["STUDYPERIOD"] == study_period)
-                ]
-                if not match.empty:
-                    attendance_rate = float(match["ATTENDANCE_RATE"].iloc[0])
-            if attendance_rate is None:
-                attendance_rate = _subject_average_attendance_rate(subject)
+            # This student's real, full attendance rate — safe for a complete
+            # record (same closed-snapshot premise build_early_features()
+            # relies on). Resolved through the same shared function
+            # /api/predict uses, so the two endpoints cannot disagree about
+            # the same student again.
+            attendance_rate, _ = _resolve_attendance_rate(
+                str(student_id), subject, study_period
+            )
 
             result = ml_predict(
                 subject=                 subject,
@@ -2978,11 +3058,9 @@ async def subject_roster(
             # which would leak end-of-term information into a mid-term
             # estimate (see _truncated_attendance_rate's docstring).
             coverage_fraction = cumulative_weighting / period_total_weight if period_total_weight else 0.0
-            attendance_rate = _truncated_attendance_rate(
+            attendance_rate, _ = _resolve_attendance_rate(
                 str(student_id), subject, study_period, coverage_fraction
             )
-            if attendance_rate is None:
-                attendance_rate = _subject_average_attendance_rate(subject)
 
             result = ml_predict_partial(
                 subject=          subject,
@@ -3002,6 +3080,11 @@ async def subject_roster(
             "prediction":                    result.get("prediction"),
             "risk_band":                     result.get("risk_band"),
             "estimate_type":                 estimate_type,
+            # Additive — surfaces the attendance rate this row was actually
+            # scored with, so the roster and /api/predict can be checked
+            # against each other for the same student (see
+            # test_predict_and_roster_agree_on_a_real_students_attendance).
+            "attendance_rate_used":          result.get("attendance_rate_used"),
         }
         roster.append(row)
 

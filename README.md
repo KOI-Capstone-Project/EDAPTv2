@@ -460,7 +460,7 @@ docker exec edaptv2_backend python3 -m app.ml.check_bias_persistence
 docker exec edaptv2_backend pytest tests/ -v
 ```
 
-**23 tests, all passing** as of this README (regenerated via `pytest --collect-only`, not hand-typed — `test_smoke.py`'s 15 plus `test_ingestion_e2e.py`'s 8) — covering health/auth, the three coverage-tier prediction paths, server-side recomputation of partial scores (regression test for the train/serve consistency bug), SHAP explanation consistency for both models, the Fail/Safe risk-band contradiction fix (both an HTTP-level reproduction of the reported bug and a pure unit-level invariant sweep across five threshold values), the two-phase ingestion flow's Postgres-backed pending-row handoff (including a real cross-process lock-contention test and a TTL-expiry test against a genuinely backdated row), and column classification.
+**24 tests, all passing** as of this README (regenerated via `pytest --collect-only`, not hand-typed — `test_smoke.py`'s 16 plus `test_ingestion_e2e.py`'s 8, on a container built `--no-cache` from `requirements.txt`) — covering health/auth, the three coverage-tier prediction paths, server-side recomputation of partial scores (regression test for the train/serve consistency bug), SHAP explanation consistency for both models, the Fail/Safe risk-band contradiction fix (both an HTTP-level reproduction of the reported bug and a pure unit-level invariant sweep across five threshold values), the roster's server-side feature-assembly path for both coverage tiers, cross-endpoint agreement on a real student's attendance rate, the two-phase ingestion flow's Postgres-backed pending-row handoff (including a real cross-process lock-contention test and a TTL-expiry test against a genuinely backdated row), and column classification.
 
 ---
 
@@ -553,6 +553,8 @@ A complete prediction outage ran undetected across several rounds of "21/21 pass
 
 **Going forward: any endpoint that assembles model features server-side needs a test that calls it as a real client and asserts on the prediction value, not just the status code.** HTTP 200 with a null payload is exactly what this suite was blind to.
 
+**A second gap, found later in the same area: two endpoints can each be individually correct and still disagree with each other.** Once both roster tiers returned real predictions, `/api/predict` and the roster were *still* resolving attendance differently for the same real student — the roster used that student's own rate (`0.6923`), while `/api/predict` ignored `req.student_id` entirely and fell back to the subject average (`0.6220`). Same person, two numbers, depending which screen you opened; the same shape as the Fail/Safe risk-band contradiction. Every per-endpoint test passed throughout. Fixed at the shared source — both endpoints now resolve attendance through one function, `_resolve_attendance_rate()` — and covered by `test_predict_and_roster_agree_on_a_real_students_attendance`, which was proven by re-introducing the old behaviour (it failed, naming the exact student and both numbers, then passed once restored). **Where two endpoints answer the same question about the same entity, one of them agreeing with itself is not coverage — something has to assert they agree with each other.**
+
 ## Source-control note — a claimed fix that was never on disk
 
 The roster wiring above was reported as written in an earlier round, then found missing. Investigated against real history rather than assumed:
@@ -563,18 +565,51 @@ Checked for mechanisms that could discard uncommitted work: **no git hooks** (on
 
 **Mitigation, since no environment cause exists to fix:** commit at the end of each unit of work rather than batching many rounds into one commit, and verify a claimed change is actually present (`grep` the file, or `git show <commit>:<path>`) before reporting it as done — the check that finally caught this.
 
+## Container drift — the verification environment was not the project
+
+Every test result reported across an entire session ran on a container that could not have been reproduced from this repository. This is recorded with the same prominence as the two incidents above because it is more serious than either: it undermines the *evidence* for the other fixes, not just one endpoint.
+
+**What happened.** `shap` was hand-installed into a long-running dev container at some point and never existed in the image built from `requirements.txt`. The container kept running, so the package kept working, and the suite kept reporting green. A clean `git clone` + `docker compose up` would **not** have produced that environment.
+
+**How it was found.** Not by a test — by an unrelated fix. Correcting the `SECRET_KEY` required `docker compose up -d --force-recreate backend`, because `docker restart` does not reload `.env`. The force-recreate destroyed the container and rebuilt it from the actual image, and the suite immediately dropped to **10 failed, 13 passed** — every failure a `ModuleNotFoundError: No module named 'shap'`. The hand-installed state had been the only thing holding it up.
+
+**Real evidence.**
+
+| Fact | Value |
+|---|---|
+| Commit that added `shap==0.52.0` to `requirements.txt` | `5fd48d8`, **2026-07-24** |
+| `backend/requirements.txt` working-tree mtime | **2026-07-16** |
+| Creation timestamp of the image actually in use | **2026-07-08T14:04:23Z** |
+| `pip show shap` inside the recreated container | `Package(s) not found` |
+
+The image predated the commit that introduced the pin by **16 days**. It was never capable of containing `shap`.
+
+**The real implication, stated plainly.** Test results reported as passing in earlier rounds of that session were not necessarily reproducible from the actual repository contents. For an unknown portion of the session, the verification environment was not representative of the real project — so "the suite passes" was evidence about a hand-patched machine, not about this codebase. The subsequent clean-build run is the first result in that session that is known to describe the repository itself.
+
+**Fix.** `docker compose build backend` resolved it with **no source changes** — the pin in `requirements.txt` was already correct. The defect was entirely in the environment having diverged from its own source of truth. After the rebuild: `pip show shap` → `0.52.0`, and the full suite passes.
+
+**Going forward: periodically rebuild the dev image from `requirements.txt` (`docker compose build --no-cache backend`) rather than trusting a long-running container, and treat any `pip install` inside a running container as a change that must be written back to `requirements.txt` immediately.** A long-lived dev container silently accumulates unpinned state; the longer it runs, the less its green test suite means. Before reporting a result as verified, it is worth knowing whether the container it ran in could still be rebuilt from the repo.
+
 ## Documentation Practices
 
-This project has hit the same failure mode five times in one session: a hand-typed number or claim in documentation went stale after the underlying code or data changed, and stood uncorrected until something else forced a re-check.
+This project has hit closely-related failure modes six times in one session. They are not all the same failure, and the distinction matters — the later ones are worse than the earlier ones.
 
-1. A file-tree entry claimed `test_smoke.py` had "11 backend tests" — actually 21, across two files, by the time it was checked.
-2. `README.md` asserted `LecturerAIInsights.jsx` "exists... but is not imported or referenced anywhere in App.js" — the file had already been deleted (commit `5fd48d8`, before this session began), and its deletion was already documented in `CHANGELOG.md`. The claim was never true at any point during this session; it was written without checking the filesystem first.
-3. `model_card.md`/`README.md` cited the live model's fail-class recall (`0.8374`) as current performance without qualification, after a data refresh had already corrected 205 real students' labels and measurably changed what that number means — see the recall-gap finding above.
+**Category A — a claim that was true when written and went stale.** The underlying code or data changed and the documentation stood uncorrected until something forced a re-check. Instances 1 and 3 below.
 
+**Category B — a claim that was never true when it was made.** Not decay; the claim was written without checking. Instances 2 and 5 below.
+
+**Category C — verification performed against an environment that had silently diverged from its own source of truth.** The most serious mode, because the claim looks *independently verified* — a real command was really run and really passed — while the thing it was run against was not the project. Instance 6 below. Categories A and B corrupt a statement; category C corrupts the evidence used to check statements, including evidence for unrelated claims.
+
+1. A file-tree entry claimed `test_smoke.py` had "11 backend tests" — actually 21, across two files, by the time it was checked. *(A)*
+2. `README.md` asserted `LecturerAIInsights.jsx` "exists... but is not imported or referenced anywhere in App.js" — the file had already been deleted (commit `5fd48d8`, before this session began), and its deletion was already documented in `CHANGELOG.md`. The claim was never true at any point during this session; it was written without checking the filesystem first. *(B)*
+3. `model_card.md`/`README.md` cited the live model's fail-class recall (`0.8374`) as current performance without qualification, after a data refresh had already corrected 205 real students' labels and measurably changed what that number means — see the recall-gap finding above. *(A)*
 4. A prediction outage sat behind 21 green tests for several rounds while being reported as "verified live" — the suite exercised `/api/predict` but never the roster path (see [Testing Practices](#testing-practices--a-real-outage-the-suite-missed) above). "Tests pass" is only evidence for what the tests actually execute.
-5. A fix was reported as applied and was never on disk (see [Source-control note](#source-control-note--a-claimed-fix-that-was-never-on-disk) above) — reported-done is not the same as verified-present.
+5. A fix was reported as applied and was never on disk (see [Source-control note](#source-control-note--a-claimed-fix-that-was-never-on-disk) above) — reported-done is not the same as verified-present. *(B)*
+6. Every test result across a session was produced by a hand-patched container that no clean checkout could reproduce (see [Container drift](#container-drift--the-verification-environment-was-not-the-project) above). *(C)*
 
 **Going forward: any numeric claim in `README.md` or `model_card.md` (test counts, row counts, recall/precision/F1 figures, file-existence claims) should be regenerated from a live command at the moment the documentation is written or updated — `pytest --collect-only`, `git log`/`git cat-file -e`, a real script run against current data — never hand-typed or carried forward from a previous version of the document without re-verification.** A number that was true when written is not the same guarantee as a number that's true now; this project's own history in this section is the evidence for why that distinction matters.
+
+**And for category C specifically: regenerating a number from a live command is only as trustworthy as the environment the command ran in.** Where a claim rests on a container, the container should be one that was recently built from the repo — otherwise the freshly-generated number is a fact about a local machine, not about this project.
 
 ---
 
