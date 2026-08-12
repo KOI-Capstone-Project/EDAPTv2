@@ -4,7 +4,7 @@
 
 EDAPT v2 is a role-based academic analytics platform. It predicts whether a student will pass or fail a subject from their recorded assessment marks — both once a subject is complete and, separately, from genuinely mid-semester partial records — and surfaces those predictions, along with real per-feature explanations, through role-scoped dashboards, an assessment-record explorer, and a roster-first predictor tool.
 
-> **Note on repository state**: this README describes what is in the working tree right now, on branch `sangam_dev`. A substantial amount of what's documented below — the data-reliability fix, current ML pipeline, automated retraining infrastructure, outcome reconciliation, fairness auditing, SHAP explainability, and the frontend page merges — is **not yet committed or pushed to `main`**. If you're reading this from `main`, expect an older version of the system.
+> **Note on repository state**: this README describes what is in the working tree right now, on branch **`ml_model`** — committed and pushed to `origin/ml_model`. A substantial amount of what's documented below — the data-reliability fix, current ML pipeline, automated retraining infrastructure, outcome reconciliation, fairness auditing, SHAP explainability, and the frontend page merges — is **not yet merged to `main`** (`origin/main` is 10 commits behind `ml_model`). If you're reading this from `main`, expect an older version of the system. `sangam_dev` is an earlier development branch and is **not** where this work lives.
 
 ---
 
@@ -509,10 +509,11 @@ Full interactive docs: `http://localhost:8000/docs`
 
 | Branch | Purpose |
 |--------|---------|
-| `main` | Stable, reviewed code |
-| `sangam_dev` | Active development — **currently ahead of `main` by all of the work described in this README** |
+| `main` | Stable, reviewed code — `origin/main` is currently **10 commits behind** `ml_model` |
+| `ml_model` | Active development — **currently ahead of `main` by all of the work described in this README**, committed and pushed to `origin/ml_model` |
+| `sangam_dev` | Earlier development branch, superseded — 9 commits behind `ml_model` and 0 ahead (fully contained, not divergent). Not where current work lives |
 
-PRs are opened from `sangam_dev` → `main`.
+PRs are opened from `ml_model` → `main`.
 
 ---
 
@@ -535,7 +536,8 @@ Stated plainly rather than rounded up or omitted:
 - **`location_code`, `building`, and `room` (from `masked_attendance.csv.gz`) show real variation in pass rate — partially, not fully, explained by which subjects are taught where.** The raw, unconditional `building` pass-rate spread is 9.7pp (78.2%–87.9%), but checked directly against the obvious confound: 128 of 129 subjects are taught in 2+ buildings, so a subject-adjusted comparison (each enrolment's PASS residual against its own subject's mean, averaged per building) is possible and was run. Result: the spread shrinks to 5.19pp (46% shrinkage) — subject explains roughly half the raw effect, but a real, subject-independent signal remains. That remainder is concentrated almost entirely in one building (`DARBY`, −4.58pp even after adjustment) — the other five buildings cluster within ~1.2pp of each other post-adjustment, so this isn't a smooth "building quality" gradient, it's specific to DARBY.
 
 **DARBY was investigated directly — one candidate cause ruled out, one real-but-weak candidate found, one uncheckable, no full explanation found.** DARBY is 99.99% `location_code=NC` (essentially the sole in-person NC-campus building), so campus was the obvious next suspect — checked directly using `ONL`, the one building with a genuine NC/SC split: within `ONL` alone, NC vs SC residuals are virtually identical (−0.0078 vs −0.0075), and DARBY vs other NC-campus records (holding campus constant) still shows a real gap (−0.046 vs −0.010) — **campus is ruled out**, DARBY's effect isn't a campus effect wearing a building label. Class size was checked next: DARBY's average class size (13.6 students/session, the smallest of all 6 buildings) correlates with the subject-adjusted residual at r=0.11 across the whole dataset — real but weak (~1% of variance), directionally consistent with DARBY's gap but nowhere near sufficient to fully explain a −6.5pp session-group-level residual gap on its own. Time-of-day couldn't be checked at all — the data has no clock-time field, only `cls_session_no` (a within-activity sequence number, not a real time). **Honest conclusion: no full explanation found** — campus is ruled out, class size is a real partial contributor, and DARBY's remaining gap is unexplained by what's available in this dataset. A real, deliberate follow-up task if pursued further would need a data source this project doesn't have (actual class scheduling/time-of-day data), not a re-analysis of what's already here.
-- **This entire feature set is uncommitted** on `sangam_dev` relative to `main` — see the note at the top of this file.
+- **Deliberately left unverified: the other endpoints that assemble model features server-side.** Two real bugs this session lived in exactly that pattern — the roster returning `probability: null` for every student, and `/api/predict` disagreeing with the roster about the same student's attendance. Both were in code where *the server* builds the feature vector from stored data, rather than the client supplying it. **The same pattern is untested in `/api/subjects/{subject}/analytics`, the attendance analytics endpoints, and every dashboard endpoint beyond `/api/dashboard/summary`.** These are **not known to be broken** — no failure has been observed in any of them, and no claim is being made that one exists. They are named because they sit in the same blind spot that hid both confirmed bugs, which makes them the most likely place a similar issue would be found if one is there. **Checking them was a deliberate decision to stop, not an oversight** — the session's scope closed with the two known bugs fixed and the pattern documented, rather than expanding into an open-ended audit. Whoever picks this up next has a clear starting point: call each of those endpoints as a real client and assert on the values in the payload, not the status code. See [Testing Practices](#testing-practices--a-real-outage-the-suite-missed) for why HTTP 200 is not evidence here.
+- **This feature set is committed and pushed on `ml_model`, but not merged to `main`** — `origin/main` is 10 commits behind. See the note at the top of this file.
 
 ---
 
