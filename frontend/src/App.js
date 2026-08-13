@@ -14,6 +14,7 @@ import DataIngestion      from './pages/DataIngestion';
 import AuditLog           from './pages/AuditLog';
 import ExplorerView       from './pages/ExplorerView';
 import SubjectAnalytics   from './pages/SubjectAnalytics';
+import ModelHealth       from './pages/ModelHealth';
 import UserManagement     from './pages/UserManagement';
 import PredictorView      from './pages/PredictorView';
 import SettingsView       from './pages/SettingsView';
@@ -103,6 +104,9 @@ export default function App() {
       <Route path="/data-ingestion"     element={<AdminProtected><DataIngestion /></AdminProtected>} />
       <Route path="/audit-log"          element={<HoTOnlyProtected><AuditLog /></HoTOnlyProtected>} />
       <Route path="/subject-analytics"  element={<AdminProtected><SubjectAnalytics /></AdminProtected>} />
+      {/* Admin-only and read-only: exposes no promote/rollback control —
+          those stay CLI-only behind the compare_and_promote gate. */}
+      <Route path="/model-health"       element={<AdminProtected><ModelHealth /></AdminProtected>} />
       <Route path="/student-analytics"  element={<AdminProtected><ExplorerView isLecturer={false} /></AdminProtected>} />
       <Route path="/predictive-reports" element={<AdminProtected><PredictorView isAdmin={true} /></AdminProtected>} />
       <Route path="/users"              element={<HoTOnlyProtected><UserManagement /></HoTOnlyProtected>} />

@@ -66,6 +66,54 @@ def _print_metrics(label, m):
           f"Fail recall={m['recall']:.3f}  Fail f1={m['f1']:.3f}")
 
 
+def summarise(reconciled) -> dict:
+    """The same breakdowns main() prints, as data.
+
+    Extracted so the model-health endpoint reports exactly what this script
+    reports — one definition of "accuracy in practice", not two that can
+    drift. main() below prints from this same function.
+    """
+    def group(rows):
+        return _fail_metrics([(p.predicted_pass, p.actual_pass) for p in rows])
+
+    by_version = {
+        v: group([p for p in reconciled if p.model_version == v])
+        for v in sorted({p.model_version for p in reconciled})
+    }
+    by_estimate_type = {
+        "complete-record":   group([p for p in reconciled if p.estimate_type is None]),
+        "mid-term estimate": group([p for p in reconciled if p.estimate_type == "mid-term estimate"]),
+    }
+    by_reconciliation = {
+        "standard (attempt-1)":            group([p for p in reconciled if not p.reconciled_via_resit]),
+        "resit fallback (latest attempt)": group([p for p in reconciled if p.reconciled_via_resit]),
+    }
+    return {
+        "reconciled_count":   len(reconciled),
+        "overall":            group(reconciled),
+        "by_model_version":   by_version,
+        "by_estimate_type":   by_estimate_type,
+        "by_reconciliation":  by_reconciliation,
+        "note": (
+            "Measured on real reconciled outcomes (predictions.actual_pass), not "
+            "on the held-out training split. The two are different measurements "
+            "and are never conflated."
+        ),
+    }
+
+
+async def collect() -> dict:
+    """Open a session, load reconciled predictions, and summarise them."""
+    engine = create_async_engine(DB_URL, echo=False, pool_pre_ping=True)
+    Session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    async with Session() as db:
+        reconciled = (await db.execute(
+            select(Prediction).where(Prediction.actual_pass.is_not(None))
+        )).scalars().all()
+    await engine.dispose()
+    return summarise(reconciled)
+
+
 async def main() -> None:
     engine = create_async_engine(DB_URL, echo=False, pool_pre_ping=True)
     Session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)

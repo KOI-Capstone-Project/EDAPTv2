@@ -625,3 +625,303 @@ async def test_predict_and_roster_agree_on_a_real_students_attendance():
         "attendance_rate_is_default must be False when a real per-student rate "
         "was used — the frontend shows a 'defaulted' notice based on this flag"
     )
+
+
+# ── Interventions ───────────────────────────────────────────────────────────
+
+async def _create_user(client, token, email, subjects, role="Lecturer"):
+    await client.delete(f"/api/users/{email}", headers={"Authorization": f"Bearer {token}"})
+    return await client.post(
+        "/api/users",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"email": email, "password": "Probe@2025!", "name": "Probe User",
+              "role": role, "subjects": subjects},
+    )
+
+
+@pytest.mark.asyncio
+async def test_interventions_are_scoped_to_a_lecturers_own_subjects():
+    """A lecturer must not see interventions logged for subjects they don't teach.
+
+    Uses two throwaway lecturers with DISJOINT subject lists, so "can't see it"
+    is unambiguous rather than an accident of overlapping assignments. Scoping
+    is applied in the SQL query, so the other lecturer's rows are never loaded.
+    """
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        admin = await _login(client)
+        A = {"Authorization": f"Bearer {admin}"}
+
+        r1 = await _create_user(client, admin, "iv_lect1@probe.test", ["ICT104"])
+        r2 = await _create_user(client, admin, "iv_lect2@probe.test", ["ACC705"])
+        assert r1.status_code == 201, r1.text
+        assert r2.status_code == 201, r2.text
+
+        tok1 = (await client.post("/api/auth/login", json={
+            "email": "iv_lect1@probe.test", "password": "Probe@2025!"})).json()["access_token"]
+        tok2 = (await client.post("/api/auth/login", json={
+            "email": "iv_lect2@probe.test", "password": "Probe@2025!"})).json()["access_token"]
+        L1 = {"Authorization": f"Bearer {tok1}"}
+        L2 = {"Authorization": f"Bearer {tok2}"}
+
+        try:
+            created = await client.post("/api/interventions", headers=L1, json={
+                "student_id_masked": "Student0", "subject_code": "ICT104",
+                "study_period": "25.2", "action_type": "meeting scheduled",
+                "notes": "scoping probe"})
+            assert created.status_code == 201, created.text
+            iid = created.json()["id"]
+
+            # owner sees it
+            own = await client.get("/api/interventions", headers=L1)
+            assert iid in [i["id"] for i in own.json()["interventions"]]
+
+            # the other lecturer must NOT
+            other = await client.get("/api/interventions", headers=L2)
+            assert iid not in [i["id"] for i in other.json()["interventions"]], (
+                "a lecturer can see an intervention for a subject they are not assigned"
+            )
+
+            # ...and cannot reach it by asking for that subject explicitly
+            probe = await client.get("/api/interventions", headers=L2,
+                                     params={"subject_code": "ICT104"})
+            assert probe.status_code == 403
+
+            # admin sees everything
+            adm = await client.get("/api/interventions", headers=A)
+            assert iid in [i["id"] for i in adm.json()["interventions"]]
+
+            # writing to someone else's subject is refused
+            denied = await client.post("/api/interventions", headers=L2, json={
+                "student_id_masked": "Student0", "subject_code": "ICT104",
+                "study_period": "25.2", "action_type": "email sent"})
+            assert denied.status_code == 403
+
+            # only whitelisted action types
+            bad = await client.post("/api/interventions", headers=L1, json={
+                "student_id_masked": "Student0", "subject_code": "ICT104",
+                "study_period": "25.2", "action_type": "not a real action type"})
+            assert bad.status_code == 422
+        finally:
+            for e in ("iv_lect1@probe.test", "iv_lect2@probe.test"):
+                await client.delete(f"/api/users/{e}", headers=A)
+
+
+# ── Actionable ("what would help most") factor selection ────────────────────
+
+def test_actionable_factor_skips_larger_non_actionable_factors_on_real_shap():
+    """The ranking must skip bigger non-actionable factors, on REAL SHAP output.
+
+    Not the trivial case: this asserts that a harmful factor LARGER in
+    magnitude than the chosen one exists and was deliberately excluded. On the
+    current live model the biggest harmful factors for a typical student are
+    PARTIAL_WEIGHT_COVERAGE and SUBJECT_DIFFICULTY — neither of which a student
+    can act on — so a naive "largest negative SHAP value" implementation would
+    tell a lecturer to fix the subject's difficulty.
+    """
+    from app.ml.actionable import (top_actionable_factor, excluded_factor_summary,
+                                   is_actionable)
+    from app.ml import predictor
+
+    result = predictor.predict(
+        subject="ACC705", study_period="23.2", trimester_num=23.2,
+        assess1_mark=46.0, assess1_weight=50.0, assess1_contribution=23.0,
+        assess2_mark=76.0, assess2_weight=30.0, assess2_contribution=22.8,
+        partial_weighted_score=45.8, partial_weight_coverage=0.8,
+        num_assessments=3, total_weight_recorded=100.0, weight_complete=True,
+        assessments_used=[
+            {"type": "FE", "mark_percent": 46.0, "weighting": 50.0},
+            {"type": "DA", "mark_percent": 76.0, "weighting": 30.0},
+            {"type": "ME", "mark_percent": 20.0, "weighting": 20.0},
+        ],
+        attendance_rate=0.6923,
+    )
+    shap = result["shap_explanation"]
+    chosen = top_actionable_factor(shap)
+    excluded = excluded_factor_summary(shap)
+
+    assert chosen is not None, "no actionable factor found on a real prediction"
+    assert is_actionable(chosen["feature"])
+    assert chosen["contribution"] < 0, "recommended acting on a factor that is helping"
+
+    # The point of the test: something worse was skipped on purpose.
+    bigger = [e for e in excluded if e["contribution"] < chosen["contribution"]]
+    assert bigger, (
+        "this case no longer exercises the exclusion — no non-actionable factor "
+        "outranks the chosen one, so the test would pass even with the filter removed"
+    )
+
+    # And the naive implementation would have picked a different, wrong answer.
+    worst_overall = min(shap["all_factors"], key=lambda f: f["contribution"])
+    assert not is_actionable(worst_overall["feature"])
+    assert worst_overall["feature"] != chosen["feature"]
+
+
+def test_actionable_factor_never_recommends_a_demographic_feature():
+    """Forward-compatible guard.
+
+    No demographic feature is in either model's feature set today — verified
+    against predictor._PACKAGE["features"] below — so this case cannot be found
+    in real output and is constructed deliberately. It fixes the behaviour for
+    the day someone adds one: a demographic feature must never be surfaced as
+    something a student should improve, no matter how large its SHAP value.
+    """
+    from app.ml.actionable import top_actionable_factor, is_actionable
+    from app.ml import predictor
+
+    for feats in (predictor._PACKAGE["features"], predictor._SIM_PACKAGE["features"]):
+        assert not [f for f in feats if any(
+            s in f.upper() for s in ("GENDER", "AGEGROUP", "COUNTRY", "ETHNIC"))], (
+            "a demographic feature entered the model's feature set — the "
+            "fairness implications need a deliberate decision, not a silent pass"
+        )
+
+    synthetic = {"all_factors": [
+        # deliberately the largest magnitude in the list, and negative
+        {"feature": "GENDERCODE",      "value": 1.0,  "contribution": -40.0, "direction": "Fail"},
+        {"feature": "AGEGROUP",        "value": 2.0,  "contribution": -30.0, "direction": "Fail"},
+        {"feature": "COUNTRY_MASKED",  "value": 7.0,  "contribution": -25.0, "direction": "Fail"},
+        {"feature": "SUBJECT_DIFFICULTY", "value": 0.4, "contribution": -20.0, "direction": "Fail"},
+        {"feature": "ATTENDANCE_RATE", "value": 0.55, "contribution":  -2.0, "direction": "Fail"},
+    ]}
+    chosen = top_actionable_factor(synthetic)
+
+    assert chosen is not None
+    assert chosen["feature"] == "ATTENDANCE_RATE", (
+        f"expected the only actionable factor, got {chosen['feature']}"
+    )
+    for demographic in ("GENDERCODE", "AGEGROUP", "COUNTRY_MASKED"):
+        assert not is_actionable(demographic)
+    # renamed variants must still be caught
+    for variant in ("STUDENT_GENDER", "AGE_GROUP_BUCKET", "COUNTRY_OF_ORIGIN"):
+        assert not is_actionable(variant)
+
+
+def test_actionable_factor_returns_none_when_nothing_actionable_is_harmful():
+    """A student whose actionable factors are all helping gets no recommendation
+    rather than a manufactured one."""
+    from app.ml.actionable import top_actionable_factor
+    assert top_actionable_factor({"all_factors": [
+        {"feature": "ATTENDANCE_RATE", "value": 0.99, "contribution": +5.0, "direction": "Pass"},
+        {"feature": "ASSESS1_MARK",    "value": 90.0, "contribution": +3.0, "direction": "Pass"},
+        {"feature": "SUBJECT_DIFFICULTY", "value": 0.4, "contribution": -9.0, "direction": "Fail"},
+    ]}) is None
+    assert top_actionable_factor(None) is None
+
+
+# ── Model health dashboard (admin-only, read-only) ──────────────────────────
+
+@pytest.mark.asyncio
+async def test_model_health_requires_admin_and_is_read_only():
+    """A Lecturer must not reach the model-health endpoint, and the endpoint
+    must expose no way to change which model is live.
+
+    Promotion stays a deliberate CLI action behind compare_and_promote's gate —
+    a web button would route around the safeguard this project added after a
+    model went live ungated with no recoverable backup.
+    """
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        admin = await _login(client)
+        A = {"Authorization": f"Bearer {admin}"}
+
+        r = await _create_user(client, admin, "mh_lect@probe.test", ["ICT104"])
+        assert r.status_code == 201, r.text
+        lect = (await client.post("/api/auth/login", json={
+            "email": "mh_lect@probe.test", "password": "Probe@2025!"})).json()["access_token"]
+
+        try:
+            denied = await client.get("/api/admin/model-health",
+                                      headers={"Authorization": f"Bearer {lect}"})
+            assert denied.status_code == 403, (
+                f"a Lecturer reached the model-health endpoint (got {denied.status_code})"
+            )
+
+            allowed = await client.get("/api/admin/model-health", headers=A)
+            assert allowed.status_code == 200
+            body = allowed.json()
+            assert set(body) >= {"live_models", "accuracy", "fairness", "interventions"}
+            assert "promotion_policy" in body["live_models"]
+        finally:
+            await client.delete("/api/users/mh_lect@probe.test", headers=A)
+
+    # Read-only: no mutating route may exist under the model-health path.
+    mutating = [
+        (r.path, m) for r in app.routes
+        if getattr(r, "path", "").startswith("/api/admin/model-health")
+        for m in (getattr(r, "methods", set()) or set())
+        if m in {"POST", "PUT", "PATCH", "DELETE"}
+    ]
+    assert not mutating, f"model-health exposes mutating routes: {mutating}"
+
+
+@pytest.mark.asyncio
+async def test_model_health_matches_a_fresh_direct_run_of_the_source_scripts():
+    """The dashboard must report what the CLI scripts report — not a cached or
+    separately-derived copy that can drift from them."""
+    from app.ml.check_bias_persistence import collect as collect_bias
+    from app.ml.model_registry import load_registry, get_live_entry
+    from app.ml.sim_model_registry import load_registry as load_sim, get_live_entry as live_sim
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        token = await _login(client)
+        body = (await client.get("/api/admin/model-health",
+                                 headers={"Authorization": f"Bearer {token}"})).json()
+
+    # Live model identity, straight from the registries right now.
+    assert body["live_models"]["complete_record"]["version"] == get_live_entry(load_registry())["version"]
+    assert body["live_models"]["mid_term"]["version"] == live_sim(load_sim())["version"]
+
+    # Fairness: identical to a fresh direct call, including the dedupe rule
+    # that stops a re-run on unchanged data counting as independent evidence.
+    fresh_bias = collect_bias()
+    assert body["fairness"]["independent_retrains"] == fresh_bias["independent_retrains"]
+    assert body["fairness"]["enough_for_a_trend"] == fresh_bias["enough_for_a_trend"]
+    assert (
+        [(g["category"], g["group"], g["times_flagged"]) for g in body["fairness"]["flagged_groups"]]
+        == [(g["category"], g["group"], g["times_flagged"]) for g in fresh_bias["flagged_groups"]]
+    )
+
+    # A single observation must never be presented as a trend.
+    if body["fairness"]["independent_retrains"] < 2:
+        assert body["fairness"]["enough_for_a_trend"] is False
+
+    # Accuracy is measured on reconciled outcomes, and n must agree with the
+    # per-group breakdown rather than being a separately-carried number.
+    acc = body["accuracy"]
+    if acc["overall"]:
+        assert acc["overall"]["n"] == acc["reconciled_count"]
+        by_type = [v["n"] for v in acc["by_estimate_type"].values() if v]
+        assert sum(by_type) == acc["reconciled_count"]
+
+
+def test_intervention_outcome_report_refuses_to_compare_on_thin_data():
+    """The intervention/outcome comparison must decline to report a percentage
+    when either group is too small, rather than printing a meaningless number.
+
+    This is the current real state of the data (there are almost no logged
+    interventions yet), and it is the behaviour that matters most: the failure
+    mode for this comparison is overclaiming, not under-reporting.
+    """
+    from app.ml.intervention_outcome_report import render, MIN_GROUP_FOR_A_RATE
+
+    thin = {
+        "high_risk_reconciled": 29, "total_interventions_logged": 2,
+        "with_intervention":    {"n": 1,  "pass_rate": 1.0},
+        "without_intervention": {"n": 28, "pass_rate": 0.07},
+        "sufficient_data": False, "min_group_for_a_rate": MIN_GROUP_FOR_A_RATE,
+    }
+    text = render(thin)
+    assert "NOT ENOUGH DATA" in text
+    assert "percentage points" not in text, (
+        "a difference was reported despite one group having a single student"
+    )
+
+    ample = {
+        "high_risk_reconciled": 400, "total_interventions_logged": 120,
+        "with_intervention":    {"n": 100, "pass_rate": 0.60},
+        "without_intervention": {"n": 300, "pass_rate": 0.40},
+        "sufficient_data": True, "min_group_for_a_rate": MIN_GROUP_FOR_A_RATE,
+    }
+    rich = render(ample)
+    assert "+20.0 percentage points" in rich
+    # ...but never as proof.
+    assert "NOT EVIDENCE THAT INTERVENTIONS WORK" in rich

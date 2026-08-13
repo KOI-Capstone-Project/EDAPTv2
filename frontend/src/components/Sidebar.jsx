@@ -85,6 +85,7 @@ const LECTURER_NAV = [
 const HOS_NAV = [
   { label: 'Dashboard',          icon: <I.Dashboard />,  to: '/dashboard/admin'    },
   { label: 'Subject Analytics',  icon: <I.Explorer />,   to: '/subject-analytics'  },
+  { label: 'Model Health',       icon: <I.Explorer />,   to: '/model-health'       },
   { label: 'Student Analytics',  icon: <I.Explorer />,   to: '/student-analytics'  },
   { label: 'Predictive Reports', icon: <I.Predictor />,  to: '/predictive-reports' },
   { label: 'Data Ingestion',     icon: <I.Ingestion />,  to: '/data-ingestion'     },
@@ -94,6 +95,7 @@ const HOS_NAV = [
 const ADMIN_NAV_BASE = [
   { label: 'Dashboard',          icon: <I.Dashboard />,  to: '/dashboard/admin'       },
   { label: 'Subject Analytics',  icon: <I.Explorer />,   to: '/subject-analytics'     },
+  { label: 'Model Health',       icon: <I.Explorer />,   to: '/model-health'          },
   { label: 'Student Analytics',  icon: <I.Explorer />,   to: '/student-analytics'     },
   { label: 'Predictive Reports', icon: <I.Predictor />,  to: '/predictive-reports'    },
   { label: 'Data Ingestion',     icon: <I.Ingestion />,  to: '/data-ingestion'        },

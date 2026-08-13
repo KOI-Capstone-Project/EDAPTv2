@@ -101,6 +101,68 @@ def _print_trend(distinct_points: list) -> None:
         print("\n  No group was flagged in any of the independent retrains checked.")
 
 
+def collect() -> dict:
+    """The same analysis main() prints, returned as data.
+
+    Added so the model-health endpoint can surface these findings without
+    reimplementing the dedupe-on-period-pair rule — the whole point of which
+    is that a re-run on unchanged data is NOT independent evidence. A second
+    implementation would be free to quietly forget that and inflate the
+    apparent number of observations, so there is deliberately only one.
+    """
+    registry = load_registry()
+    versions = registry.get("versions", [])
+    audited = [v for v in versions if "bias_audit" in v]
+
+    seen_periods: dict = {}
+    distinct_points: list = []
+    for v in audited:
+        key = (v.get("trained_on"), v.get("validated_on"))
+        if key not in seen_periods:
+            seen_periods[key] = v
+            distinct_points.append(v)
+
+    # group -> how many INDEPENDENT retrains flagged it
+    flag_counts: dict = {}
+    for v in distinct_points:
+        for category, groups in _flagged_groups(v).items():
+            for name, reason in groups.items():
+                rec = flag_counts.setdefault(
+                    f"{category}:{name}",
+                    {"category": category, "group": name, "times_flagged": 0,
+                     "reason": reason, "versions": []},
+                )
+                rec["times_flagged"] += 1
+                rec["versions"].append(v["version"])
+
+    return {
+        "registry_versions_total":   len(versions),
+        "versions_with_bias_audit":  len(audited),
+        "independent_retrains":      len(distinct_points),
+        "distinct_period_pairs": [
+            {"version": v["version"], "trained_on": v.get("trained_on"),
+             "validated_on": v.get("validated_on")}
+            for v in distinct_points
+        ],
+        "flagged_groups": sorted(
+            flag_counts.values(), key=lambda r: (-r["times_flagged"], r["group"])
+        ),
+        # The honest headline. Consistency needs >=2 independent retrains; with
+        # fewer, anything flagged is a single observation, not a trend.
+        "enough_for_a_trend": len(distinct_points) >= 2,
+        "interpretation": (
+            "Each flagged group below is a single observation — not a confirmed "
+            "trend. Confirming one requires the same group recurring across "
+            "multiple independent retrains (distinct trained_on/validated_on "
+            "period pairs), and only "
+            f"{len(distinct_points)} such retrain(s) exist so far."
+            if len(distinct_points) < 2 else
+            f"{len(distinct_points)} independent retrains available; a group "
+            "flagged in more than one of them is a real recurring signal."
+        ),
+    }
+
+
 def main() -> None:
     registry = load_registry()
     versions = registry.get("versions", [])

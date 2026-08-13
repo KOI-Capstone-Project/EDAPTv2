@@ -28,6 +28,7 @@ from sqlalchemy import (
     Column,
     DateTime,
     Float,
+    ForeignKey,
     Index,
     Integer,
     JSON,
@@ -194,6 +195,76 @@ class Prediction(AuditMixin, Base):
         ),
         Index("ix_prediction_subject_period_model", "subject_code", "study_period", "model_version"),
     )
+
+
+class Intervention(Base):
+    """A real action a lecturer or admin took for a student — an email sent, a
+    meeting held, a referral to support services.
+
+    Deliberately a separate table from `predictions` rather than columns on it.
+    A prediction is a model output, immutable once written and upserted on
+    re-prediction (see Prediction's unique constraint); an intervention is a
+    human act that happened once and must never be overwritten by a later
+    re-prediction of the same student. One student/subject/period can also
+    accumulate several interventions over a term, which columns on a
+    one-row-per-prediction table could not represent.
+
+    Identifiers follow the same convention as Prediction: raw CSV-native
+    STUDENTID_MASKED/SUBJECTCODE/STUDYPERIOD strings, not FKs into the unused
+    Student/Subject tables. `prediction_id` IS a real FK, because predictions
+    is a real, populated table — but it is nullable, since a lecturer may log
+    an action without a specific prediction on screen.
+
+    ON DELETE SET NULL rather than CASCADE: if a prediction row were ever
+    deleted, the record that a human contacted a student must survive it. The
+    intervention is the more important fact of the two.
+    """
+
+    __tablename__ = "interventions"
+
+    id: int = Column(BigInteger, primary_key=True, autoincrement=True)
+
+    student_id_masked: str = Column(String(50), nullable=False, index=True)
+    subject_code:      str = Column(String(20), nullable=False, index=True)
+    study_period:      str = Column(String(10), nullable=False, index=True)
+
+    prediction_id: int | None = Column(
+        BigInteger,
+        ForeignKey("predictions.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+        comment="The prediction this action responded to, when logged from one",
+    )
+
+    # Free text, but the UI offers a fixed set (see INTERVENTION_ACTION_TYPES
+    # in main.py). Not a DB enum: adding a new action type should not require a
+    # schema migration in a project with no migration framework — the app-level
+    # whitelist is the real gate, and it is validated on write.
+    action_type: str = Column(
+        String(50),
+        nullable=False,
+        index=True,
+        comment="e.g. email sent | meeting scheduled | referred to support services | other",
+    )
+
+    notes: str | None = Column(Text, nullable=True)
+
+    created_by: str = Column(
+        String(255),
+        nullable=False,
+        index=True,
+        comment="Email/uid of the lecturer or admin who logged this action",
+    )
+
+    created_at = Column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False, index=True
+    )
+
+    __table_args__ = (
+        Index("ix_intervention_student_subject_period",
+              "student_id_masked", "subject_code", "study_period"),
+    )
+
 
 class User(AuditMixin, Base):
     """

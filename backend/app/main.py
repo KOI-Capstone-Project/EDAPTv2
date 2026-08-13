@@ -39,7 +39,10 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
-from app.db.models import AuditLog, Base, PendingIngest, Prediction, User as UserModel
+from app.db.models import AuditLog, Base, Intervention, PendingIngest, Prediction, User as UserModel
+# Light module — pure functions over an already-computed SHAP dict, no model
+# loading, so it is safe to import at module scope unlike app.ml.predictor.
+from app.ml.actionable import excluded_factor_summary, top_actionable_factor
 import contextlib
 
 load_dotenv()
@@ -2445,6 +2448,14 @@ async def predict_outcome(
 
     result["attendance_rate_is_default"] = attendance_rate_is_default and result.get("attendance_rate_used") is not None
 
+    # "What would help most" — derived from the SHAP explanation already
+    # computed above, never a second model call. Only meaningful for a real
+    # identified student: for a hypothetical What-If scenario there is no one
+    # to advise, so it is omitted rather than invented.
+    if req.student_id:
+        result["top_actionable_factor"] = top_actionable_factor(result.get("shap_explanation"))
+        result["excluded_factors"] = excluded_factor_summary(result.get("shap_explanation"))
+
     if reliability == "mostly_clean":
         result["reliability_warning"] = (
             "This subject's data was only partially verified during cleaning — "
@@ -3150,6 +3161,12 @@ async def subject_roster(
             "prediction":                    result.get("prediction"),
             "risk_band":                     result.get("risk_band"),
             "estimate_type":                 estimate_type,
+            # Derived from this row's own real SHAP explanation. The full
+            # explanation is intentionally NOT included in a roster row (it is
+            # ~11 factors per student, so a 39-student roster would carry
+            # hundreds of objects the table never renders) — only the single
+            # actionable conclusion, which is what the roster can act on.
+            "top_actionable_factor":         top_actionable_factor(result.get("shap_explanation")),
             # Additive — surfaces the attendance rate this row was actually
             # scored with, so the roster and /api/predict can be checked
             # against each other for the same student (see
@@ -3371,3 +3388,284 @@ async def delete_user(
     await _append_audit_db(db, user_uid=user["sub"], action_type="User Modified",
                            status="Success", detail=f"Account deleted: {email}")
     return {"message": "Account deleted"}
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Interventions — real actions a human took for a student
+# ═══════════════════════════════════════════════════════════════════════════
+# A prediction says who is at risk; this records what anyone actually DID
+# about it. Kept deliberately separate from the prediction itself — see the
+# Intervention model's docstring for why it is its own table.
+
+# App-level whitelist rather than a DB enum, so adding a type is a one-line
+# change in a project with no migration framework. "other" is included so a
+# real action that doesn't fit the list is still recorded rather than lost —
+# the free-text note carries the detail.
+INTERVENTION_ACTION_TYPES = [
+    "email sent",
+    "meeting scheduled",
+    "referred to support services",
+    "other",
+]
+
+
+class InterventionCreate(BaseModel):
+    student_id_masked: str = Field(..., min_length=1, max_length=50)
+    subject_code:      str = Field(..., min_length=1, max_length=20)
+    study_period:      str = Field(..., min_length=1, max_length=10)
+    action_type:       str = Field(..., min_length=1, max_length=50)
+    notes:   Optional[str] = Field(None, max_length=2000)
+    prediction_id: Optional[int] = None
+
+
+def _assert_subject_visible(subject: str, user: dict) -> None:
+    """SQL-side equivalent of _role_filter (which only works on DataFrames).
+
+    A Lecturer may only touch interventions for subjects they are assigned;
+    Head of Technology / Head of School see everything, matching how every
+    other lecturer-facing endpoint in this file scopes.
+    """
+    if user.get("role") == "Lecturer" and subject not in (user.get("subjects") or []):
+        raise HTTPException(403, "You are not assigned to that subject.")
+
+
+@app.post("/api/interventions", status_code=201, tags=["Interventions"])
+async def create_intervention(
+    req:  InterventionCreate,
+    user: dict         = Depends(get_current_user),
+    db:   AsyncSession = Depends(get_db),
+):
+    """Log a real action taken for a student."""
+    if req.action_type not in INTERVENTION_ACTION_TYPES:
+        raise HTTPException(
+            422,
+            f"action_type must be one of: {', '.join(INTERVENTION_ACTION_TYPES)}",
+        )
+    _assert_subject_visible(req.subject_code, user)
+
+    # Validate the FK rather than letting the database raise: a bad
+    # prediction_id should be a clear 422, not a 500 from an integrity error.
+    if req.prediction_id is not None:
+        exists = await db.execute(
+            select(Prediction.id).where(Prediction.id == req.prediction_id)
+        )
+        if exists.scalar_one_or_none() is None:
+            raise HTTPException(422, f"No prediction with id {req.prediction_id}.")
+
+    row = Intervention(
+        student_id_masked = req.student_id_masked,
+        subject_code      = req.subject_code,
+        study_period      = req.study_period,
+        action_type       = req.action_type,
+        notes             = req.notes,
+        prediction_id     = req.prediction_id,
+        created_by        = user["sub"],
+    )
+    db.add(row)
+    await db.flush()          # populate row.id before the session closes
+    new_id = row.id
+
+    await _append_audit_db(
+        db, user_uid=user["sub"], action_type="Intervention Logged", status="Success",
+        detail=f"{req.action_type} for {req.student_id_masked} in {req.subject_code} ({req.study_period})",
+    )
+    return {
+        "id":                new_id,
+        "student_id_masked": row.student_id_masked,
+        "subject_code":      row.subject_code,
+        "study_period":      row.study_period,
+        "action_type":       row.action_type,
+        "notes":             row.notes,
+        "prediction_id":     row.prediction_id,
+        "created_by":        row.created_by,
+    }
+
+
+@app.get("/api/interventions", tags=["Interventions"])
+async def list_interventions(
+    student_id_masked: Optional[str] = Query(None, max_length=50),
+    subject_code:      Optional[str] = Query(None, max_length=20),
+    study_period:      Optional[str] = Query(None, max_length=10),
+    limit:             int           = Query(200, ge=1, le=1000),
+    user:              dict          = Depends(get_current_user),
+    db:                AsyncSession  = Depends(get_db),
+):
+    """List logged interventions, newest first.
+
+    Scoping is applied to the QUERY, not to the response after the fact, so a
+    lecturer's rows for other subjects are never loaded at all. A Lecturer with
+    no assigned subjects sees nothing rather than everything — the failure mode
+    here should be empty, not open.
+    """
+    query = select(Intervention)
+
+    if user.get("role") == "Lecturer":
+        allowed = user.get("subjects") or []
+        if not allowed:
+            return {"interventions": [], "count": 0}
+        query = query.where(Intervention.subject_code.in_(allowed))
+
+    if student_id_masked:
+        query = query.where(Intervention.student_id_masked == student_id_masked)
+    if subject_code:
+        _assert_subject_visible(subject_code, user)
+        query = query.where(Intervention.subject_code == subject_code)
+    if study_period:
+        query = query.where(Intervention.study_period == study_period)
+
+    query = query.order_by(desc(Intervention.created_at), desc(Intervention.id)).limit(limit)
+    rows = (await db.execute(query)).scalars().all()
+
+    return {
+        "count": len(rows),
+        "interventions": [
+            {
+                "id":                r.id,
+                "student_id_masked": r.student_id_masked,
+                "subject_code":      r.subject_code,
+                "study_period":      r.study_period,
+                "action_type":       r.action_type,
+                "notes":             r.notes,
+                "prediction_id":     r.prediction_id,
+                "created_by":        r.created_by,
+                "created_at":        r.created_at.isoformat() if r.created_at else None,
+            }
+            for r in rows
+        ],
+    }
+
+
+@app.get("/api/interventions/action-types", tags=["Interventions"])
+async def intervention_action_types(user: dict = Depends(get_current_user)):
+    """The whitelist the UI renders, so the frontend never hardcodes its own
+    copy and drift between the two is impossible."""
+    return {"action_types": INTERVENTION_ACTION_TYPES}
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Model health — admin-only, READ-ONLY
+# ═══════════════════════════════════════════════════════════════════════════
+# DESIGN DECISION, DELIBERATE: this endpoint exposes no promote, rollback, or
+# retrain action, and the dashboard built on it has no such controls. Model
+# promotion stays a considered CLI action behind the existing >3pp gate
+# (compare_and_promote.py / compare_and_promote_simulated.py), which forces a
+# human to read a comparison and, for a borderline case, type --force with a
+# recorded justification. A one-click "Promote" button in a web UI would route
+# around the exact safeguard this project built after a model went live
+# ungated with no recoverable backup. Read-only is the feature.
+#
+# Every number here comes from the real registries and the real scripts —
+# nothing is recomputed locally, so the dashboard cannot disagree with what
+# the CLI reports.
+
+def _live_model_summary() -> dict:
+    """Current live model of each family, straight from its registry file."""
+    from app.ml.model_registry import load_registry as load_main_registry, get_live_entry as live_main
+    from app.ml.sim_model_registry import load_registry as load_sim_registry, get_live_entry as live_sim
+    from app.ml import predictor
+    # The complete-record threshold is a module constant; the mid-term one is
+    # stored per-model in the package because it is re-selected on every
+    # retrain, so it is read from the loaded package rather than from a
+    # constant that would go stale the moment a mid-term model is promoted.
+    FAIL_THRESHOLD = predictor.FAIL_THRESHOLD
+    SIM_FAIL_THRESHOLD = (
+        predictor._SIM_PACKAGE.get("decision_threshold") if predictor._SIM_PACKAGE else None
+    )
+
+    def summarise(entry, registry, serving_threshold, served_features, family):
+        if not entry:
+            return {"family": family, "live": False,
+                    "error": "no live version registered for this family"}
+
+        # The two registries genuinely have different entry shapes (the
+        # complete-record one predates the mid-term one and stores no
+        # `features` list), so read defensively rather than assume a schema.
+        report = entry.get("classification_report") or {}
+        fail = report.get("Fail") or {}
+
+        # promoted_at lives in the registry-level promotion_history, not on the
+        # version entry. Take the most recent promotion OF THIS VERSION.
+        promoted_at = None
+        for record in reversed(registry.get("promotion_history", []) or []):
+            if record.get("version") == entry.get("version"):
+                promoted_at = record.get("promoted_at")
+                break
+
+        # Registry entries record the threshold VALIDATED at training time.
+        # What actually serves traffic is the value predictor uses right now.
+        # They can legitimately differ (the complete-record sweep suggested
+        # 0.475, inside the project's noise band, so 0.50 stayed deployed), and
+        # collapsing them into one number would hide that.
+        registered_threshold = entry.get("decision_threshold")
+        features = entry.get("features") or served_features or []
+
+        return {
+            "family":            family,
+            "live":              True,
+            "version":           entry.get("version"),
+            "trained_on":        entry.get("trained_on"),
+            "validated_on":      entry.get("validated_on"),
+            "trained_at":        entry.get("trained_at"),
+            "promoted_at":       promoted_at,
+            "train_row_count":   entry.get("train_row_count"),
+            "n_features":        len(features),
+            "features":          features,
+            "features_source":   "registry entry" if entry.get("features") else "loaded model package",
+            "decision_threshold_serving":    serving_threshold,
+            "decision_threshold_registered": registered_threshold,
+            "threshold_matches_registry":    serving_threshold == registered_threshold,
+            "metrics": {
+                "accuracy":       entry.get("accuracy"),
+                "fail_precision": fail.get("precision"),
+                "fail_recall":    fail.get("recall"),
+                "fail_f1":        fail.get("f1-score"),
+                "fail_support":   fail.get("support"),
+            },
+        }
+
+    main_reg, sim_reg = load_main_registry(), load_sim_registry()
+    return {
+        "complete_record": summarise(
+            live_main(main_reg), main_reg, FAIL_THRESHOLD,
+            (predictor._PACKAGE or {}).get("features"), "complete-record"),
+        "mid_term": summarise(
+            live_sim(sim_reg), sim_reg, SIM_FAIL_THRESHOLD,
+            (predictor._SIM_PACKAGE or {}).get("features"), "mid-term"),
+        "registered_versions": {
+            "complete_record": len(main_reg.get("versions", [])),
+            "mid_term":        len(sim_reg.get("versions", [])),
+        },
+        "promotion_policy": (
+            "Read-only view. Promotion and rollback are CLI-only, behind the "
+            "compare_and_promote gate — deliberately not exposed here."
+        ),
+    }
+
+
+@app.get("/api/admin/model-health", tags=["Admin"])
+async def model_health(
+    user: dict         = Depends(require_head_of_school),
+    db:   AsyncSession = Depends(get_db),
+):
+    """Everything needed to judge whether the deployed models are still healthy.
+
+    Gated with require_head_of_school (Head of Technology OR Head of School),
+    matching the other institution-wide admin pages. A Lecturer gets 403.
+    """
+    from app.ml.check_bias_persistence import collect as collect_bias
+    from app.ml.prediction_accuracy_report import summarise as summarise_accuracy
+    from app.ml.intervention_outcome_report import collect as collect_interventions
+
+    # Reuse the report's own summarise() on rows from THIS request's session,
+    # rather than its collect() (which opens a second engine of its own).
+    reconciled = (await db.execute(
+        select(Prediction).where(Prediction.actual_pass.is_not(None))
+    )).scalars().all()
+
+    return {
+        "live_models":      _live_model_summary(),
+        "accuracy":         summarise_accuracy(reconciled),
+        "fairness":         collect_bias(),
+        "interventions":    await collect_interventions(db),
+        "generated_at":     datetime.now(timezone.utc).isoformat(),
+    }

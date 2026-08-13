@@ -86,6 +86,149 @@ function ShapFactorBars({ shap }) {
   );
 }
 
+// "What would help most" — rendered only when the backend supplies it, which
+// is only for a real identified student. A hypothetical What-If scenario has
+// nobody to advise, so the field is absent there and this renders nothing.
+//
+// The wording deliberately never promises an outcome ("improve attendance by
+// 10% and this student reaches Safe"). SHAP contributions are not linearly
+// interpretable as "change X, get Y" — claiming a number would require
+// actually re-running the model with the feature adjusted. Direction and
+// relative importance is what the data supports, so that is all this says.
+function ActionableFactorCard({ factor }) {
+  if (!factor) return null;
+  return (
+    <div style={{
+      marginTop: 12, padding: '12px 14px', borderRadius: 8,
+      background: '#EFF6FF', border: '1px solid #BFDBFE',
+    }}>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
+        <span style={{ fontSize: 15, flexShrink: 0, lineHeight: 1.4 }}>🎯</span>
+        <div>
+          <p style={{ margin: 0, fontSize: 13, color: '#1E3A8A', fontWeight: 600, lineHeight: 1.6 }}>
+            {factor.message}
+          </p>
+          <p style={{ margin: '6px 0 0', fontSize: 11, color: '#475569' }}>
+            Current value: <strong>{
+              factor.feature === 'ATTENDANCE_RATE'
+                ? `${(factor.value * 100).toFixed(0)}%`
+                : factor.value.toFixed(1)
+            }</strong>
+            {' · '}pulls this prediction down by {Math.abs(factor.contribution).toFixed(2)} points
+          </p>
+          <p style={{ margin: '6px 0 0', fontSize: 11, color: '#64748B', fontStyle: 'italic' }}>
+            Shows direction and relative importance only — not a predicted change in outcome.
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Log an action taken for a real student, and show what has already been
+// logged. Deliberately placed with the prediction rather than on a separate
+// page: the moment a lecturer reads "High Risk" is the moment they decide to
+// act, and a record made then is far more likely to happen than one that
+// requires navigating elsewhere.
+export function InterventionPanel({ studentId, subject, studyPeriod }) {
+  const [actionTypes, setActionTypes] = useState([]);
+  const [actionType, setActionType] = useState('');
+  const [notes, setNotes] = useState('');
+  const [history, setHistory] = useState([]);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+  const [saved, setSaved] = useState(false);
+
+  // The whitelist comes from the server so the UI can never offer a value the
+  // API would reject, and the two can't drift apart.
+  useEffect(() => {
+    api.get('/api/interventions/action-types')
+      .then(r => {
+        const types = r.data.action_types || [];
+        setActionTypes(types);
+        setActionType(prev => prev || types[0] || '');
+      })
+      .catch(() => setActionTypes([]));
+  }, []);
+
+  const loadHistory = () => {
+    if (!studentId || !subject || !studyPeriod) return;
+    api.get('/api/interventions', { params: {
+      student_id_masked: studentId, subject_code: subject, study_period: studyPeriod } })
+      .then(r => setHistory(r.data.interventions || []))
+      .catch(() => setHistory([]));
+  };
+
+  useEffect(loadHistory, [studentId, subject, studyPeriod]);
+
+  const submit = () => {
+    if (!actionType) return;
+    setSaving(true); setError(null); setSaved(false);
+    api.post('/api/interventions', {
+      student_id_masked: studentId, subject_code: subject,
+      study_period: studyPeriod, action_type: actionType,
+      notes: notes.trim() || null,
+    })
+      .then(() => { setNotes(''); setSaved(true); loadHistory(); })
+      .catch(e => setError(e.response?.data?.detail || 'Could not save this action.'))
+      .finally(() => setSaving(false));
+  };
+
+  return (
+    <div style={{ marginTop: 16, padding: 16, background: '#FFF', borderRadius: 10,
+                  border: '1px solid #E2E8F0' }}>
+      <p style={{ ...s.sectionLabel, marginTop: 0 }}>Log an action</p>
+
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+        <select value={actionType} onChange={e => setActionType(e.target.value)}
+                style={{ ...s.select, minWidth: 200, flex: '0 0 auto' }}
+                aria-label="Action type">
+          {actionTypes.map(t => <option key={t} value={t}>{t}</option>)}
+        </select>
+        <input
+          type="text" value={notes} placeholder="Optional note (what was discussed?)"
+          onChange={e => setNotes(e.target.value)} maxLength={2000}
+          style={{ ...s.searchInput, flex: '1 1 240px', margin: 0 }} aria-label="Note"
+        />
+        <button onClick={submit} disabled={saving || !actionType}
+                style={{ ...s.predictBtn, width: 'auto', padding: '10px 18px',
+                         opacity: saving || !actionType ? 0.6 : 1 }}>
+          {saving ? 'Saving…' : 'Log action'}
+        </button>
+      </div>
+
+      {error && <div style={{ ...s.errBanner, marginTop: 10 }}>{error}</div>}
+      {saved && !error && (
+        <p style={{ margin: '10px 0 0', fontSize: 12, color: '#166534' }}>✓ Action logged.</p>
+      )}
+
+      <p style={{ ...s.sectionLabel, marginBottom: 6 }}>
+        History {history.length > 0 && `(${history.length})`}
+      </p>
+      {history.length === 0 ? (
+        <p style={{ margin: 0, fontSize: 12, color: '#94A3B8', fontStyle: 'italic' }}>
+          No actions logged for this student in this subject yet.
+        </p>
+      ) : (
+        <ul style={{ margin: 0, padding: 0, listStyle: 'none' }}>
+          {history.map(h => (
+            <li key={h.id} style={{ padding: '8px 0', borderTop: '1px solid #F1F5F9',
+                                    fontSize: 12, color: '#334155' }}>
+              <strong style={{ color: '#1A2E40' }}>{h.action_type}</strong>
+              {' — '}
+              <span style={{ color: '#64748B' }}>
+                {h.created_at ? new Date(h.created_at).toLocaleString() : 'time unknown'}
+                {' by '}{h.created_by}
+              </span>
+              {h.notes && <div style={{ marginTop: 3, color: '#475569' }}>{h.notes}</div>}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 function MidTermTag() {
   return (
     <span
@@ -242,6 +385,10 @@ export function PredictionResultPanel({ result, geminiLoading, geminiInsight }) 
       <div style={{ paddingTop: 20, paddingBottom: 20, borderBottom: '0.5px solid #E2E8F0' }}>
         <p style={s.sectionLabel}>AI Assisted Insight</p>
         <ShapFactorBars shap={result.shap_explanation} />
+        {/* Derived from the same real SHAP factors shown above, narrowed to
+            what the student can actually act on. Absent for hypothetical
+            What-If scenarios, so this renders nothing there. */}
+        <ActionableFactorCard factor={result.top_actionable_factor} />
         {geminiLoading && (
           <div style={{ ...s.geminiBox, flexDirection: 'row', alignItems: 'center', gap: 12 }}>
             <div style={s.spinner} />
@@ -884,6 +1031,13 @@ export default function PredictorView({ isAdmin }) {
                     result={studentDetail}
                     geminiLoading={detailGeminiLoading}
                     geminiInsight={detailGeminiInsight}
+                  />
+                  {/* Real student only — the what-if view never renders this,
+                      since there is no real person to log an action against. */}
+                  <InterventionPanel
+                    studentId={selectedStudentId}
+                    subject={subject}
+                    studyPeriod={studyPeriod}
                   />
                   <p style={s.scopeFootnote}>
                     Prediction based on 124 verified subjects. Model trained on periods 23.2 to 25.2, validated on 25.3.
