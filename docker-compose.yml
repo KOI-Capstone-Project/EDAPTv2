@@ -122,13 +122,25 @@ services:
 
   # ── pgAdmin ────────────────────────────────────────────────────────────────
   pgadmin:
-    image: dpage/pgadmin4:latest
+    # Pinned, not `latest`. This service was crash-looping on startup because
+    # `latest` had silently moved to a pgAdmin release that rejects reserved
+    # domains in PGADMIN_DEFAULT_EMAIL — nothing in this repo changed, the
+    # upstream tag did. Exactly the drift this project's pinning practice
+    # exists to prevent (see README, "Dependency pinning is a standing
+    # practice"). 9.14 is the version `latest` resolved to when this was pinned.
+    image: dpage/pgadmin4:9.14
     container_name: edaptv2_pgadmin
     restart: unless-stopped
     env_file: .env
     environment:
       PGADMIN_DEFAULT_EMAIL:    ${PGADMIN_DEFAULT_EMAIL}
       PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_DEFAULT_PASSWORD}
+      # pgAdmin 9.x validates the login email and rejects special-use domains,
+      # so a local-only address like admin@edapt.local aborts startup. This is
+      # a dev-only convenience container behind localhost, and the address is
+      # never emailed — allowing the domain is correct here rather than forcing
+      # every developer to invent a deliverable address.
+      PGADMIN_CONFIG_ALLOW_SPECIAL_EMAIL_DOMAINS: "['local','localhost','internal','test']"
     volumes:
       - pgadmin_data:/var/lib/pgadmin
     ports:
