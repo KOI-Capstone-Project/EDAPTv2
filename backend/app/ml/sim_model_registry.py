@@ -101,6 +101,13 @@ def _empty_registry() -> dict:
 
 
 def load_registry() -> dict:
+    """Read registry.json for the MID-TERM (simulated-progress) model family.
+
+    Deliberately a separate registry from model_registry.py's, pointed at
+    models_simulated/ — the two families are promoted independently and must
+    never share a live pointer. Returns an empty-but-valid registry when the
+    file does not exist yet rather than raising.
+    """
     if not REGISTRY_PATH.exists():
         return _empty_registry()
     with open(REGISTRY_PATH) as f:
@@ -145,10 +152,15 @@ def register_version(model_package: dict, extra_metadata: dict, version: Optiona
 
 
 def get_version(registry: dict, version: str) -> Optional[dict]:
+    """The mid-term entry for one version id, or None if never registered."""
     return next((v for v in registry["versions"] if v["version"] == version), None)
 
 
 def get_live_entry(registry: dict) -> Optional[dict]:
+    """The mid-term model currently serving traffic, or None if none is
+    promoted. This family shipped without a gate once and went live ungated —
+    None here means "nothing promoted", never "fall back to a raw .pkl".
+    """
     if registry.get("live_version") is None:
         return None
     return get_version(registry, registry["live_version"])

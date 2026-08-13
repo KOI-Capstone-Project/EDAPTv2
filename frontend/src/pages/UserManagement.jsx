@@ -222,8 +222,8 @@ export default function UserManagement() {
     const extra   = subjects.length - 3;
     return (
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
-        {visible.map(sub => <span key={sub} style={s_chip}>{sub}</span>)}
-        {extra > 0 && <span style={{ ...s_chip, background: '#F0F4F8', color: '#5A7A8A' }}>+{extra} more</span>}
+        {visible.map(sub => <span key={sub} style={sChip}>{sub}</span>)}
+        {extra > 0 && <span style={{ ...sChip, background: '#F0F4F8', color: '#5A7A8A' }}>+{extra} more</span>}
         {subjects.length === 0 && <span style={{ fontSize: 12, color: '#C5D2DC' }}>—</span>}
       </div>
     );
@@ -479,7 +479,7 @@ export default function UserManagement() {
   );
 }
 
-const s_chip = {
+const sChip = {
   background: '#E6F1FB', color: '#185FA5',
   borderRadius: 20, padding: '3px 10px', fontSize: 12, fontWeight: 500,
 };

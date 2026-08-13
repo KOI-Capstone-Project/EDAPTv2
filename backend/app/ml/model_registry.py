@@ -114,6 +114,13 @@ def _empty_registry() -> dict:
 
 
 def load_registry() -> dict:
+    """Read registry.json for the COMPLETE-RECORD model family.
+
+    Returns an empty-but-valid registry ({"live_version": None, "versions": [],
+    "promotion_history": []}) when the file does not exist yet, rather than
+    raising — a fresh clone has no registry, and callers should see "no live
+    model" instead of an exception during import.
+    """
     if not REGISTRY_PATH.exists():
         return _empty_registry()
     with open(REGISTRY_PATH) as f:
@@ -167,10 +174,18 @@ def register_version(model_package: dict, extra_metadata: dict, version: Optiona
 
 
 def get_version(registry: dict, version: str) -> Optional[dict]:
+    """The entry for one version id, or None if that version was never
+    registered. Does not touch disk — pass a registry from load_registry()."""
     return next((v for v in registry["versions"] if v["version"] == version), None)
 
 
 def get_live_entry(registry: dict) -> Optional[dict]:
+    """The entry currently serving traffic, or None if nothing is promoted.
+
+    None is a real, expected state, not an error: registration never promotes
+    automatically (see register_version), so a registry can hold many versions
+    with no live one until a human runs compare_and_promote.
+    """
     if registry.get("live_version") is None:
         return None
     return get_version(registry, registry["live_version"])

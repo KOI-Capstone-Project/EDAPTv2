@@ -119,6 +119,13 @@ def _fmt(group: dict) -> str:
 
 
 def render(data: dict) -> str:
+    """Format collect()'s output as the human-readable report main() prints.
+
+    Separated from collect() so the refusal logic is testable without a
+    database: given thin groups it must print NOT ENOUGH DATA and no
+    percentage, and given ample groups it must still print the "not evidence"
+    caveat. Both are asserted in the test suite.
+    """
     out = []
     out.append("=" * 74)
     out.append("INTERVENTION VS. OUTCOME — High Risk predictions with a real outcome")

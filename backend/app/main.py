@@ -18,6 +18,7 @@ import logging
 import math
 import os
 from pathlib import Path
+
 import secrets
 import smtplib
 import tempfile
@@ -47,13 +48,29 @@ import contextlib
 
 load_dotenv()
 
+# ── Logging ──────────────────────────────────────────────────────────────────
+# Startup and lifecycle diagnostics go through the logging module, not print().
+# print() writes unconditionally to stdout with no level, no timestamp and no
+# way to filter it — so in production every message was emitted at the same
+# volume whether it was "model loaded" or "model FAILED to load", and LOG_LEVEL
+# (already passed to uvicorn in docker-compose) had no effect on any of it.
+# The CLI scripts under app/ml/ deliberately keep using print(): their output IS
+# the deliverable of an interactive command, not server diagnostics.
+LOG_LEVEL = os.getenv("LOG_LEVEL", "info").upper()
+logging.basicConfig(
+    level=getattr(logging, LOG_LEVEL, logging.INFO),
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
+logger = logging.getLogger("edapt")
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Constants
 # ─────────────────────────────────────────────────────────────────────────────
 
 SECRET_KEY:           str       = os.getenv("SECRET_KEY", "edapt-dev-secret-key-change-in-production")
 if SECRET_KEY == "edapt-dev-secret-key-change-in-production":
-    logging.getLogger(__name__).warning(
+    logger.warning(
         "SECRET_KEY is set to the insecure default dev value — "
         "set a strong SECRET_KEY env var before deploying"
     )
@@ -90,10 +107,10 @@ try:
     _MODEL_NAME       = _model_package.get("model_name", "Random Forest")
     _MODEL_ACCURACY   = _model_package.get("accuracy", 0.0)
     _SAFE_SUBJECTS    = _model_package.get("safe_subjects", [])
-    print(f"[EDAPT] ML model loaded: {_MODEL_NAME} (accuracy {_MODEL_ACCURACY:.4f}, "
-          f"{len(_SAFE_SUBJECTS)} safe subjects)")
+    logger.info("ML model loaded: %s (accuracy %.4f, %d safe subjects)",
+                _MODEL_NAME, _MODEL_ACCURACY, len(_SAFE_SUBJECTS))
 except Exception as _e:
-    print(f"[EDAPT] WARNING: ML model not loaded — {_e}. Run train_model.py first.")
+    logger.warning("ML model not loaded — %s. Run train_model.py first.", _e)
 
 # ── Subject reliability (loaded once at startup) ─────────────────────────────
 
@@ -104,7 +121,7 @@ try:
     with open(_RELIABILITY_PATH) as _f:
         _SUBJECT_RELIABILITY = json.load(_f)
 except Exception as _e:
-    print(f"[EDAPT] WARNING: subject_reliability.json not loaded — {_e}")
+    logger.warning("subject_reliability.json not loaded — %s", _e)
 
 
 def _subject_reliability_category(subject: str) -> str:
@@ -269,11 +286,11 @@ try:
         _genai.configure(api_key=_gemini_key)
         _flash_model = _genai.GenerativeModel("gemini-1.5-flash")
         _pro_model   = _genai.GenerativeModel("gemini-1.5-pro")
-        print("[EDAPT] Gemini API configured successfully")
+        logger.info("Gemini API configured successfully")
     else:
-        print("[EDAPT] WARNING: Gemini API key not configured")
+        logger.warning("Gemini API key not configured")
 except Exception as _e:
-    print(f"[EDAPT] WARNING: Gemini API key not configured — {_e}")
+    logger.warning("Gemini API key not configured — %s", _e)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # In-Memory State
@@ -386,11 +403,11 @@ try:
             lambda x: str(round(float(x), 1)) if pd.notna(x) else ""
         )
     _DATA = _df
-    print(f"[EDAPT] Startup data loaded: {len(_DATA):,} rows, {len(_DATA.columns)} columns")
+    logger.info("Startup data loaded: %s rows, %d columns", f"{len(_DATA):,}", len(_DATA.columns))
 except FileNotFoundError:
-    print(f"[EDAPT] ERROR: startup CSV not found at {_DATA_PATH} — upload a dataset via /api/ingest")
+    logger.error("Startup CSV not found at %s — upload a dataset via /api/ingest", _DATA_PATH)
 except Exception as _e:
-    print(f"[EDAPT] ERROR loading startup data: {_e}")
+    logger.error("Failed to load startup data: %s", _e)
 
 # ── Attendance data store ───────────────────────────────────────────────────
 # Wired in as a standard part of startup, same as _DATA above — not a manual
@@ -416,11 +433,11 @@ try:
             _target, on=["STUDENTID_MASKED", "SUBJECTCODE", "STUDYPERIOD"], how="left"
         )
     _ATTENDANCE = _att_features
-    print(f"[EDAPT] Attendance features loaded: {len(_ATTENDANCE):,} enrolments")
+    logger.info("Attendance features loaded: %s enrolments", f"{len(_ATTENDANCE):,}")
 except FileNotFoundError:
-    print(f"[EDAPT] WARNING: attendance data not found at {_ATTENDANCE_PATH} — attendance endpoints will return empty")
+    logger.warning("Attendance data not found at %s — attendance endpoints will return empty", _ATTENDANCE_PATH)
 except Exception as _e:
-    print(f"[EDAPT] ERROR loading attendance data: {_e}")
+    logger.error("Failed to load attendance data: %s", _e)
 
 # ── Database setup ────────────────────────────────────────────────────────────
 
@@ -552,7 +569,7 @@ async def _seed_default_users() -> None:
         for u in defaults:
             db.add(u)
         await db.commit()
-        print("[EDAPT] Default users seeded")
+        logger.info("Default users seeded")
 
 # ── Dashboard constants ───────────────────────────────────────────────────────
 
@@ -777,11 +794,11 @@ async def _startup():
     async with _engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     await _seed_default_users()
-    print("[EDAPT] Database ready")
+    logger.info("Database ready")
     if GMAIL_SENDER and GMAIL_APP_PASSWORD:
-        print("[EDAPT] Email service configured")
+        logger.info("Email service configured")
     else:
-        print("[EDAPT] WARNING: Email service not configured — forgot password will not work")
+        logger.warning("Email service not configured — forgot password will not work")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Middleware
