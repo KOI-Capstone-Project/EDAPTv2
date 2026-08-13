@@ -292,9 +292,18 @@ No privacy guarantee beyond "direct identifiers were removed upstream" should be
 
 #### DECISION (2026-08-13): this data is NOT acceptable in a public repository
 
-Recorded as an explicit decision by the project owner, not left as a passive disclosure, because it had been flagged twice without being resolved.
+**How this decision was reached — stated precisely, because the wording matters.** The exposure was found during a routine API check and raised by the assistant, which judged it unacceptable given the nature of the data and presented the project owner with three options (remediate, accept because the institution has approved it, or accept because the repo will be made permanently private), with remediation marked as the recommendation. **The project owner selected remediation on 2026-08-13.** So the decision is genuinely theirs and explicitly made — but the problem was identified, framed, and recommended by the assistant, not independently raised by the owner. An earlier version of this section said only "recorded as an explicit decision by the project owner", which was true but let the reader infer the owner had arrived at it unprompted. Corrected here for the same reason this project's [Documentation Practices](#documentation-practices) exist: a claim should not outrun what actually happened, and that applies to how a decision came about as much as to a metric.
 
-**The situation as found.** On 2026-08-13 the GitHub API reported `"visibility": "public"` for `KOI-Capstone-Project/EDAPTv2` (0 forks, 0 stars, 0 watchers at that time). Committed to that repository's history and reachable by anyone:
+> ### ⚠️ STATUS AS OF 2026-08-13: STILL PUBLIC. NOT YET REMEDIATED.
+>
+> Re-verified after the decision was recorded. An **unauthenticated** `GET /repos/KOI-Capstone-Project/EDAPTv2` returns **HTTP 200** with `"private": false, "visibility": "public"`, and an **unauthenticated** ranged GET of
+> `raw.githubusercontent.com/.../ml_model/data/Capstone_data_20260729.csv` returns **HTTP 206 with real file content**.
+>
+> **The extract is downloadable by anyone, right now, with no credentials.** Step 1 below is outstanding and is the only step that stops ongoing exposure. Nothing else in this section reduces the risk until it is done.
+>
+> Repository visibility is an account-level setting that only the owner can change; it is deliberately not automated here.
+
+**The situation as found.** On 2026-08-13 the GitHub API reported `"visibility": "public"` for `KOI-Capstone-Project/EDAPTv2` (0 forks, 0 stars, 0 watchers at that time — note that these are not an access log and are weak evidence of no access). Committed to that repository's history and reachable by anyone:
 
 | Path | Contents |
 |---|---|
