@@ -61,6 +61,16 @@ services:
         --bind 0.0.0.0:8000
         --timeout 120
         --log-level ${LOG_LEVEL:-warning}
+    # Readiness, not liveness — see docker-compose.yml for the rationale.
+    # It matters more here: with 4 gunicorn workers behind a load balancer, an
+    # instance that came up without a model needs to be taken out of rotation
+    # rather than left serving errors.
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 180s
 
   # ── Scheduled-retrain sidecar ───────────────────────────────────────────────
   # Reuses the backend image; overrides the entrypoint to run

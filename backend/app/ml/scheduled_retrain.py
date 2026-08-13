@@ -82,11 +82,11 @@ def main() -> None:
     print(f"  Honestly-validated optimum: {sweep['chosen_threshold']:.2f}  "
           f"(delta {sweep['threshold_delta']:+.2f})")
     if sweep["meaningfully_shifted"]:
-        print(f"  ⚠ MEANINGFULLY SHIFTED (>±0.03) — consider re-running "
-              f"compare_and_promote.py's reasoning against FAIL_THRESHOLD itself.")
-        print(f"    FAIL_THRESHOLD was NOT changed. This is a report, not an action —")
-        print(f"    updating it is a deliberate, separate human decision, the same way")
-        print(f"    promoting a model version is.")
+        print("  ⚠ MEANINGFULLY SHIFTED (>±0.03) — consider re-running "
+              "compare_and_promote.py's reasoning against FAIL_THRESHOLD itself.")
+        print("    FAIL_THRESHOLD was NOT changed. This is a report, not an action —")
+        print("    updating it is a deliberate, separate human decision, the same way")
+        print("    promoting a model version is.")
     else:
         print(f"  ✓ Not meaningfully shifted — FAIL_THRESHOLD={sweep['current_fail_threshold']:.2f} still holds up "
               f"for the current periods.")

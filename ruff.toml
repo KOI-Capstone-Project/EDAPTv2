@@ -1,0 +1,45 @@
+# Ruff — the single linter for this project's Python.
+#
+# Why ruff over flake8: it covers flake8's rules plus import sorting and several
+# bugbear/comprehension rule sets in one binary, so CI and pre-commit each need
+# one dependency instead of three or four. It is also fast enough (~30ms on this
+# codebase) that running it in a pre-commit hook doesn't discourage committing.
+
+line-length = 140
+target-version = "py312"
+
+exclude = [
+    ".git",
+    "__pycache__",
+    "node_modules",
+    "backend/app/ml/models",
+    "backend/app/ml/models_simulated",
+    "data",
+]
+
+[lint]
+# E/W  pycodestyle   — real style errors
+# F    pyflakes      — undefined names, unused imports: genuine bug class
+# B    bugbear       — likely-bug patterns (missing `raise ... from`, unsafe zip)
+# C4   comprehensions— unnecessary collection calls
+# SIM  simplify      — redundant control flow
+#
+# Deliberately NOT enabled: UP (pyupgrade). Its only finding here was 114
+# instances of `Optional[X]` -> `X | None`. That is a pure restyling with no
+# correctness value, and 114 mechanical edits across the serving code at
+# project close-out is churn that could hide a real change in review.
+select = ["E", "W", "F", "B", "C4", "SIM"]
+
+ignore = [
+    # B008 flags function calls in default arguments. In FastAPI that IS the
+    # documented idiom — `user: dict = Depends(get_current_user)` — and every
+    # one of the 75 hits here is a Depends()/Query()/File() call. The rule
+    # cannot distinguish the framework idiom from the bug it targets, so it is
+    # a false positive across the board in this codebase, not a suppressed
+    # finding.
+    "B008",
+]
+
+[lint.per-file-ignores]
+# Tests deliberately import fixtures for side effects and shadow names.
+"backend/tests/*" = ["F811"]

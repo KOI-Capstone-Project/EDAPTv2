@@ -156,6 +156,6 @@ print(
     f"SEVERE {sev_counts.get('SEVERE', 0)},  "
     f"CRITICAL {sev_counts.get('CRITICAL', 0)}"
 )
-print(f"\nOutputs written:")
+print("\nOutputs written:")
 print(f"  {OUT_ANOM}")
 print(f"  {OUT_CLEN}")

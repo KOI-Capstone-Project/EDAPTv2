@@ -102,7 +102,7 @@ def build_resit_outcomes(pending_keys: set) -> tuple:
 
     has_any_record = {
         (str(s), subj, per)
-        for s, subj, per in df.groupby(["STUDENTID_MASKED", "SUBJECTCODE", "STUDYPERIOD"]).groups.keys()
+        for s, subj, per in df.groupby(["STUDENTID_MASKED", "SUBJECTCODE", "STUDYPERIOD"]).groups
     }
 
     if df.empty:
@@ -190,7 +190,7 @@ async def reconcile() -> None:
     print(f"\n  ✓ Backfilled — standard (attempt-1):  {backfilled_standard:,}")
     print(f"  ✓ Backfilled — resit fallback:         {backfilled_resit:,}")
     print(f"    Total backfilled:                    {total_backfilled:,}")
-    print(f"\n  Residual — record exists but neither attempt-1 nor latest attempt")
+    print("\n  Residual — record exists but neither attempt-1 nor latest attempt")
     print(f"             sums cleanly (data-quality gap, not temporal):  {residual_dirty:,}")
     print(f"  Residual — no record at all found for that student+subject+period: {residual_no_record:,}")
     await engine.dispose()

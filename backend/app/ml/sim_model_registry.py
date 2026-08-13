@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Optional
 
 import joblib
+import contextlib
 
 MODELS_DIR    = Path(__file__).resolve().parent / "models_simulated"
 REGISTRY_PATH = MODELS_DIR / "registry.json"
@@ -79,10 +80,8 @@ def _acquire_registry_lock() -> None:
         if age > LOCK_STALE_SECONDS:
             print(f"[sim_model_registry] Removing stale registry lock (age {age:.0f}s > "
                   f"{LOCK_STALE_SECONDS}s) — presumed orphaned by a crashed process.")
-            try:
+            with contextlib.suppress(FileNotFoundError):
                 LOCK_PATH.unlink()
-            except FileNotFoundError:
-                pass
             continue
 
         if time.monotonic() >= deadline:
@@ -93,10 +92,8 @@ def _acquire_registry_lock() -> None:
 
 
 def _release_registry_lock() -> None:
-    try:
+    with contextlib.suppress(FileNotFoundError):
         LOCK_PATH.unlink()
-    except FileNotFoundError:
-        pass
 
 
 def _empty_registry() -> dict:

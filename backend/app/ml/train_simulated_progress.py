@@ -304,7 +304,7 @@ def main() -> None:
     print("═" * 70)
     print(f"  ✓ Model registered as version {version} (train rows: {len(X_train_full):,}) — NOT yet live.")
     print(f"    Run: python -m app.ml.compare_and_promote_simulated {version}")
-    print(f"    to compare it against the live version and promote it if it's not meaningfully worse.")
+    print("    to compare it against the live version and promote it if it's not meaningfully worse.")
     print(
         "This model was trained to interpret PARTIAL_WEIGHTED_SCORE as a cumulative\n"
         "sum across however many items are truncated-in (15-90% coverage), not the\n"

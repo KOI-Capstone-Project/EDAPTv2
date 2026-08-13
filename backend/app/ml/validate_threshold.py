@@ -114,7 +114,7 @@ def run_validation_sweep(verbose: bool = True) -> dict:
         _p(f"{t:>10.2f}  {p:>10.3f}  {r:>8.3f}  {f1:>6.3f}  {n:>16,}")
 
     band = [row for row in val_results if 0.80 <= row[2] <= 0.85]
-    if band:
+    if band:  # noqa: SIM108 — ternary form is a 150-char line; the block reads better
         chosen = max(band, key=lambda row: row[1])
     else:
         # fall back to the closest-to-band threshold if nothing lands exactly inside it

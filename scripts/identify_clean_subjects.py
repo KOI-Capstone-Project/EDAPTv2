@@ -216,6 +216,6 @@ if MANUAL_OVERRIDES:
         print(f"    {override['note']}")
 
 print()
-print(f"Outputs written:")
+print("Outputs written:")
 print(f"  {OUT_JSON}")
 print(f"  {OUT_CSV}")

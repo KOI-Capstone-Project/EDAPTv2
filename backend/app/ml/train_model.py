@@ -122,10 +122,10 @@ PILOT_PERIOD = "23.1"
 # for the full comparison. Named constants (not inline literals in main())
 # specifically so a candidate run can override them without editing this
 # file — main() reads these, doesn't hardcode the numbers itself.
-XGB_PARAMS = dict(n_estimators=200, max_depth=4, learning_rate=0.05,
-                   random_state=42, eval_metric="logloss", verbosity=0)
-RF_PARAMS  = dict(n_estimators=200, max_depth=6, class_weight="balanced",
-                   random_state=42, n_jobs=-1)
+XGB_PARAMS = {"n_estimators": 200, "max_depth": 4, "learning_rate": 0.05,
+                   "random_state": 42, "eval_metric": "logloss", "verbosity": 0}
+RF_PARAMS  = {"n_estimators": 200, "max_depth": 6, "class_weight": "balanced",
+                   "random_state": 42, "n_jobs": -1}
 
 # Fail-class decision threshold applied to predict_proba() in predictor.py.
 # 0.55 was originally chosen by sweeping directly against the T3 2025 TEST
@@ -727,7 +727,7 @@ def main() -> None:
     smote = SMOTE(random_state=42)
     X_res, y_res = smote.fit_resample(X_train, y_train)
     unique, counts = np.unique(y_res, return_counts=True)
-    for cls, cnt in zip(unique, counts):
+    for cls, cnt in zip(unique, counts, strict=True):
         label = "fail" if cls == 0 else "pass"
         print(f"  Class {cls} ({label}): {cnt:,} samples after SMOTE")
 
@@ -956,7 +956,7 @@ def main() -> None:
     })
     print(f"  ✓ Model registered as version {version} (train rows: {train_row_count:,}) — NOT yet live.")
     print(f"    Run: python backend/app/ml/compare_and_promote.py {version}")
-    print(f"    to compare it against the live version and promote it if it's not meaningfully worse.")
+    print("    to compare it against the live version and promote it if it's not meaningfully worse.")
 
 
 if __name__ == "__main__":

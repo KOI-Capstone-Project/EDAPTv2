@@ -140,7 +140,7 @@ def main() -> None:
         )
         assert isolated_registry["live_version"] is None, "Candidate must NOT be live — nothing promotes automatically."
         print(f"  ✓ Trained through {val_period} (test={test_period}), NOT the old hardcoded 25.2/25.3 split.")
-        print(f"  ✓ Not live — confirmed still gated behind compare_and_promote.py.")
+        print("  ✓ Not live — confirmed still gated behind compare_and_promote.py.")
 
         # ── Step 4: re-run the SAME comparison logic compare_and_promote.py's
         #            dry-run uses, against the REAL live model ────────────────

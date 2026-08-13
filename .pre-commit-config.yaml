@@ -1,0 +1,55 @@
+# Pre-commit hooks for EDAPT v2.
+#
+# Install once per clone (see README "Quick Start"):
+#     pip install pre-commit && pre-commit install
+#
+# Why this exists: this project had a fix reported as applied that was never
+# actually on disk (README, "Source-control note"). The mitigation recorded
+# there was "commit at the end of each unit of work, and verify a claimed change
+# is really present". These hooks make part of that automatic — a commit now
+# runs real checks against the staged content rather than depending on someone
+# remembering.
+#
+# Deliberately NOT included: the pytest suite. It takes ~3.5 minutes and needs a
+# running Postgres, so putting it here would train people to use `--no-verify`,
+# which is worse than not having the hook. The full suite is CI's job
+# (.github/workflows/ci.yml); these hooks are the fast checks only.
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+        exclude: ^data/|\.csv$
+      - id: end-of-file-fixer
+        exclude: ^data/|\.csv$|\.pkl$
+      - id: check-yaml
+        # docker-compose and the CI workflow are parsed for real here, so a
+        # malformed workflow is caught before it reaches GitHub.
+      - id: check-json
+      - id: check-added-large-files
+        # The live model .pkl files are ~2.3MB and are deliberately tracked.
+        # This blocks anything substantially larger reaching the repo by
+        # accident — the 119MB attendance CSV that exceeded GitHub's hard limit
+        # is exactly the case this catches.
+        args: ["--maxkb=5120"]
+      - id: check-merge-conflict
+      - id: detect-private-key
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    # Pinned to the same ruff version CI runs, so a commit that passes locally
+    # cannot fail lint in CI for a version reason.
+    rev: v0.14.2
+    hooks:
+      - id: ruff
+        args: ["--config", "ruff.toml"]
+
+  - repo: local
+    hooks:
+      # `git diff --check` catches whitespace errors and, importantly, leftover
+      # conflict markers in the staged diff itself.
+      - id: git-diff-check
+        name: git diff --check (whitespace / conflict markers)
+        entry: git diff --check --cached --
+        language: system
+        pass_filenames: true

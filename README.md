@@ -1,5 +1,7 @@
 # EDAPT v2 — Educational Data Analytics and Predictive Tool
 
+[![CI](https://github.com/KOI-Capstone-Project/EDAPTv2/actions/workflows/ci.yml/badge.svg?branch=ml_model)](https://github.com/KOI-Capstone-Project/EDAPTv2/actions/workflows/ci.yml)
+
 > King's Own Institute (KOI) — Capstone Project (Second Year)
 
 EDAPT v2 is a role-based academic analytics platform. It predicts whether a student will pass or fail a subject from their recorded assessment marks — both once a subject is complete and, separately, from genuinely mid-semester partial records — and surfaces those predictions, along with real per-feature explanations, through role-scoped dashboards, an assessment-record explorer, and a roster-first predictor tool.
@@ -155,6 +157,23 @@ Docker Compose is the primary, actually-used way to run this project — confirm
 - Docker and Docker Compose
 - A `.env` file in the project root — copy `.env.example` to `.env` and fill in real values (see [Environment Variables](#environment-variables) below for what each one does)
 
+### Install the pre-commit hooks — do this before your first commit
+
+This is a required setup step, not an optional extra. The hooks are what stop a lint error, a leftover conflict marker, a private key, or an oversized file reaching the repository, and they run in about a second.
+
+```bash
+pip install pre-commit
+pre-commit install          # writes .git/hooks/pre-commit — per clone, not per machine
+```
+
+`pre-commit install` is per-clone: a fresh `git clone` has no hooks until you run it again. To check the whole tree rather than just staged files (useful the first time):
+
+```bash
+pre-commit run --all-files
+```
+
+The full test suite is deliberately **not** in these hooks — it takes ~3.5 minutes and needs a running Postgres, which would just train everyone to use `git commit --no-verify`. Running the suite is CI's job; see [CI and quality gates](#ci-and-quality-gates--automating-what-used-to-depend-on-remembering).
+
 ### Start everything
 
 ```bash
@@ -225,6 +244,12 @@ REACT_APP_API_BASE_URL=
 
 ## Default Login
 
+> ### ⚠️ **LOCAL DEVELOPMENT ONLY — NEVER DEPLOY THESE**
+>
+> **The credentials below are hardcoded in `_seed_default_users()` and are published in this README, so they are public knowledge. They must never be used in, or left active on, any real or internet-reachable deployment.** They exist so a fresh clone is usable immediately.
+>
+> Before any real deployment: change every one of these passwords, or delete the accounts entirely and create real ones through User Management. Seeding only happens when the `users` table is empty, so an already-seeded database will keep these accounts until someone removes them — deploying is not enough to clear them.
+
 Three demo accounts are seeded automatically on first backend startup if the `users` table is empty (`_seed_default_users()` in `main.py`):
 
 | Email | Password | Role | Super-admin |
@@ -251,6 +276,21 @@ Two source files are loaded automatically into in-memory pandas DataFrames **at 
 To get a plain CSV back for inspection: `gunzip -c data/masked_attendance.csv.gz > /tmp/attendance.csv`.
 
 `POST /api/ingest` also still exists as a runtime override (upload a different CSV/XLSX without restarting the container), matching the original **Data Ingestion** page's behavior, but it's a secondary path now, not the only way data gets in. Uploads are plain CSVs — the gzip storage applies only to the checked-in copy.
+
+### Data Handling — what this system processes, and what is *not* guaranteed
+
+**This system processes real student records, not synthetic data.** 7,926 distinct students, 327,501 assessment rows, and 2,517,435 attendance sessions, covering real assessment marks, real pass/fail outcomes, real class attendance, and demographic attributes (`AGEGROUP`, `GENDERCODE`, `COUNTRY_MASKED`).
+
+**Masking is applied upstream, before the data reaches this project.** Direct identifiers arrive already replaced with sequential pseudonyms — `Student0`, `Student1`, … and `Country0`, `Country1`, …. No name, email, student number, or date of birth is present in either source file. Nothing in this repository performs the masking; this project is a consumer of already-masked extracts.
+
+**Stated plainly, because it would be easy to overclaim here:**
+
+- **The robustness of that masking has not been verified by this project, and could not be** — verifying it would require the unmasked source and the mapping, neither of which this project has ever had.
+- **"Masked" is pseudonymisation, not anonymisation.** Whoever holds the upstream mapping can re-identify any row. The pseudonyms are stable and sequential across both files, which is what makes the student↔attendance join work at all — the same property that makes them a consistent key for anyone with the mapping.
+- **Re-identification risk from quasi-identifiers has not been assessed.** Age group + gender + country + subject + study period + building, in combination, may well be unique for some students in a 7,926-student cohort. No k-anonymity or similar analysis has been run. This is a real, unmeasured risk, not a theoretical one.
+- **The repository is not a safe place for this data if it were ever made public.** Both datasets are committed to git, so anyone with repository access has the full extract. Access control is currently repository access, nothing more.
+
+No privacy guarantee beyond "direct identifiers were removed upstream" should be inferred from anything in this project.
 
 ### Expected Columns — capstone marks
 
@@ -537,6 +577,8 @@ Stated plainly rather than rounded up or omitted:
 
 **DARBY was investigated directly — one candidate cause ruled out, one real-but-weak candidate found, one uncheckable, no full explanation found.** DARBY is 99.99% `location_code=NC` (essentially the sole in-person NC-campus building), so campus was the obvious next suspect — checked directly using `ONL`, the one building with a genuine NC/SC split: within `ONL` alone, NC vs SC residuals are virtually identical (−0.0078 vs −0.0075), and DARBY vs other NC-campus records (holding campus constant) still shows a real gap (−0.046 vs −0.010) — **campus is ruled out**, DARBY's effect isn't a campus effect wearing a building label. Class size was checked next: DARBY's average class size (13.6 students/session, the smallest of all 6 buildings) correlates with the subject-adjusted residual at r=0.11 across the whole dataset — real but weak (~1% of variance), directionally consistent with DARBY's gap but nowhere near sufficient to fully explain a −6.5pp session-group-level residual gap on its own. Time-of-day couldn't be checked at all — the data has no clock-time field, only `cls_session_no` (a within-activity sequence number, not a real time). **Honest conclusion: no full explanation found** — campus is ruled out, class size is a real partial contributor, and DARBY's remaining gap is unexplained by what's available in this dataset. A real, deliberate follow-up task if pursued further would need a data source this project doesn't have (actual class scheduling/time-of-day data), not a re-analysis of what's already here.
 - **Deliberately left unverified: the other endpoints that assemble model features server-side.** Two real bugs this session lived in exactly that pattern — the roster returning `probability: null` for every student, and `/api/predict` disagreeing with the roster about the same student's attendance. Both were in code where *the server* builds the feature vector from stored data, rather than the client supplying it. **The same pattern is untested in `/api/subjects/{subject}/analytics`, the attendance analytics endpoints, and every dashboard endpoint beyond `/api/dashboard/summary`.** These are **not known to be broken** — no failure has been observed in any of them, and no claim is being made that one exists. They are named because they sit in the same blind spot that hid both confirmed bugs, which makes them the most likely place a similar issue would be found if one is there. **Checking them was a deliberate decision to stop, not an oversight** — the session's scope closed with the two known bugs fixed and the pattern documented, rather than expanding into an open-ended audit. Whoever picks this up next has a clear starting point: call each of those endpoints as a real client and assert on the values in the payload, not the status code. See [Testing Practices](#testing-practices--a-real-outage-the-suite-missed) for why HTTP 200 is not evidence here.
+- **No GitHub-hosted CI run has been observed yet.** The pipeline in `.github/workflows/ci.yml` was proven locally with `act` and by running each job's exact commands, including a deliberate failure and recovery for every gate (see [CI and quality gates](#ci-and-quality-gates--automating-what-used-to-depend-on-remembering)). But no `gh` CLI or API token existed in the environment where it was written, so the first real run on GitHub's runners is still unverified. Two things could plausibly differ there: the `services:` Postgres wiring, and `--network host` reaching it. **Check the CI badge at the top of this file** — that, not this paragraph, is the current truth.
+- **Type-checking is absent.** mypy was deliberately not added at close-out (rationale in the CI section). A real gap, named as one.
 - **This feature set is committed and pushed on `ml_model`, but not merged to `main`** — `origin/main` is 10 commits behind. See the note at the top of this file.
 
 ---
@@ -591,6 +633,75 @@ The image predated the commit that introduced the pin by **16 days**. It was nev
 **Fix.** `docker compose build backend` resolved it with **no source changes** — the pin in `requirements.txt` was already correct. The defect was entirely in the environment having diverged from its own source of truth. After the rebuild: `pip show shap` → `0.52.0`, and the full suite passes.
 
 **Going forward: periodically rebuild the dev image from `requirements.txt` (`docker compose build --no-cache backend`) rather than trusting a long-running container, and treat any `pip install` inside a running container as a change that must be written back to `requirements.txt` immediately.** A long-lived dev container silently accumulates unpinned state; the longer it runs, the less its green test suite means. Before reporting a result as verified, it is worth knowing whether the container it ran in could still be rebuilt from the repo.
+
+## CI and quality gates — automating what used to depend on remembering
+
+Every incident documented above was caught by a person deciding to check, not by tooling: the null-prediction outage, the fix that was never on disk, the hand-patched container. That is the actual gap this section closes. Each gate below was verified by making it fail on purpose first — the same standard this project already applies to code fixes.
+
+### What runs, and when
+
+| Gate | Where | Trigger |
+|---|---|---|
+| `ruff check` (backend lint) | `.github/workflows/ci.yml` → `backend-lint` | every push and PR |
+| Fresh `--no-cache` image build | `backend-tests` | every push and PR |
+| Image-vs-`requirements.txt` assertion | `backend-tests` | every push and PR |
+| Full backend suite (24 tests) inside that image | `backend-tests` | every push and PR |
+| `npm ci` + eslint + frontend tests | `frontend` | every push and PR |
+| ruff, whitespace, YAML/JSON validity, large files, private keys, conflict markers | `.pre-commit-config.yaml` | every local commit |
+
+### The build is deliberately uncached
+
+`docker build --no-cache` is the point of the backend job, not an incidental flag. This project ran an entire session of green tests inside a long-lived container with `shap` hand-installed and absent from the image built from `requirements.txt` (see [Container drift](#container-drift--the-verification-environment-was-not-the-project)). Building fresh every run means CI can only pass against what `requirements.txt` actually specifies.
+
+A second step asserts, for every pinned line in `requirements.txt`, that the package is installed in the built image at exactly that version. **`pip install --dry-run` was tried first for this and rejected: it exits 0 and merely prints "Would install X" when a package is absent, so it would have sailed straight through the shap incident.** The replacement uses `importlib.metadata` and exits non-zero.
+
+### Proof each gate actually fails
+
+Not "the config looks right" — each was made to fail on purpose:
+
+- **Backend lint.** A file with an unused import and an undefined name was added and the job run locally with [`act`](https://nektosact.com): `❌ Failure - Main ruff check`, `Error: Job 'Backend lint (ruff)' failed`, citing `F401` and `F821`. Removed → job passes, `All checks passed!`.
+- **Backend tests.** `shap==0.52.0` was deleted from `requirements.txt`, then the job's exact commands run: `docker build --no-cache` followed by pytest in the resulting image → **11 failed, 13 passed**, every failure a `ModuleNotFoundError: No module named 'shap'`. Restored → **24 passed**. This is the container-drift incident reproduced and then caught by the pipeline that now guards against it.
+- **Requirements assertion.** Run against the correct image → passes. Run against the same image with `pip uninstall shap` → exits 1 with `shap: NOT INSTALLED (requirements.txt pins 0.52.0)`.
+- **Frontend.** Whole job run under `act`: `npm ci`, lint, and 3 tests all green, `Job succeeded`.
+- **Pre-commit.** A staged file with an unused import, an undefined name and trailing whitespace was committed: blocked, with `HEAD` verified unmoved and the file confirmed absent from every commit. Violations fixed → commit succeeded.
+
+**Honest limitation on the CI proof.** There is no `gh` CLI or API token in the environment where this was set up, so no GitHub-hosted run could be observed. Everything above was proven with `act` running the real workflow file locally, plus direct execution of the job's exact commands. Two known differences: act's runner image lacks `node`, so the `actions/setup-python` post-step cleanup errors after the real steps pass ([nektos/act#107](https://github.com/nektos/act/issues/107)); and the backend-tests job was executed command-by-command against the local Postgres rather than through act's service containers. **The first GitHub-hosted run is therefore still unobserved — check the badge at the top of this file.**
+
+### Linting decisions, and what was deliberately not done
+
+Ruff was chosen over flake8: it covers flake8's rules plus import sorting and bugbear/comprehension sets in one pinned binary, so CI and pre-commit need one dependency rather than four.
+
+Real numbers from the first run against this codebase, with what was done about each:
+
+| Finding | Count | Action |
+|---|---|---|
+| `UP045` `Optional[X]` → `X \| None` | 114 | **Rule not enabled.** Pure restyling, no correctness value; 114 mechanical edits across serving code at close-out would hide real changes in review. |
+| `B008` function-call-in-default-argument | 75 | **Ignored in `ruff.toml`, with reason.** Every hit is FastAPI's `Depends()`/`Query()` idiom. A false positive across the board, not a suppressed finding. |
+| `E501` line-too-long | 34 → 5 | Line length set to 140 (this codebase uses long explanatory comments deliberately); the remaining 5 were wrapped. |
+| `I001` unsorted imports | 26 | Auto-fixed. |
+| `F541` f-string without placeholders | 11 | Auto-fixed. |
+| `E701` multiple statements on one line | 7 | Fixed by hand — deliberate column-aligned blocks, but the rule is standard and it was 7 lines. |
+| `SIM105`/`C408`/`C416`/`SIM118` | 10 | Auto-fixed (semantically equivalent). |
+| `B904` raise-without-`from` | 4 | Fixed. Auth uses `from None` deliberately so the underlying JWT error never reaches the client; the rest use `from exc`. |
+| `B905` `zip()` without `strict=` | 2 | Fixed as `strict=True`. In `explain.py` this is a genuine guard: a feature/SHAP length mismatch is exactly the 10-vs-11-feature bug this project already hit. |
+| `SIM108` if-else vs ternary | 1 | `# noqa` with reason — the ternary is a 150-char line. |
+
+Current state: **`ruff check` reports `All checks passed!`**, and frontend eslint reports 0 errors and 0 warnings across 23 files.
+
+**Type-checking (mypy) was not added — a deliberate scope decision, not an oversight.** This is a capstone at close-out. `main.py` alone is ~3,200 lines of largely un-annotated FastAPI handlers plus pandas code, where mypy is weakest; a meaningful run would mean either hundreds of errors or a config permissive enough to prove nothing. Adding it as a non-blocking, always-red check would be worse than not having it. It is a real gap, stated as one.
+
+**Prettier was not added either.** eslint (via CRA's `react-app` config) already runs clean and catches correctness issues; prettier would reformat all 23 source files for style alone.
+
+### Dependency pinning is a standing practice, not a one-off fix
+
+**Every dependency is pinned to an exact version. A version bump is a deliberate, tested change, never an implicit one.**
+
+Audit results at the time this was written:
+
+- **`backend/requirements.txt`: already 100% exact** — every line uses `==`, zero loose specifiers.
+- **`frontend/package.json`: 10 of 11 dependencies were loose** (caret ranges like `^1.7.7`). All 10 are now pinned exactly — **to the versions actually installed and passing tests**, read from the lock file and the running container, not to whatever the range happened to resolve to.
+- **`package-lock.json` was itself out of sync** and `npm ci` refused to run against it (`Missing: yaml@2.9.0 from lock file`). Regenerated; `npm ci` now installs 893 packages cleanly, and all 11 direct dependencies match `package.json` exactly.
+- **`frontend/Dockerfile.dev` used `npm install`, now `npm ci`.** `npm install` can silently resolve a newer version and rewrite the lock during an image build — the same class of drift as the shap incident, in the other half of the stack.
 
 ## Documentation Practices
 

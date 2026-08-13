@@ -27,19 +27,20 @@ from typing import Annotated, Optional
 import joblib
 import pandas as pd
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile, status
+from fastapi import Depends, FastAPI, File, HTTPException, Query, Response, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 from pydantic import BaseModel, Field, StringConstraints, field_validator
-from sqlalchemy import delete, desc, func, select
+from sqlalchemy import delete, desc, func, select, text as sa_text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.db.models import AuditLog, Base, PendingIngest, Prediction, User as UserModel
+import contextlib
 
 load_dotenv()
 
@@ -811,11 +812,14 @@ async def get_current_user(token: str = Depends(_oauth2)) -> dict:
             raise ValueError
         return payload
     except (JWTError, ValueError):
+        # `from None` deliberately: the underlying JWT error (expired vs.
+        # malformed vs. bad signature) must not reach the client, and chaining
+        # it would put it in the traceback of an auth failure.
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Could not validate credentials.",
             headers={"WWW-Authenticate": "Bearer"},
-        )
+        ) from None
 
 
 async def require_admin(user: dict = Depends(get_current_user)) -> dict:
@@ -851,13 +855,62 @@ async def health():
 
 
 @app.get("/api/health", tags=["Health"])
-async def api_health():
-    """Extended health check that includes row count of the loaded dataset."""
+async def api_health(response: Response, db: AsyncSession = Depends(get_db)):
+    """READINESS probe — can this instance actually serve a prediction right now?
+
+    Distinct from /health above, which is pure liveness (is the process up?).
+    This returns HTTP 503 when any dependency required to serve real traffic is
+    missing, so a Docker HEALTHCHECK or an orchestrator can act on it. The
+    previous version of this endpoint returned {"status": "ok"} unconditionally
+    and would have reported healthy with no database, no data and no model.
+
+    Each dependency is reported individually rather than collapsed into one
+    boolean, so an unhealthy response says WHICH dependency is down.
+    """
+    from app.ml import predictor
+
+    checks: dict[str, dict] = {}
+
+    # 1. Database reachable — a real round-trip, not "the engine object exists".
+    try:
+        await db.execute(sa_text("SELECT 1"))
+        checks["database"] = {"ok": True}
+    except Exception as exc:
+        checks["database"] = {"ok": False, "error": f"{type(exc).__name__}: {str(exc)[:200]}"}
+
+    # 2. Assessment dataset loaded. Row count > 0 specifically — an empty
+    #    DataFrame loads without raising but cannot serve a roster.
+    rows = len(_DATA) if _DATA is not None else 0
+    checks["dataset"] = {"ok": rows > 0, "rows": rows}
+
+    # 3. Attendance features loaded. ATTENDANCE_RATE is a required feature of
+    #    both live models, so without this every prediction returns an error.
+    att_rows = len(_ATTENDANCE) if _ATTENDANCE is not None else 0
+    checks["attendance"] = {"ok": att_rows > 0, "enrolments": att_rows}
+
+    # 4. A live model registered AND loaded for BOTH families. The mid-term
+    #    family is checked separately on purpose — it was silently broken once
+    #    while the complete-record model was fine.
+    checks["model_complete_record"] = {
+        "ok": predictor._PACKAGE is not None,
+        "version": predictor.LIVE_MODEL_VERSION,
+    }
+    checks["model_midterm"] = {
+        "ok": predictor._SIM_PACKAGE is not None,
+        "version": predictor.SIM_MODEL_VERSION,
+    }
+
+    healthy = all(c["ok"] for c in checks.values())
+    if not healthy:
+        response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+
     return {
-        "status":  "ok",
+        "status":  "ok" if healthy else "unhealthy",
         "version": "2.0.0",
-        "rows":    len(_DATA) if _DATA is not None else 0,
-        "message": "EDAPT API running",
+        "checks":  checks,
+        # Retained so any existing caller of the old shape keeps working.
+        "rows":    rows,
+        "message": "EDAPT API running" if healthy else "EDAPT API not ready to serve",
     }
 
 
@@ -924,10 +977,10 @@ async def forgot_password(req: ForgotPasswordRequest, db: AsyncSession = Depends
         await _append_audit_db(db, user_uid=req.email, action_type="Password Reset Requested",
                                status="Warning", detail="OTP generated but email service not configured")
         return {"message": "Email service not configured. For demo use this code.", "dev_otp": otp}
-    except Exception:
+    except Exception as exc:
         await _append_audit_db(db, user_uid=req.email, action_type="Password Reset Requested",
                                status="Error", detail="Failed to send OTP email")
-        raise HTTPException(500, "Failed to send reset email. Please try again later.")
+        raise HTTPException(500, "Failed to send reset email. Please try again later.") from exc
 
     return {"message": "If an account exists for that email, a reset code has been sent."}
 
@@ -1151,10 +1204,8 @@ def _acquire_ingest_lock() -> None:
             continue  # released between our open() and stat() — retry immediately
 
         if age > _INGEST_LOCK_STALE_SECONDS:
-            try:
+            with contextlib.suppress(FileNotFoundError):
                 _INGEST_LOCK_PATH.unlink()
-            except FileNotFoundError:
-                pass
             continue
 
         if _time.monotonic() >= deadline:
@@ -1166,10 +1217,8 @@ def _acquire_ingest_lock() -> None:
 
 
 def _release_ingest_lock() -> None:
-    try:
+    with contextlib.suppress(FileNotFoundError):
         _INGEST_LOCK_PATH.unlink()
-    except FileNotFoundError:
-        pass
 
 
 def _reject_upload_common(content: bytes, max_bytes: int) -> Optional[str]:
@@ -1214,7 +1263,7 @@ async def ingest_capstone_analyze(
     except Exception as exc:
         await _append_audit_db(db, user_uid=user["sub"], action_type="Data Upload",
                                status="Error", detail=f"Failed to parse capstone CSV: {exc}")
-        raise HTTPException(422, "The uploaded file could not be parsed as a valid CSV.")
+        raise HTTPException(422, "The uploaded file could not be parsed as a valid CSV.") from exc
     df.columns = [c.strip() for c in df.columns]
 
     from app.ml.column_classification import CAPSTONE_KEEP
@@ -1291,16 +1340,21 @@ async def ingest_capstone_confirm(
         clean = w.between(99.0, 101.0)
         stats = clean.groupby(level="SUBJECTCODE").mean() * 100
         def _cat(pct):
-            if pct == 100.0: return "FULLY_CLEAN"
-            if pct >= 90.0:  return "MOSTLY_CLEAN"
+            if pct == 100.0:
+                return "FULLY_CLEAN"
+            if pct >= 90.0:
+                return "MOSTLY_CLEAN"
             return "UNRELIABLE"
         new_cats = {s: _cat(p) for s, p in stats.items()}
         with open(RELIABILITY_PATH) as f:
             old_rel = json.load(f)
         old_cats = {}
-        for s in old_rel.get("fully_clean", []):  old_cats[s] = "FULLY_CLEAN"
-        for s in old_rel.get("mostly_clean", []): old_cats[s] = "MOSTLY_CLEAN"
-        for s in old_rel.get("unreliable", []):   old_cats[s] = "UNRELIABLE"
+        for s in old_rel.get("fully_clean", []):
+            old_cats[s] = "FULLY_CLEAN"
+        for s in old_rel.get("mostly_clean", []):
+            old_cats[s] = "MOSTLY_CLEAN"
+        for s in old_rel.get("unreliable", []):
+            old_cats[s] = "UNRELIABLE"
         subjects_reclassified = sum(
             1 for s in new_cats if s in old_cats and old_cats[s] != new_cats[s]
         )
@@ -1463,7 +1517,7 @@ async def ingest_attendance_analyze(
     except Exception as exc:
         await _append_audit_db(db, user_uid=user["sub"], action_type="Data Upload",
                                status="Error", detail=f"Failed to parse attendance CSV: {exc}")
-        raise HTTPException(422, "The uploaded file could not be parsed as a valid CSV.")
+        raise HTTPException(422, "The uploaded file could not be parsed as a valid CSV.") from exc
     df.columns = [c.strip() for c in df.columns]
 
     # Required for aggregation specifically (a functional subset of
@@ -1839,7 +1893,10 @@ ATTENDANCE_BANDS = [
 # information away). WITH_OUTCOME is the strict subset that also has a real
 # PASS/FAIL target, the only population an attendance-vs-outcome comparison
 # can honestly be computed on.
-POPULATION_ALL_TRACKED  = "all attendance-tracked enrolments (course+period+year filtered) — includes students with no matching capstone assessment record for that subject+period"
+POPULATION_ALL_TRACKED  = (
+    "all attendance-tracked enrolments (course+period+year filtered) — includes "
+    "students with no matching capstone assessment record for that subject+period"
+)
 POPULATION_WITH_OUTCOME = "enrolments with BOTH attendance data AND a matching capstone assessment record (a real PASS/FAIL target)"
 
 
@@ -1850,7 +1907,11 @@ async def attendance_distribution(
     year:      Optional[str] = Query(None),
     user: dict = Depends(get_current_user),
 ):
-    """Return count of enrolments in each attendance-rate band. Population: ALL attendance-tracked enrolments, not restricted to those with a matching assessment record — see POPULATION_ALL_TRACKED."""
+    """Return count of enrolments in each attendance-rate band.
+
+    Population: ALL attendance-tracked enrolments, not restricted to those with
+    a matching assessment record — see POPULATION_ALL_TRACKED.
+    """
     if _ATTENDANCE is None or _ATTENDANCE.empty:
         return {"data": [{"band": b, "count": 0} for b, _, _ in ATTENDANCE_BANDS], "population": POPULATION_ALL_TRACKED, "n": 0}
 
@@ -1876,7 +1937,11 @@ async def attendance_outcome(
     year:      Optional[str] = Query(None),
     user: dict = Depends(get_current_user),
 ):
-    """Return attendance-rate vs pass/fail outcome correlation for the current scope. Population: only enrolments with a matching assessment record — see POPULATION_WITH_OUTCOME."""
+    """Return attendance-rate vs pass/fail outcome correlation for the current scope.
+
+    Population: only enrolments with a matching assessment record — see
+    POPULATION_WITH_OUTCOME.
+    """
     empty = {"correlation": None, "mean_attendance_pass": None, "mean_attendance_fail": None, "n": 0, "population": POPULATION_WITH_OUTCOME}
     if _ATTENDANCE is None or _ATTENDANCE.empty or "PASS" not in _ATTENDANCE.columns:
         return empty
@@ -1898,7 +1963,12 @@ async def attendance_outcome(
 
 @app.get("/api/dashboard/attendance-by-subject", tags=["Dashboard"])
 async def attendance_by_subject(user: dict = Depends(get_current_user)):
-    """Return average attendance rate per subject, sorted ascending. Admin sees all subjects; Lecturer sees only their assigned subjects (via _role_filter). Population: ALL attendance-tracked enrolments — see POPULATION_ALL_TRACKED."""
+    """Return average attendance rate per subject, sorted ascending.
+
+    Admin sees all subjects; Lecturer sees only their assigned subjects (via
+    _role_filter). Population: ALL attendance-tracked enrolments — see
+    POPULATION_ALL_TRACKED.
+    """
     if _ATTENDANCE is None or _ATTENDANCE.empty or "SUBJECTCODE" not in _ATTENDANCE.columns:
         return {"data": [], "population": POPULATION_ALL_TRACKED}
 
@@ -3155,8 +3225,10 @@ async def get_audit_logs(
     await _append_audit_db(db, user_uid=user["sub"], action_type="Data Access",
                            status="Success", detail="Viewed audit log")
     query = select(AuditLog).order_by(desc(AuditLog.id))
-    if action_type:   query = query.where(AuditLog.action_type == action_type)
-    if status_filter: query = query.where(AuditLog.status == status_filter)
+    if action_type:
+        query = query.where(AuditLog.action_type == action_type)
+    if status_filter:
+        query = query.where(AuditLog.status == status_filter)
     result = await db.execute(query)
     logs   = result.scalars().all()
 
@@ -3167,7 +3239,7 @@ async def get_audit_logs(
     role_rows = await db.execute(
         select(UserModel.email, UserModel.role).where(UserModel.email.in_(uids))
     )
-    role_map: dict[str, str] = {email: role for email, role in role_rows.all()}
+    role_map: dict[str, str] = dict(role_rows.all())
 
     data = [
         {

@@ -3,23 +3,24 @@
   "version": "2.0.0",
   "private": true,
   "dependencies": {
-    "@testing-library/jest-dom": "^6.4.6",
-    "@testing-library/react": "^16.0.0",
-    "@testing-library/user-event": "^14.5.2",
-    "axios": "^1.7.7",
-    "papaparse": "^5.5.3",
-    "react": "^18.3.1",
-    "react-dom": "^18.3.1",
-    "react-router-dom": "^6.26.2",
+    "@testing-library/jest-dom": "6.9.1",
+    "@testing-library/react": "16.3.2",
+    "@testing-library/user-event": "14.6.1",
+    "axios": "1.15.0",
+    "papaparse": "5.5.3",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "react-router-dom": "6.30.3",
     "react-scripts": "5.0.1",
-    "recharts": "^2.12.7",
-    "web-vitals": "^3.5.2"
+    "recharts": "2.15.4",
+    "web-vitals": "3.5.2"
   },
   "scripts": {
     "start": "react-scripts start",
     "build": "react-scripts build",
     "test": "react-scripts test",
-    "eject": "react-scripts eject"
+    "eject": "react-scripts eject",
+    "lint": "eslint src --ext .js,.jsx --max-warnings 0"
   },
   "eslintConfig": {
     "extends": [

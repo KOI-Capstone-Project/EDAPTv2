@@ -129,7 +129,11 @@ def explain_prediction(model_package: dict, background: Optional[np.ndarray], fe
     delta = abs(reconstructed - predicted_pass_probability)
 
     factors = []
-    for name, value, shap_val in zip(feature_names, feature_values[0], ens_shap):
+    # strict=True deliberately: a length mismatch between the model's feature
+    # names, the submitted values and the SHAP row is exactly the failure this
+    # project already hit once (a 10-column SHAP background cached against an
+    # 11-feature model). Fail loudly rather than silently truncate.
+    for name, value, shap_val in zip(feature_names, feature_values[0], ens_shap, strict=True):
         factors.append({
             "feature":       name,
             "value":         float(value),

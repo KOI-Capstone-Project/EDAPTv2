@@ -303,7 +303,9 @@ def test_ingest_lock_serializes_two_real_concurrent_processes():
         assert not p_b.is_alive(), "process B did not finish within 30s — likely hung, not a clean lock failure"
         assert p_a.exitcode == 0, f"process A crashed (exitcode {p_a.exitcode})"
         assert p_b.exitcode == 0, f"process B crashed (exitcode {p_b.exitcode})"
-        assert result_a.exists() and result_b.exists(), "one process never reached the point of writing its result — check for a silent crash"
+        assert result_a.exists() and result_b.exists(), (
+            "one process never reached the point of writing its result — check for a silent crash"
+        )
 
         with open(result_a) as f:
             ra = json.load(f)

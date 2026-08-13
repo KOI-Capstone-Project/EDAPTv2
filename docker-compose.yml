@@ -33,7 +33,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-      
+
 
   # ── FastAPI backend ────────────────────────────────────────────────────────
   backend:
@@ -62,6 +62,17 @@ services:
         --port 8000
         --reload
         --log-level ${LOG_LEVEL:-info}
+    # Readiness, not liveness: /api/health returns 503 unless the database,
+    # both datasets and a live model for BOTH families are actually available.
+    # urllib raises on a 503, which exits non-zero and marks the container
+    # unhealthy. There is no curl in the image, so python makes the request.
+    # start_period is generous because startup parses 2.5M attendance rows.
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 180s
 
   # ── React frontend ─────────────────────────────────────────────────────────
   frontend:
