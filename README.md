@@ -328,6 +328,15 @@ No privacy guarantee beyond "direct identifiers were removed upstream" should be
 
 **Not done automatically, deliberately.** Changing repository visibility and rewriting published history are both destructive and outward-facing, and neither is reversible by the person running them. They are the owner's to execute.
 
+**Sweep for stray copies — done 2026-08-13, one residue found.** After the scrub missed `data/Capstone_data_20260324.csv` on its first pass (the file had lived at `data/` root before being moved to `data/archive/`), every path that has ever existed in any commit on any branch was enumerated from the pre-scrub mirror — 148 distinct paths — and cross-checked. Results:
+
+- **All four real-data paths are scrubbed**: `data/Capstone_data_20260729.csv`, `data/Capstone_data_20260324.csv`, `data/archive/Capstone_data_20260324.csv`, `data/masked_attendance.csv.gz`, plus `.env-working-saved`. Each returns **0 commits** from `git log --all --full-history`.
+- **No other data file was found.** The only blobs over 100KB ever committed were those three CSV/gz files, two model `.pkl`s, `package-lock.json` and `main.py`. The four aggregate CSVs that remain tracked (`subject_reliability_report`, `clean_subjects`, `weighting_anomaly_report`, `anomaly_report_for_ken`) were each opened and contain **no student identifier column** — they are subject-level summaries. `scripts/sql/001_seed.sql` is a 14-line commented placeholder with no rows.
+- **The model `.pkl` files contain no raw training rows** — checked key by key; the package holds the fitted estimator, a subject-difficulty lookup and metadata, with no 2-D data array.
+- **Residue found, and it is real: `shap_background_main.pkl` and `shap_background_simulated.pkl` each contain 100 rows × 11 columns of REAL student feature vectors** — actual assessment marks, weightings, coverage and attendance rates sampled from the training set as SHAP's reference distribution. **There is no identifier column**: no student ID, no gender, age group or country (none of those are model features). So this is de-identified academic measurements for 100 unnamed enrolments out of 65,903, not a re-identifiable record set — but it is genuinely derived from real students and is still tracked, because `explain.py` loads it at import and CI needs it.
+
+  **Deliberately not changed here.** Regenerating these from synthetic data would alter the reference distribution every live SHAP explanation is computed against, shifting `base_value` and every contribution the UI shows. That is a model-behaviour change, and this project does not make those as a side effect of a cleanup task. Recorded as an open decision for the owner: accept it as de-identified, or regenerate from synthetic data and re-validate the explanations.
+
 **No secrets were exposed.** Checked separately and independently of this: `.env` is gitignored, has never appeared in any commit tree in any revision, and a scan of all history for API-key, private-key and token patterns found no matches. The exposure here is student data, not credentials.
 
 ### Expected Columns — capstone marks

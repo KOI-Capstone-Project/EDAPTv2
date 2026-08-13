@@ -925,3 +925,95 @@ def test_intervention_outcome_report_refuses_to_compare_on_thin_data():
     assert "+20.0 percentage points" in rich
     # ...but never as proof.
     assert "NOT EVIDENCE THAT INTERVENTIONS WORK" in rich
+
+
+# ── Missing required feature (zero-attendance subject) ──────────────────────
+
+@pytest.mark.asyncio
+async def test_subject_with_no_attendance_returns_honest_unavailable_not_503():
+    """A subject with no attendance data must decline clearly, not 503.
+
+    Regression test for a real, reproduced bug. When a subject has no
+    attendance rows, neither a per-student rate nor a subject average exists,
+    so ATTENDANCE_RATE is None and the 11-feature live model cannot be called.
+    That used to surface as `503 "ML model not loaded. Run train_model.py
+    first."` — wrong on both counts: the model is loaded, and a 503 tells the
+    client the service is down when only this one prediction lacks an input.
+
+    No live subject currently has zero attendance (verified: 129 of 129 have
+    it), so the condition is constructed here by removing one subject's
+    attendance rows from the in-memory table, then restored.
+
+    Also asserts the fix does NOT fabricate an attendance value — a confident
+    probability computed from an invented input would be worse than declining.
+    """
+    import app.main as m
+
+    subject, period = "ACC705", "23.2"
+    original = m._ATTENDANCE
+
+    df = m._DATA[(m._DATA["SUBJECTCODE"] == subject) & (m._DATA["STUDYPERIOD"] == period)]
+    df = df.dropna(subset=["MARKPERCENT"])
+    student = df["STUDENTID_MASKED"].iloc[0]
+    grp = df[df["STUDENTID_MASKED"] == student].sort_values("WEIGHTING", ascending=False).reset_index(drop=True)
+    used = [{"type": str(r["ASSESSMENTTYPECODE"]), "mark_percent": float(r["MARKPERCENT"]),
+             "weighting": float(r["WEIGHTING"])} for _, r in grp.iterrows()]
+    a1 = grp.iloc[0]
+    a2 = grp.iloc[1] if len(grp) > 1 else a1
+    body = {
+        "student_id": str(student), "subject": subject, "study_period": period,
+        "trimester_num": float(period),
+        "assess1_mark": float(a1["MARKPERCENT"]), "assess1_weight": float(a1["WEIGHTING"]),
+        "assess1_contribution": float(a1["MARKPERCENT"] * a1["WEIGHTING"] / 100),
+        "assess2_mark": float(a2["MARKPERCENT"]), "assess2_weight": float(a2["WEIGHTING"]),
+        "assess2_contribution": float(a2["MARKPERCENT"] * a2["WEIGHTING"] / 100),
+        "partial_weighted_score": float(a1["MARKPERCENT"] * a1["WEIGHTING"] / 100),
+        "partial_weight_coverage": float(a1["WEIGHTING"] / 100),
+        "num_assessments": len(used),
+        "total_weight_recorded": float(sum(u["weighting"] for u in used)),
+        "weight_complete": True, "assessments_used": used,
+    }
+
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            token = await _login(client)
+            headers = {"Authorization": f"Bearer {token}"}
+
+            # Baseline: with attendance present this must be a real prediction.
+            before = await client.post("/api/predict", json=body, headers=headers)
+            assert before.status_code == 200
+            assert before.json().get("probability") is not None
+
+            # Construct the zero-attendance condition.
+            m._ATTENDANCE = m._ATTENDANCE[m._ATTENDANCE["SUBJECTCODE"] != subject]
+            m._attendance_raw_sessions_cache.clear()
+            assert m._subject_average_attendance_rate(subject) is None
+
+            after = await client.post("/api/predict", json=body, headers=headers)
+
+        assert after.status_code == 200, (
+            f"expected an honest unavailable response, got {after.status_code} "
+            f"({after.text[:120]})"
+        )
+        data = after.json()
+        assert data["prediction_available"] is False
+        assert data["data_status"] == "missing_required_data"
+        assert data["missing_feature"] == "ATTENDANCE_RATE"
+        # Must decline, not guess.
+        assert data.get("probability") is None
+        assert data.get("prediction") is None
+        assert "train_model.py" not in data["message"], (
+            "still telling the user to retrain for what is a data gap"
+        )
+    finally:
+        m._ATTENDANCE = original
+        m._attendance_raw_sessions_cache.clear()
+
+    # Regression: a normal subject is completely unaffected by the change.
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        token = await _login(client)
+        restored = await client.post("/api/predict", json=body,
+                                     headers={"Authorization": f"Bearer {token}"})
+    assert restored.status_code == 200
+    assert restored.json().get("probability") is not None
+    assert restored.json().get("prediction_available", True) is not False

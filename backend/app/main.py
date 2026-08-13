@@ -2444,7 +2444,46 @@ async def predict_outcome(
         )
 
     if "error" in result:
-        raise HTTPException(503, "ML model not loaded. Run train_model.py first.")
+        # Two genuinely different failures used to collapse into one misleading
+        # 503 saying "ML model not loaded. Run train_model.py first."
+        #
+        #   1. A required FEATURE was unavailable for this specific request.
+        #      Reproduced: a subject with no attendance rows at all yields no
+        #      per-student rate and no subject average, so ATTENDANCE_RATE is
+        #      None and the 11-feature live model cannot be called. The model is
+        #      loaded and healthy; this one prediction lacks an input. Telling a
+        #      lecturer to "run train_model.py" is wrong advice for a data gap,
+        #      and a 503 tells the frontend the service is down when it isn't.
+        #
+        #   2. No model is actually loaded. That IS a 503.
+        #
+        # The fix deliberately does NOT invent an attendance value. Substituting
+        # a global mean or a zero would produce a confident-looking probability
+        # from a fabricated input, which is worse than saying "not enough data" —
+        # this project already treats a missing input as a reason to decline
+        # (see the insufficient_data coverage gate above), not to guess.
+        #
+        # Falling back to a 10-feature model was considered and rejected: no
+        # 10-feature model is live, so it would mean loading a superseded,
+        # ungated version at serving time and silently serving predictions from
+        # a model nobody promoted — exactly what the promotion gate exists to
+        # prevent.
+        error_text = str(result["error"])
+        if error_text.startswith("missing_required_feature"):
+            missing_feature = error_text.split(":", 1)[1].split(" is required")[0].strip()
+            return {
+                "subject":              req.subject,
+                "prediction_available": False,
+                "data_status":          "missing_required_data",
+                "missing_feature":      missing_feature,
+                "message": (
+                    f"Not enough data to generate a prediction: this subject has no "
+                    f"{missing_feature.replace('_', ' ').lower()} recorded, which the "
+                    f"current model requires. This is a data gap, not a system fault — "
+                    f"the prediction service is running normally."
+                ),
+            }
+        raise HTTPException(503, "ML model is not loaded. Run train_model.py first.")
 
     result["attendance_rate_is_default"] = attendance_rate_is_default and result.get("attendance_rate_used") is not None
 
@@ -3167,6 +3206,17 @@ async def subject_roster(
             # hundreds of objects the table never renders) — only the single
             # actionable conclusion, which is what the roster can act on.
             "top_actionable_factor":         top_actionable_factor(result.get("shap_explanation")),
+            # Why this row has no probability, when it has none. The roster
+            # folds a model error into probability=None, which is exactly how a
+            # real outage once hid behind HTTP 200 (see README, Testing
+            # Practices). A missing required feature — e.g. a subject with no
+            # attendance data — must be visible as a stated reason rather than
+            # an unexplained blank cell.
+            "data_status": (
+                "missing_required_data"
+                if str(result.get("error", "")).startswith("missing_required_feature")
+                else None
+            ),
             # Additive — surfaces the attendance rate this row was actually
             # scored with, so the roster and /api/predict can be checked
             # against each other for the same student (see
