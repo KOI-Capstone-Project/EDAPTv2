@@ -288,9 +288,38 @@ To get a plain CSV back for inspection: `gunzip -c data/masked_attendance.csv.gz
 - **The robustness of that masking has not been verified by this project, and could not be** — verifying it would require the unmasked source and the mapping, neither of which this project has ever had.
 - **"Masked" is pseudonymisation, not anonymisation.** Whoever holds the upstream mapping can re-identify any row. The pseudonyms are stable and sequential across both files, which is what makes the student↔attendance join work at all — the same property that makes them a consistent key for anyone with the mapping.
 - **Re-identification risk from quasi-identifiers has not been assessed.** Age group + gender + country + subject + study period + building, in combination, may well be unique for some students in a 7,926-student cohort. No k-anonymity or similar analysis has been run. This is a real, unmeasured risk, not a theoretical one.
-- **The repository is not a safe place for this data if it were ever made public.** Both datasets are committed to git, so anyone with repository access has the full extract. Access control is currently repository access, nothing more.
-
 No privacy guarantee beyond "direct identifiers were removed upstream" should be inferred from anything in this project.
+
+#### DECISION (2026-08-13): this data is NOT acceptable in a public repository
+
+Recorded as an explicit decision by the project owner, not left as a passive disclosure, because it had been flagged twice without being resolved.
+
+**The situation as found.** On 2026-08-13 the GitHub API reported `"visibility": "public"` for `KOI-Capstone-Project/EDAPTv2` (0 forks, 0 stars, 0 watchers at that time). Committed to that repository's history and reachable by anyone:
+
+| Path | Contents |
+|---|---|
+| `data/Capstone_data_20260729.csv` | ~34MB — real assessment marks and outcomes, 7,926 students |
+| `data/archive/Capstone_data_20260324.csv` | an earlier extract of the same population |
+| `data/masked_attendance.csv.gz` | ~9MB gz — 2,517,435 real class-attendance sessions |
+| `backend/app/ml/models/model_20260808_110630.pkl` | model trained on that data |
+| `backend/app/ml/models_simulated/model_20260808_113534.pkl` | model trained on that data |
+
+**The decision: this is not acceptable.** Pseudonymised student records must not sit in a public repository, and the re-identification risk from quasi-identifiers listed above has never been assessed. Publication was not a deliberate data-handling choice; it is the state the repository happens to be in.
+
+**Required remediation, in order:**
+
+1. **Set the repository to Private.** This is the only step that stops ongoing exposure, and it is the one to do first. Everything below is cleanup that can follow.
+2. **Scrub the data files from git history** — not just delete them from the tip. `git rm` leaves every blob in history and reachable by SHA. Use [`git-filter-repo`](https://github.com/newren/git-filter-repo) (preferred) or BFG:
+   ```bash
+   git filter-repo --path data/ --path-glob 'backend/app/ml/models*/*.pkl' --invert-paths
+   ```
+   This rewrites every commit, so it must be coordinated with anyone holding a clone, and the remote needs a force push afterwards.
+3. **Re-supply the data outside git** — a private bucket, an institutional share, or a local-only path — and reduce `data/` in the repo to a schema description plus a small synthetic fixture. Note the real consequence: **CI's backend-tests job depends on the committed data and models**, so this step requires deciding how CI gets a dataset (synthetic fixture, or a secret-authenticated download), not just removing files.
+4. **Assume the extract has been disclosed** for as long as steps 1 and 2 are outstanding, and tell whoever owns this data at KOI. "0 forks, 0 stars" is weak evidence of no access — it is not an access log.
+
+**Not done automatically, deliberately.** Changing repository visibility and rewriting published history are both destructive and outward-facing, and neither is reversible by the person running them. They are the owner's to execute.
+
+**No secrets were exposed.** Checked separately and independently of this: `.env` is gitignored, has never appeared in any commit tree in any revision, and a scan of all history for API-key, private-key and token patterns found no matches. The exposure here is student data, not credentials.
 
 ### Expected Columns — capstone marks
 
