@@ -95,6 +95,16 @@ jobs:
           print("every pinned requirement is installed at its exact pinned version")
           PY
 
+      # The real extracts are NOT in git — they hold real pseudonymised records
+      # for 7,926 students and were scrubbed from history on 2026-08-13. CI
+      # generates a structurally identical, entirely fabricated dataset instead.
+      # Deterministic (fixed seed), so a green run today cannot go red tomorrow
+      # because the data came out differently.
+      - name: Generate synthetic dataset (no real student data in this repo)
+        run: |
+          python3 scripts/generate_synthetic_data.py --out data
+          ls -la data/
+
       # The volume layout mirrors docker-compose.yml exactly: source at /app,
       # datasets read-only at /data. --network host lets the container reach the
       # postgres service published on the runner's localhost.
