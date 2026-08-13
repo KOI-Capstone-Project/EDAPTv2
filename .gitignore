@@ -85,3 +85,24 @@ Thumbs.db
 .vscode/
 *.swp
 .env-working-saved
+
+# ── Real student data — NEVER COMMIT ─────────────────────
+# These files were scrubbed from git history with git-filter-repo on
+# 2026-08-13 because the repository was public and they contain real
+# pseudonymised records for 7,926 students (assessment marks, outcomes,
+# demographics, 2.5M attendance sessions). They must live on disk / in
+# private storage only. Re-committing them would undo that remediation
+# silently, which is exactly what these rules exist to prevent.
+#
+# The aggregate reports that remain tracked (subject_reliability*.csv,
+# clean_subjects.csv, weighting_anomaly_report.csv, anomaly_report_for_ken.csv)
+# were each checked and contain NO student identifier column — they are
+# subject-level summaries, not per-student rows.
+data/Capstone_data_*.csv
+data/masked_attendance.csv
+data/masked_attendance.csv.gz
+data/archive/
+
+# Historical: a tracked env file that leaked non-production DB credentials
+# (the role no longer exists). Scrubbed from history the same day.
+.env-working-saved
