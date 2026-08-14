@@ -69,6 +69,7 @@ The two dashboards were measured, not assumed, before deciding: roughly **23% li
 |------|------|-------|------|
 | Subject Analytics | `SubjectAnalytics.jsx` | `/subject-analytics` | Head of Technology or Head of School |
 | Data Ingestion | `DataIngestion.jsx` | `/data-ingestion` | Head of Technology or Head of School |
+| Model Health | `ModelHealth.jsx` | `/model-health` | Head of Technology or Head of School — **read-only**, see [Model health](#model-health-dashboard-admin-only-read-only) |
 | Audit Log | `AuditLog.jsx` | `/audit-log` | `is_super_admin` only |
 | User Management | `UserManagement.jsx` | `/users` | `is_super_admin` only |
 
@@ -106,6 +107,8 @@ EDAPTv2/
 │   │       ├── check_bias_persistence.py        # Cross-retrain fairness-flag trend detection
 │   │       ├── verify_dynamic_period_e2e.py     # Isolated end-to-end test of dynamic period resolution
 │   │       ├── investigate_fail_rate_shift.py   # Diagnostic: period-over-period fail-rate investigation
+│   │       ├── actionable.py                     # "What would help most" — actionable factor from real SHAP
+│   │       ├── intervention_outcome_report.py    # Intervention vs. outcome comparison (refuses thin data)
 │   │       ├── sim_model_registry.py             # Versioned registry for the mid-term model family
 │   │       ├── compare_and_promote_simulated.py  # Gated promotion / rollback CLI (mid-term)
 │   │       ├── models/                           # Complete-record model family
@@ -117,8 +120,9 @@ EDAPTv2/
 │   ├── scripts/
 │   │   └── retrain_loop.sh            # Sidecar scheduler loop (scheduled_retrain.py → sleep 24h → repeat)
 │   ├── tests/
-│   │   ├── test_smoke.py              # 15 tests
-│   │   └── test_ingestion_e2e.py      # 8 tests (23 total)
+│   │   ├── conftest.py                # runs the app's real startup handler for tests
+│   │   ├── test_smoke.py              # 24 tests
+│   │   └── test_ingestion_e2e.py      # 8 tests (32 total)
 │   ├── Dockerfile.dev
 │   └── Dockerfile.prod
 ├── frontend/
@@ -129,7 +133,7 @@ EDAPTv2/
 │       │   ├── Sidebar.jsx
 │       │   ├── GeminiPanel.jsx
 │       │   └── ErrorBoundary.jsx
-│       ├── pages/                     # See Pages & Routes above
+│       ├── pages/                     # See Pages & Routes above (incl. ModelHealth.jsx)
 │       ├── services/api.js            # Axios instance with JWT interceptor
 │       └── utils/auth.js
 ├── data/
@@ -139,7 +143,11 @@ EDAPTv2/
 │   ├── subject_reliability_report.csv # Human-readable companion to subject_reliability.json
 │   └── archive/                       # Superseded raw-data snapshots, kept for before/after comparison
 ├── scripts/
+│   ├── generate_synthetic_data.py     # Fabricated dataset for CI (real data is not in git)
 │   └── identify_clean_subjects.py     # Regenerates subject_reliability.json
+├── .github/workflows/ci.yml           # CI — fresh image build, lint, both test suites
+├── .pre-commit-config.yaml            # Local commit gate (ruff, whitespace, large files, private keys)
+├── ruff.toml                          # Lint config — see CI and quality gates
 ├── model_card.md                      # Model identity, training data, ablation results, calibration, limitations
 ├── docker-compose.yml                 # Dev — db · backend · frontend · pgadmin · scheduler (opt-in)
 ├── docker-compose.prod.yml            # Prod — db · backend (gunicorn) · scheduler · frontend · nginx
@@ -268,8 +276,26 @@ Two source files are loaded automatically into in-memory pandas DataFrames **at 
 
 | File | Contents | Notes |
 |---|---|---|
-| `data/Capstone_data_20260729.csv` (~35MB) | Assessment marks, one row per assessment item | Earlier snapshots live in `data/archive/` |
-| `data/masked_attendance.csv.gz` (~9MB) | Class-session attendance, one row per student per session (2.5M rows) | **Stored gzipped** — 119MB uncompressed |
+| `data/Capstone_data_20260729.csv` (~35MB) | Assessment marks, one row per assessment item | **Not in git** — see the box below |
+| `data/masked_attendance.csv.gz` (~9MB) | Class-session attendance, one row per student per session (2.5M rows) | **Not in git.** Stored gzipped — 119MB uncompressed |
+
+> ### ⚠️ Neither file is in this repository
+>
+> Both were **scrubbed from git history on 2026-08-13** and are now gitignored — they hold real records for 7,926 students. See [Data Handling](#data-handling--what-this-system-processes-and-what-is-not-guaranteed) below for the full account.
+>
+> **A fresh clone therefore has no dataset.** Two ways to get one:
+>
+> ```bash
+> # Option A — synthetic. Structurally identical, entirely fabricated,
+> # deterministic (fixed seed). This is what CI uses.
+> python3 scripts/generate_synthetic_data.py
+>
+> # Option B — the real extract, from private storage, placed at exactly:
+> #   data/Capstone_data_20260729.csv
+> #   data/masked_attendance.csv.gz
+> ```
+>
+> The app reads those two exact paths, so either option works with no code change. Startup degrades honestly if they are absent: `/api/health` reports `dataset.ok: false` and returns 503 rather than pretending to be ready.
 
 **Why attendance is gzipped:** the raw file is 119MB, which exceeds GitHub's 100MB per-file hard limit and would make the repo unclonable without Git LFS. Gzip brings it to ~9MB (92% smaller) with no code cost — `pd.read_csv()` decompresses `.gz` transparently, so every consumer (`main.py` startup, `build_attendance_features.py`, `train_model.load_attendance_raw()`) just points at the `.gz` path. Verified identical: both files parse to the same 2,517,435 × 11 DataFrame (`.equals()` → `True`), with no meaningful read-time difference (0.9s vs 0.8s).
 
@@ -407,6 +433,20 @@ The table's original design FK'd `student_id`/`trimester_id` into the empty `stu
 | `predicted_at` | DateTime | |
 
 Unique constraint on `(student_id_masked, subject_code, study_period, model_version)` — one row per student/subject/period/model-version combination, upserted on repeat predictions.
+
+### `interventions` — real actions a human took
+
+Deliberately its own table rather than columns on `predictions`. A prediction is a model output that gets upserted on re-prediction; an intervention is a human act that must never be overwritten by a later re-prediction, and one enrolment can accumulate several over a term.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | BigInteger, PK | |
+| `student_id_masked` / `subject_code` / `study_period` | String | Same CSV-native identifiers the rest of the app uses |
+| `prediction_id` | BigInteger, FK → `predictions.id`, nullable | `ON DELETE SET NULL` — the record that someone contacted a student must outlive the prediction |
+| `action_type` | String(50) | Validated against an app-level whitelist (`INTERVENTION_ACTION_TYPES`), not a DB enum |
+| `notes` | Text, nullable | |
+| `created_by` | String(255) | Email/uid of whoever logged it |
+| `created_at` | DateTime | |
 
 No migration framework (Alembic is a dependency but unused) — schema changes are applied via `Base.metadata.create_all()` on an empty table, or direct `ALTER TABLE` for tables with real data.
 
@@ -553,13 +593,59 @@ docker exec edaptv2_backend python3 -m app.ml.check_bias_persistence
 
 ---
 
+## Intervention tracking
+
+A prediction says who is at risk; this records what anyone actually **did** about it. On a real student's detail view in the Predictor, a lecturer can log an action (email sent / meeting scheduled / referred to support services / other) with an optional note, and see everything already logged for that student in that subject.
+
+- **Scoped in the SQL query, not filtered afterwards** — a lecturer's rows for subjects they don't teach are never loaded. A lecturer with no assigned subjects sees nothing rather than everything: the failure mode here is empty, not open.
+- The action-type list is served by `GET /api/interventions/action-types` so the UI cannot offer a value the API would reject.
+- `prediction_id` is a real but nullable FK, so an action can be logged without a specific prediction on screen.
+
+**Whether interventions actually help is NOT answered by this feature, and the code says so.** `intervention_outcome_report.py` compares actual pass rates for High Risk students with and without a logged action, and **refuses to report a percentage when either group is too small** — which is the current state of the data:
+
+```bash
+docker exec edaptv2_backend python3 -m app.ml.intervention_outcome_report
+# VERDICT: NOT ENOUGH DATA. Both groups need at least 10 students before a
+# percentage means anything; this has 0 and 29.
+```
+
+Its docstring lists four live confounds. The most serious is **selection on the outcome**: lecturers choose who to contact, so if they intervene on borderline students the intervention gets credit for passes that would have happened anyway — and if they intervene on the most hopeless cases, a real positive effect is masked. Both are plausible and they push in opposite directions, so even the *sign* of the bias is unpredictable. A difference here is a prompt to design a real evaluation, not evidence of one.
+
+## "What would help most" — actionable recommendations
+
+Derived from the SHAP explanation already computed for a prediction — never a second model call — and narrowed to the question SHAP doesn't answer: *of the things this student could actually change, which is hurting them most?* Returned as `top_actionable_factor` on `/api/predict` (real students only) and on every roster row.
+
+Three exclusion categories, kept separate because they are separate arguments (see `app/ml/actionable.py`):
+
+| Excluded | Why |
+|---|---|
+| `SUBJECT_DIFFICULTY`, `ASSESS*_WEIGHT`, `TRIMESTER_NUM`, `PARTIAL_WEIGHT_COVERAGE` | Structural — real drivers, but not the student's to change. "Improve subject difficulty" is noise at best, blame-shifting at worst. |
+| Gender, age group, country | Never actionable advice. **Note: no demographic feature is in either model's feature set** — verified against both packages. This is a forward-compatible guard, not a live filter. |
+| `ASSESS*_CONTRIBUTION`, `PARTIAL_WEIGHTED_SCORE` | Arithmetic restatements of a mark — would let one cause occupy several ranking slots and crowd out a genuinely different one. |
+
+**The exclusion changes the answer on real data, it isn't decorative.** For a typical student the two largest harmful factors are `PARTIAL_WEIGHT_COVERAGE` (−3.23) and `SUBJECT_DIFFICULTY` (−1.23), neither actionable; the recommendation is `ASSESS1_MARK` at −0.39, **8× smaller**. A naive "largest negative SHAP" implementation would tell a lecturer to fix the subject's difficulty.
+
+**No numeric outcome is ever claimed.** SHAP values are not linearly interpretable as "change X by this much, get Y" — asserting one would require actually re-running the model with the feature adjusted. The copy states direction and relative importance only, and says so on screen. Template-based rather than Gemini, since `GEMINI_API_KEY` is a placeholder here and a Gemini-only version would be untestable.
+
+**No recommendation ≠ nothing to improve.** It means every factor this student can act on is currently *helping* them. It is not gated on the predicted outcome: on a real 146-student roster, 66 predicted-**Pass** students received a recommendation, and of the 48 with none, zero had a harmful actionable factor.
+
+## Model health dashboard (admin-only, read-only)
+
+`/model-health`, gated to Head of Technology or Head of School, backed by `GET /api/admin/model-health`. Surfaces the live model of each family (version, metrics, promotion time, feature count, and **serving vs registered threshold separately** — they can legitimately differ), predicted-vs-actual accuracy from reconciled outcomes, and fairness-flag persistence.
+
+**Read-only by design, and enforced by a test** that fails if any mutating route appears under that path. Promotion and rollback stay CLI-only behind `compare_and_promote`'s gate, which forces a human to read a real comparison and type `--force` with a recorded justification for a borderline case. A one-click "Promote" button would route around the exact safeguard this project built after a model went live ungated with no recoverable backup.
+
+The two CLI scripts gained `collect()`/`summarise()` functions that `main()` now prints from, so the dashboard and the CLI share one implementation — notably of the dedupe rule that stops a re-run on unchanged data counting as independent evidence. A test asserts the endpoint matches a fresh direct call.
+
+---
+
 ## Running Tests
 
 ```bash
 docker exec edaptv2_backend pytest tests/ -v
 ```
 
-**24 tests, all passing** as of this README (regenerated via `pytest --collect-only`, not hand-typed — `test_smoke.py`'s 16 plus `test_ingestion_e2e.py`'s 8, on a container built `--no-cache` from `requirements.txt`) — covering health/auth, the three coverage-tier prediction paths, server-side recomputation of partial scores (regression test for the train/serve consistency bug), SHAP explanation consistency for both models, the Fail/Safe risk-band contradiction fix (both an HTTP-level reproduction of the reported bug and a pure unit-level invariant sweep across five threshold values), the roster's server-side feature-assembly path for both coverage tiers, cross-endpoint agreement on a real student's attendance rate, the two-phase ingestion flow's Postgres-backed pending-row handoff (including a real cross-process lock-contention test and a TTL-expiry test against a genuinely backdated row), and column classification.
+**32 tests, all passing** as of this README (regenerated via `pytest --collect-only`, not hand-typed — `test_smoke.py`'s 24 plus `test_ingestion_e2e.py`'s 8, on a container built `--no-cache` from `requirements.txt`) — covering health/auth, the three coverage-tier prediction paths, server-side recomputation of partial scores (regression test for the train/serve consistency bug), SHAP explanation consistency for both models, the Fail/Safe risk-band contradiction fix (both an HTTP-level reproduction of the reported bug and a pure unit-level invariant sweep across five threshold values), the roster's server-side feature-assembly path for both coverage tiers, cross-endpoint agreement on a real student's attendance rate, intervention scoping across two lecturers with disjoint subjects, actionable-factor selection (including that it skips larger non-actionable factors and never surfaces a demographic one), the admin-only read-only model-health endpoint, the honest-unavailable response for a subject with no attendance data, the two-phase ingestion flow's Postgres-backed pending-row handoff (including a real cross-process lock-contention test and a TTL-expiry test against a genuinely backdated row), and column classification.
 
 ---
 
@@ -595,7 +681,10 @@ Set `GEMINI_API_KEY` before starting the backend. Without a real key, every call
 | Explorer | `GET /api/explorer/records` · `filters` · `student/{id}` · `export` |
 | Subjects | `GET /api/subjects/list` · `analytics` · `{subject}/roster` · `{subject}/assessments` |
 | Ingest | `POST /api/ingest` · `GET /api/ingest/preview` |
-| ML | `POST /api/predict` (routes to complete-record, mid-term-estimate, or insufficient-data based on server-computed coverage; includes `shap_explanation`) |
+| ML | `POST /api/predict` (routes to complete-record, mid-term-estimate, or insufficient-data based on server-computed coverage; includes `shap_explanation` and, for a real student, `top_actionable_factor`) |
+| Interventions | `POST /api/interventions` · `GET /api/interventions` · `GET /api/interventions/action-types` |
+| Model health | `GET /api/admin/model-health` (admin only, read-only) |
+| Health | `GET /health` (liveness) · `GET /api/health` (readiness — 503 if DB, data or either live model is missing) |
 | Gemini | `POST /api/gemini/alert` · `analyse` · `ask` · `institution-alert` · `institution-analyse` · `institution-ask` · `GET /api/gemini/token-log` |
 | Users | `GET /api/users` · `POST /api/users` · `PUT /api/users/{email}` · `DELETE /api/users/{email}` |
 | Audit | `GET /api/audit-logs` |
@@ -704,7 +793,7 @@ Every incident documented above was caught by a person deciding to check, not by
 | `ruff check` (backend lint) | `.github/workflows/ci.yml` → `backend-lint` | every push and PR |
 | Fresh `--no-cache` image build | `backend-tests` | every push and PR |
 | Image-vs-`requirements.txt` assertion | `backend-tests` | every push and PR |
-| Full backend suite (24 tests) inside that image | `backend-tests` | every push and PR |
+| Full backend suite (32 tests) inside that image | `backend-tests` | every push and PR |
 | `npm ci` + eslint + frontend tests | `frontend` | every push and PR |
 | ruff, whitespace, YAML/JSON validity, large files, private keys, conflict markers | `.pre-commit-config.yaml` | every local commit |
 
