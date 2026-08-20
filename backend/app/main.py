@@ -389,12 +389,46 @@ def _verify_otp(email: str, code: str) -> bool:
 # applied per request in _role_filter. Head of Technology and Head of School see all
 # rows; Lecturers see only rows matching their assigned subjects.
 _DATA: Optional[pd.DataFrame] = pd.DataFrame()
-
-# Load the bundled development dataset on server start so the demo works without a
-# manual upload. The /api/ingest endpoint handles runtime uploads and overwrites _DATA.
 _DATA_PATH = Path(__file__).parent.parent.parent / "data" / "Capstone_data_20260729.csv"
+
+_ATTENDANCE: Optional[pd.DataFrame] = pd.DataFrame()
+_ATTENDANCE_PATH = Path(__file__).parent.parent.parent / "data" / "masked_attendance.csv.gz"
+
+
+def _current_capstone_path() -> Path:
+    """Whatever capstone CSV is actually backing the live dataset right now:
+    the ingested override (INGESTED_DATA_DIR/ingested_capstone.csv) if an
+    admin has ever confirmed a capstone upload, else the bundled sample
+    file this container started with. Used both at startup — so previously
+    ingested data survives a container restart instead of reverting to the
+    bundled sample (or nothing) — and by build_attendance_features's
+    callers below, which used to hardcode _DATA_PATH regardless of what
+    had actually been ingested (see _do_attendance_confirm)."""
+    import app.ml.train_model as train_model_mod
+    ingested = train_model_mod.INGESTED_DATA_DIR / "ingested_capstone.csv"
+    return ingested if ingested.exists() else _DATA_PATH
+
+
+def _current_attendance_path() -> Path:
+    """Same idea as _current_capstone_path, for the raw attendance file:
+    the ingested override (INGESTED_DATA_DIR/ingested_attendance_raw.csv)
+    if an admin has ever confirmed an attendance upload, else the bundled
+    sample. Without this, _ATTENDANCE silently reverted to the bundled
+    sample (or nothing) on every restart, discarding previously ingested
+    attendance data — the same restart-durability gap _current_capstone_path
+    closes for capstone data."""
+    import app.ml.train_model as train_model_mod
+    ingested = train_model_mod.INGESTED_DATA_DIR / "ingested_attendance_raw.csv"
+    return ingested if ingested.exists() else _ATTENDANCE_PATH
+
+
+# Load the bundled sample, or whatever was last ingested via the UI, on
+# server start — so a real deployment's already-uploaded data survives a
+# restart instead of reverting to the bundled demo file (or nothing at
+# all). The /api/ingest endpoint handles runtime uploads and overwrites
+# _DATA from then on, for the lifetime of this process.
 try:
-    _df = pd.read_csv(_DATA_PATH)
+    _df = pd.read_csv(_current_capstone_path())
     _df.columns = [c.strip() for c in _df.columns]
     if "MARKPERCENT" in _df.columns:
         _df["MARKPERCENT"] = pd.to_numeric(_df["MARKPERCENT"], errors="coerce")
@@ -406,24 +440,9 @@ try:
     _DATA = _df
     logger.info("Startup data loaded: %s rows, %d columns", f"{len(_DATA):,}", len(_DATA.columns))
 except FileNotFoundError:
-    logger.error("Startup CSV not found at %s — upload a dataset via /api/ingest", _DATA_PATH)
+    logger.error("Startup CSV not found at %s — upload a dataset via /api/ingest", _current_capstone_path())
 except Exception as _e:
     logger.error("Failed to load startup data: %s", _e)
-
-
-def _current_capstone_path() -> Path:
-    """Whatever capstone CSV is actually backing the live dataset right now:
-    the ingested override (INGESTED_DATA_DIR/ingested_capstone.csv) if an
-    admin has ever confirmed a capstone upload, else the bundled sample
-    file this container started with. Needed wherever capstone data is
-    re-read from disk by path rather than from the in-memory _DATA —
-    build_attendance_features's two callers below used to hardcode
-    _DATA_PATH regardless of what had actually been ingested, which broke
-    attendance ingestion outright in any environment where that exact
-    bundled filename isn't present (see _do_attendance_confirm)."""
-    import app.ml.train_model as train_model_mod
-    ingested = train_model_mod.INGESTED_DATA_DIR / "ingested_capstone.csv"
-    return ingested if ingested.exists() else _DATA_PATH
 
 
 # ── Attendance data store ───────────────────────────────────────────────────
@@ -434,14 +453,12 @@ def _current_capstone_path() -> Path:
 # + build_target, not the row-level PASSED column _DATA uses) merged on, so
 # an attendance-vs-outcome correlation means the same "pass" everywhere else
 # in this project means.
-_ATTENDANCE: Optional[pd.DataFrame] = pd.DataFrame()
-_ATTENDANCE_PATH = Path(__file__).parent.parent.parent / "data" / "masked_attendance.csv.gz"
 try:
     from app.ml.train_model import collapse_attempts_to_latest_per_type, build_target
     from app.ml.build_attendance_features import build_attendance_features
 
     _att_features = build_attendance_features(
-        attendance_path=_ATTENDANCE_PATH, capstone_path=_current_capstone_path()
+        attendance_path=_current_attendance_path(), capstone_path=_current_capstone_path()
     )
     if not _DATA.empty:
         _collapsed_for_target = collapse_attempts_to_latest_per_type(_DATA.copy())
@@ -452,7 +469,7 @@ try:
     _ATTENDANCE = _att_features
     logger.info("Attendance features loaded: %s enrolments", f"{len(_ATTENDANCE):,}")
 except FileNotFoundError:
-    logger.warning("Attendance data not found at %s — attendance endpoints will return empty", _ATTENDANCE_PATH)
+    logger.warning("Attendance data not found at %s — attendance endpoints will return empty", _current_attendance_path())
 except Exception as _e:
     logger.error("Failed to load attendance data: %s", _e)
 
