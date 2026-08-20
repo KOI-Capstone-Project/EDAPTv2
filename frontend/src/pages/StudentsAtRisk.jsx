@@ -29,6 +29,26 @@ function matchesTab(row, tab) {
 
 const rowKey = (r) => `${r.subject}::${r.student_id}`;
 
+// attendance_rate_used is a 0-1 fraction (or null — no attendance data
+// matched this enrolment, e.g. a subject with no attendance rows ingested
+// at all); probability is already a 0-100 "chance of passing" percentage
+// from the model (see predictor.py) — both come straight through from
+// subject_roster()'s per-student result, nothing computed client-side.
+function formatAttendance(rate) {
+  if (rate === null || rate === undefined) return '—';
+  return `${Math.round(rate * 100)}%`;
+}
+function attendanceColor(rate) {
+  if (rate === null || rate === undefined) return '#94A3B8';
+  if (rate < 0.6) return '#DC2626';
+  if (rate < 0.8) return '#D97706';
+  return '#334155';
+}
+function formatProbability(probability) {
+  if (probability === null || probability === undefined) return '—';
+  return `${probability}%`;
+}
+
 export default function StudentsAtRisk() {
   const navigate = useNavigate();
   const admin = checkIsAdmin();
@@ -207,7 +227,7 @@ export default function StudentsAtRisk() {
                       aria-label="Select all filtered students"
                     />
                   </th>
-                  {['Student', 'Subject', 'Assessments Recorded', 'Weight Recorded', 'Weighted Score', 'Risk'].map(h => (
+                  {['Student', 'Subject', 'Attendance', 'Assessments Recorded', 'Weight Recorded', 'Weighted Score', 'Pass Probability', 'Risk'].map(h => (
                     <th key={h} style={s.th}>{h}</th>
                   ))}
                 </tr>
@@ -230,9 +250,13 @@ export default function StudentsAtRisk() {
                     </td>
                     <td style={{ ...s.td, fontWeight: 700, color: '#1A2E40' }}>{r.student_id}</td>
                     <td style={s.td}>{r.subject}</td>
+                    <td style={{ ...s.td, fontWeight: 600, color: attendanceColor(r.attendance_rate_used) }}>
+                      {formatAttendance(r.attendance_rate_used)}
+                    </td>
                     <td style={s.td}>{r.num_assessments_recorded}</td>
                     <td style={s.td}>{r.cumulative_weighting_recorded}%</td>
                     <td style={s.td}>{r.current_weighted_score}</td>
+                    <td style={s.td}>{formatProbability(r.probability)}</td>
                     <td style={s.td}>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                         {r.estimate_type === 'mid-term estimate' && <MidTermTag />}
@@ -242,7 +266,7 @@ export default function StudentsAtRisk() {
                   </tr>
                 ))}
                 {filtered.length === 0 && (
-                  <tr><td style={s.td} colSpan={7}>No students match the current filters.</td></tr>
+                  <tr><td style={s.td} colSpan={9}>No students match the current filters.</td></tr>
                 )}
               </tbody>
             </table>
