@@ -18,6 +18,7 @@ import ModelHealth       from './pages/ModelHealth';
 import UserManagement     from './pages/UserManagement';
 import ApiConsole         from './pages/ApiConsole';
 import PredictorView      from './pages/PredictorView';
+import StudentsAtRisk     from './pages/StudentsAtRisk';
 import SettingsView       from './pages/SettingsView';
 
 // Auth utilities
@@ -93,6 +94,11 @@ export default function App() {
       <Route path="/dashboard/lecturer" element={<Protected><LecturerDashboard /></Protected>} />
       <Route path="/explorer"            element={<Protected><ExplorerView isLecturer={true} /></Protected>} />
       <Route path="/predictor"           element={<Protected><PredictorView isAdmin={false} /></Protected>} />
+      {/* Visible to every authenticated role (lecturer, Head of School, Head
+          of Technology) — the backend (GET /api/students-at-risk) already
+          scopes rows to whatever subjects the requesting user can see, so
+          one shared route/guard is enough; no admin-only content lives here. */}
+      <Route path="/students-at-risk"    element={<Protected><StudentsAtRisk /></Protected>} />
 
       {/* Admin dashboard */}
       <Route path="/dashboard/admin" element={

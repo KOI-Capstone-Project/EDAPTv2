@@ -3900,6 +3900,63 @@ async def subject_roster(
     return response
 
 
+@app.get("/api/students-at-risk", tags=["Subjects"])
+async def students_at_risk(
+    study_period: str          = Query(...),
+    user:         dict         = Depends(get_current_user),
+    db:           AsyncSession = Depends(get_db),
+):
+    """
+    Cross-subject risk view for one study period — one row per (student,
+    subject) enrolment, aggregated across every subject the requesting user
+    can see (every subject for an admin/Head of School, only their assigned
+    subjects for a lecturer — same visibility rule subject_roster() already
+    enforces per call).
+
+    Deliberately reuses subject_roster() per subject rather than re-deriving
+    the same coverage/prediction logic here: same risk_band values, same
+    SAFE_SUBJECTS/reliability gating, same guarantee this can never disagree
+    with what /api/subjects/{subject}/roster shows for the same student.
+    """
+    if _DATA is None or _DATA.empty:
+        raise HTTPException(503, "No data loaded. Upload a dataset first.")
+
+    is_admin = user.get("role") in {"Head of Technology", "Head of School"}
+    subjects = (
+        sorted(_DATA["SUBJECTCODE"].dropna().unique().tolist()) if is_admin
+        else list(user.get("subjects", []))
+    )
+
+    combined: list = []
+    subjects_included = 0
+    for subj in subjects:
+        try:
+            result = await subject_roster(
+                subject=subj, study_period=study_period, simulate_progress=None,
+                user=user, db=db,
+            )
+        except HTTPException:
+            # No data for this subject in this period, or the subject code
+            # doesn't exist in _DATA at all — just not part of this period's
+            # picture, not an error for the whole aggregate view.
+            continue
+        if not result.get("prediction_available", True):
+            continue  # unreliable subject — subject_roster already declines to score it
+        if result.get("roster"):
+            subjects_included += 1
+        for row in result["roster"]:
+            combined.append({**row, "subject": subj})
+
+    combined.sort(key=lambda r: (r["probability"] is None, r["probability"] if r["probability"] is not None else 0))
+
+    return {
+        "study_period":      study_period,
+        "subjects_included": subjects_included,
+        "total_rows":        len(combined),
+        "students":          combined,
+    }
+
+
 @app.get("/api/subjects/analytics", tags=["Subjects"])
 async def subjects_analytics(
     subject_a: str           = Query(...),
