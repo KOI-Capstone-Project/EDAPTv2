@@ -486,9 +486,13 @@ export default function PredictorView({ isAdmin }) {
   // Pre-selected when arriving from Students at Risk (?subject=X&period=Y) —
   // read once on mount so the roster loads straight away instead of making
   // the admin/lecturer re-pick a subject+period they already chose there.
+  // &student=ID (also from Students at Risk) additionally jumps straight to
+  // that student's detail view once the roster loads — see the effect
+  // right after openStudentDetail's definition below.
   const [searchParams] = useSearchParams();
   const [subject,     setSubject]     = useState(() => searchParams.get('subject') || '');
   const [studyPeriod, setStudyPeriod] = useState(() => searchParams.get('period') || '');
+  const [studentIdParam, setStudentIdParam] = useState(() => searchParams.get('student') || null);
   const [periods,     setPeriods]     = useState([]);
 
   // view: 'roster' (default) | 'detail' (a real student clicked) | 'whatif' (hypothetical scenario)
@@ -701,6 +705,20 @@ export default function PredictorView({ isAdmin }) {
       .catch(() => setDetailError('Failed to load this student\'s assessment history. Please try again.'))
       .finally(() => setDetailLoading(false));
   };
+
+  // Deep-linked straight to one student (?student=ID, from Students at
+  // Risk) — once the roster for that subject/period has loaded, jump
+  // directly to their detail view instead of leaving the admin/lecturer to
+  // find and click the row themselves. Consumed once (cleared right after)
+  // so going back to the roster and staying on this page doesn't re-fire it.
+  useEffect(() => {
+    if (!studentIdParam || roster.length === 0) return;
+    if (roster.some(r => r.student_id === studentIdParam)) {
+      openStudentDetail(studentIdParam);
+    }
+    setStudentIdParam(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [roster, studentIdParam]);
 
   const backToRoster = () => {
     setView('roster');

@@ -110,7 +110,7 @@ export default function StudentsAtRisk() {
 
   const openInPredictor = (row) => {
     const base = admin ? '/predictive-reports' : '/predictor';
-    navigate(`${base}?subject=${encodeURIComponent(row.subject)}&period=${encodeURIComponent(studyPeriod)}`);
+    navigate(`${base}?subject=${encodeURIComponent(row.subject)}&period=${encodeURIComponent(studyPeriod)}&student=${encodeURIComponent(row.student_id)}`);
   };
 
   const toggleRow = (row, e) => {
