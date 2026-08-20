@@ -24,11 +24,24 @@ const FEATURE_LABELS = {
   PARTIAL_WEIGHT_COVERAGE:  'Assessment coverage recorded so far',
   SUBJECT_DIFFICULTY:       'Subject historical fail rate',
   TRIMESTER_NUM:            'Study period',
+  ATTENDANCE_RATE:          'Attendance rate',
 };
 
 function ShapFactorBars({ shap }) {
   if (!shap || !shap.top_factors || shap.top_factors.length === 0) return null;
-  const maxAbs = Math.max(...shap.top_factors.map(f => Math.abs(f.contribution)), 1);
+  // Attendance is a real model input (see ATTENDANCE_RATE in FEATURE_LABELS)
+  // but its SHAP contribution is usually small relative to assessment marks
+  // — top_factors (top 3 by |contribution|) can easily omit it entirely,
+  // which reads as "the model ignored attendance" when it didn't. Pull it
+  // from all_factors (every feature, always present) and append it if it's
+  // not already one of the naturally top-ranked factors, so it's never
+  // silently invisible regardless of how small its pull was.
+  const attendanceInTop = shap.top_factors.some(f => f.feature === 'ATTENDANCE_RATE');
+  const attendanceFactor = !attendanceInTop
+    ? (shap.all_factors || []).find(f => f.feature === 'ATTENDANCE_RATE')
+    : null;
+  const displayFactors = attendanceFactor ? [...shap.top_factors, attendanceFactor] : shap.top_factors;
+  const maxAbs = Math.max(...displayFactors.map(f => Math.abs(f.contribution)), 1);
   return (
     <div style={{ marginBottom: 14 }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
@@ -39,13 +52,20 @@ function ShapFactorBars({ shap }) {
         )}
       </div>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-        {shap.top_factors.map((f, i) => {
+        {displayFactors.map((f, i) => {
           const pct   = Math.min(100, (Math.abs(f.contribution) / maxAbs) * 100);
           const color = f.direction === 'Pass' ? '#059669' : f.direction === 'Fail' ? '#DC2626' : '#94A3B8';
+          const isAppendedAttendance = attendanceFactor && f.feature === 'ATTENDANCE_RATE';
           return (
             <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
               <span style={{ fontSize: 11, color: '#475569', width: 190, flexShrink: 0 }}>
                 {FEATURE_LABELS[f.feature] || f.feature}
+                {isAppendedAttendance && (
+                  <span title="Always shown regardless of rank, since attendance is otherwise easy to assume the model ignored."
+                    style={{ marginLeft: 4, fontSize: 9, color: '#94A3B8' }}>
+                    (always shown)
+                  </span>
+                )}
               </span>
               <div style={{ flex: 1, height: 8, background: '#F1F5F9', borderRadius: 4, position: 'relative', overflow: 'hidden' }}>
                 <div style={{ width: `${pct}%`, height: '100%', background: color, borderRadius: 4 }} />
@@ -293,9 +313,21 @@ export function PredictionResultPanel({ result, geminiLoading, geminiInsight }) 
         </div>
       </div>
 
-      {result.attendance_rate_is_default && result.attendance_rate_used != null && (
+      {/* Always shown, not just when defaulted — ATTENDANCE_RATE is a real
+          model input (see FEATURE_LABELS/ShapFactorBars), but with nothing
+          on this screen ever labeled "Attendance," it read as though the
+          model ignored it entirely. This is the one place that number is
+          visible at all. */}
+      {result.attendance_rate_used != null ? (
+        <p style={{ margin: '-12px 0 16px', fontSize: 12, color: '#475569' }}>
+          📊 Attendance rate used: <strong>{(result.attendance_rate_used * 100).toFixed(0)}%</strong>
+          {result.attendance_rate_is_default
+            ? " — this subject's average (no individual attendance record for this student)"
+            : " — this student's own attendance record"}
+        </p>
+      ) : (
         <p style={{ margin: '-12px 0 16px', fontSize: 11, color: '#94A3B8', fontStyle: 'italic' }}>
-          ℹ Attendance rate defaulted to this subject's real average ({(result.attendance_rate_used * 100).toFixed(0)}%) — not a value you entered.
+          Attendance rate: not available for this student.
         </p>
       )}
 
