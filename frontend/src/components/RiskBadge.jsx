@@ -6,7 +6,7 @@
 // Safe floor moves with the live model's own decision threshold, which is
 // why that one's passed in per-row/result rather than hardcoded here too.
 const AT_RISK_FLOOR = 40;
-const BORDERLINE_MARGIN = 5; // percentage points
+const BORDERLINE_MARGIN = 10; // percentage points — e.g. 71.9% Safe (65 floor) counts as borderline
 
 // A "Safe" at 66% and a "Safe" at 95% render identically today, even
 // though the first is one weak assessment away from "At Risk" and the
