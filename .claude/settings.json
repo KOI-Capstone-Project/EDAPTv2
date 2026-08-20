@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(docker compose *)",
+      "Bash(python -c ' *)",
+      "Bash(curl -s -w '\\\\nHTTP %{http_code}\\\\n' -X POST http://localhost:8000/api/v1/predict -H 'X-API-Key: edapt_Mikn9eBZMn6SUFLffuSHpis1Sl8mklHg7ZFcdppldK0' -H 'Content-Type: application/json' -d '{ *)",
+      "Bash(npx --no-install playwright --version)",
+      "Bash(node scripts/validate_palette.js \"#2E6E8E,#534AB7,#EF9F27,#185FA5\" --mode light --surface \"#ffffff\")",
+      "PowerShell(Get-Command node -ErrorAction SilentlyContinue)",
+      "PowerShell(node --version 2>&1)"
+    ]
+  }
+}

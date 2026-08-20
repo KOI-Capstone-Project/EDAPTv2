@@ -407,3 +407,63 @@ class AuditLog(Base):
         nullable=True,
         comment="Human-readable description of the event",
     )
+
+
+# ===========================================================================
+# API KEY TABLE
+# ===========================================================================
+
+
+class ApiKey(AuditMixin, Base):
+    """
+    Admin-issued credential for the external prediction endpoint
+    (/api/v1/predict). Only a salted hash is ever stored — the raw key is
+    returned once at creation time and cannot be recovered afterwards,
+    mirroring User.hashed_password's "never store plaintext" convention.
+    """
+
+    __tablename__ = "api_keys"
+
+    id: int = Column(Integer, primary_key=True, autoincrement=True)
+
+    name: str = Column(
+        String(120),
+        nullable=False,
+        comment="Admin-chosen label identifying what this key is for",
+    )
+
+    key_prefix: str = Column(
+        String(20),
+        nullable=False,
+        comment="First few characters of the raw key, for display in the key list only",
+    )
+
+    hashed_key: str = Column(
+        String(64),
+        unique=True,
+        nullable=False,
+        index=True,
+        comment="sha256 hex digest of the raw key. Plain-text is never stored.",
+    )
+
+    created_by: str = Column(
+        String(254),
+        nullable=False,
+        comment="Email of the Head of Technology admin who generated this key",
+    )
+
+    last_used_at: datetime | None = Column(
+        DateTime(timezone=True),
+        nullable=True,
+        comment="Updated on every successful /api/v1/predict call using this key",
+    )
+
+    revoked: bool = Column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default="false",
+        comment="Soft-revoke flag — revoked keys are kept for audit history, not deleted",
+    )
+
+    revoked_at: datetime | None = Column(DateTime(timezone=True), nullable=True)

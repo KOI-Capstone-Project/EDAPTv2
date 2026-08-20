@@ -12,6 +12,7 @@ Dashboard: 8 endpoints that slice _DATA by role + query filters.
 import asyncio
 from datetime import datetime, timedelta, timezone
 from email.mime.text import MIMEText
+import hashlib
 import io
 import json
 import logging
@@ -31,7 +32,7 @@ from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, File, HTTPException, Query, Response, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from fastapi.security import OAuth2PasswordBearer
+from fastapi.security import APIKeyHeader, OAuth2PasswordBearer
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 from pydantic import BaseModel, Field, StringConstraints, field_validator
@@ -40,7 +41,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
-from app.db.models import AuditLog, Base, Intervention, PendingIngest, Prediction, User as UserModel
+from app.db.models import ApiKey, AuditLog, Base, Intervention, PendingIngest, Prediction, User as UserModel
 # Light module — pure functions over an already-computed SHAP dict, no model
 # loading, so it is safe to import at module scope unlike app.ml.predictor.
 from app.ml.actionable import excluded_factor_summary, top_actionable_factor
@@ -727,6 +728,29 @@ class PredictRequest(BaseModel):
     attendance_rate:         Optional[float] = Field(None, ge=0.0, le=1.0)
 
 
+class CreateApiKeyRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=120)
+
+
+class ApiPredictAssessment(BaseModel):
+    type:         str   = Field(..., max_length=60)
+    mark_percent: float = Field(..., ge=0.0, le=100.0)
+    weighting:    float = Field(..., ge=0.0, le=100.0)
+
+
+class ApiPredictRequest(BaseModel):
+    # Public contract for the external /api/v1/predict endpoint. Deliberately
+    # separate from PredictRequest above: an external caller has no reason to
+    # know this project's internal "top-2-by-weight" convention, so this model
+    # only accepts the raw assessment list and attendance percentage — the
+    # handler derives assess1/assess2 itself via predictor._top2_by_weight.
+    subject:               str   = Field(..., min_length=1, max_length=20)
+    study_period:          str   = Field(..., min_length=1, max_length=10)
+    trimester_num:         float
+    assessments:           list[ApiPredictAssessment] = Field(..., min_length=1)
+    attendance_percentage: float = Field(..., ge=0.0, le=100.0)
+
+
 class GeminiAlertRequest(BaseModel):
     subject:   Optional[str] = Field(None, max_length=20)
     trimester: Optional[str] = Field(None, max_length=10)
@@ -863,6 +887,31 @@ async def require_super_admin(user: dict = Depends(get_current_user)) -> dict:
     if user.get("is_super_admin") is not True:
         raise HTTPException(403, "Only the system administrator can access this feature.")
     return user
+
+
+_api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+
+async def require_api_key(
+    raw_key: Optional[str] = Depends(_api_key_header),
+    db:      AsyncSession  = Depends(get_db),
+) -> ApiKey:
+    """Authenticate an external caller of /api/v1/predict via API key.
+
+    A separate credential type from the session JWT above: API keys are
+    long-lived and issued by an admin for a third-party system, not a
+    logged-in human, so they get their own header and their own DB-backed
+    lookup rather than being minted as another JWT.
+    """
+    if not raw_key:
+        raise HTTPException(401, "Missing X-API-Key header.")
+    key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
+    row = (await db.execute(select(ApiKey).where(ApiKey.hashed_key == key_hash))).scalar_one_or_none()
+    if row is None or row.revoked:
+        raise HTTPException(401, "Invalid or revoked API key.")
+    row.last_used_at = datetime.now(timezone.utc)
+    await db.commit()
+    return row
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Auth Routes
@@ -3455,6 +3504,198 @@ async def delete_user(
     await _append_audit_db(db, user_uid=user["sub"], action_type="User Modified",
                            status="Success", detail=f"Account deleted: {email}")
     return {"message": "Account deleted"}
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# API Console — admin-issued keys for the external /api/v1/predict endpoint
+# ═══════════════════════════════════════════════════════════════════════════
+# Gated by require_admin (any Head of Technology), not require_super_admin —
+# this is a role-based feature like /api/audit-logs, not restricted to the
+# single literal "admin" account the way /api/users is.
+
+@app.get("/api/api-keys", tags=["Admin"])
+async def list_api_keys(
+    user: dict = Depends(require_admin),
+    db:   AsyncSession = Depends(get_db),
+):
+    """List API keys, newest first. Never returns the raw key or its hash."""
+    result = await db.execute(select(ApiKey).order_by(desc(ApiKey.created_at)))
+    keys = result.scalars().all()
+    return [
+        {
+            "id":            k.id,
+            "name":          k.name,
+            "key_prefix":    k.key_prefix,
+            "created_by":    k.created_by,
+            "created_at":    k.created_at,
+            "last_used_at":  k.last_used_at,
+            "revoked":       k.revoked,
+        }
+        for k in keys
+    ]
+
+
+@app.post("/api/api-keys", status_code=201, tags=["Admin"])
+async def create_api_key(
+    payload: CreateApiKeyRequest,
+    user: dict = Depends(require_admin),
+    db:   AsyncSession = Depends(get_db),
+):
+    """Generate a new API key. The raw key is returned only in this response
+    — it is never recoverable again, only re-issuable via a new key."""
+    raw_key    = "edapt_" + secrets.token_urlsafe(32)
+    key_hash   = hashlib.sha256(raw_key.encode()).hexdigest()
+    key_prefix = raw_key[:14]
+
+    new_key = ApiKey(
+        name=payload.name.strip(),
+        key_prefix=key_prefix,
+        hashed_key=key_hash,
+        created_by=user["sub"],
+    )
+    db.add(new_key)
+    await db.flush()
+
+    await _append_audit_db(db, user_uid=user["sub"], action_type="API Key Created",
+                           status="Success", detail=f"API key created: {payload.name.strip()}")
+
+    return {
+        "id":         new_key.id,
+        "name":       new_key.name,
+        "api_key":    raw_key,
+        "key_prefix": new_key.key_prefix,
+        "created_at": new_key.created_at,
+    }
+
+
+@app.delete("/api/api-keys/{key_id}", tags=["Admin"])
+async def revoke_api_key(
+    key_id: int,
+    user: dict = Depends(require_admin),
+    db:   AsyncSession = Depends(get_db),
+):
+    """Soft-revoke an API key — kept for audit history, never hard-deleted."""
+    result = await db.execute(select(ApiKey).where(ApiKey.id == key_id))
+    key = result.scalar_one_or_none()
+    if not key:
+        raise HTTPException(404, "API key not found.")
+    if key.revoked:
+        raise HTTPException(400, "This API key is already revoked.")
+
+    key.revoked = True
+    key.revoked_at = datetime.now(timezone.utc)
+    await _append_audit_db(db, user_uid=user["sub"], action_type="API Key Revoked",
+                           status="Success", detail=f"API key revoked: {key.name}")
+    return {"message": "API key revoked"}
+
+
+@app.post("/api/v1/predict", tags=["Public API"])
+async def predict_via_api_key(
+    req:     ApiPredictRequest,
+    key_row: ApiKey = Depends(require_api_key),
+    db:      AsyncSession = Depends(get_db),
+):
+    """External pass/fail prediction endpoint, authenticated by X-API-Key
+    instead of a session JWT. Mirrors /api/predict's coverage-gating and
+    safety behaviour exactly, but derives assess1/assess2 itself (via
+    predictor._top2_by_weight) rather than trusting a client-supplied top-2,
+    since an external caller has no reason to know that internal convention.
+    """
+    from app.ml.predictor import (
+        predict as ml_predict,
+        predict_partial as ml_predict_partial,
+        compute_partial_score,
+        classify_coverage,
+        _top2_by_weight,
+    )
+
+    reliability = _subject_reliability_category(req.subject)
+    if reliability == "unreliable":
+        return {
+            "prediction_available": False,
+            "message": (
+                "Prediction unavailable for this subject due to incomplete "
+                "assessment data. Contact your Head of Technology."
+            ),
+        }
+
+    assessments = [a.model_dump() for a in req.assessments]
+    cumulative_weighting = sum(a["weighting"] for a in assessments)
+    coverage_tier = classify_coverage(cumulative_weighting)
+
+    if coverage_tier == "insufficient":
+        return {
+            "prediction_available": False,
+            "coverage_status":      "insufficient_data",
+            "message": (
+                f"Not enough assessment data recorded yet to generate a prediction "
+                f"({cumulative_weighting:.0f}% of the term recorded)."
+            ),
+        }
+
+    attendance_rate = req.attendance_percentage / 100
+
+    if coverage_tier == "complete":
+        partial_weighted_score, partial_weight_coverage = compute_partial_score(assessments)
+        a1_mark, a1_weight, a1_contrib, a2_mark, a2_weight, a2_contrib = _top2_by_weight(assessments)
+        result = ml_predict(
+            subject=                 req.subject,
+            study_period=            req.study_period,
+            trimester_num=           req.trimester_num,
+            assess1_mark=            a1_mark,
+            assess1_weight=          a1_weight,
+            assess1_contribution=    a1_contrib,
+            assess2_mark=            a2_mark,
+            assess2_weight=          a2_weight,
+            assess2_contribution=    a2_contrib,
+            partial_weighted_score=  partial_weighted_score,
+            partial_weight_coverage= partial_weight_coverage,
+            num_assessments=         len(assessments),
+            total_weight_recorded=   cumulative_weighting,
+            weight_complete=         True,
+            assessments_used=        assessments,
+            attendance_rate=         attendance_rate,
+        )
+    else:  # "partial" — 50-99% coverage, genuinely mid-term
+        result = ml_predict_partial(
+            subject=          req.subject,
+            study_period=     req.study_period,
+            trimester_num=    req.trimester_num,
+            assessments_used= assessments,
+            attendance_rate=  attendance_rate,
+        )
+
+    if "error" in result:
+        error_text = str(result["error"])
+        if error_text.startswith("missing_required_feature"):
+            missing_feature = error_text.split(":", 1)[1].split(" is required")[0].strip()
+            return {
+                "prediction_available": False,
+                "data_status":          "missing_required_data",
+                "missing_feature":      missing_feature,
+                "message": (
+                    f"Not enough data to generate a prediction: this subject has no "
+                    f"{missing_feature.replace('_', ' ').lower()} recorded, which the "
+                    f"current model requires."
+                ),
+            }
+        raise HTTPException(503, "ML model is not loaded. Run train_model.py first.")
+
+    await _append_audit_db(db, user_uid=f"api-key:{key_row.name}", action_type="External API Prediction",
+                           status="Success",
+                           detail=f"Predicted {req.subject}: {result['probability']}% pass probability")
+
+    return {
+        "prediction_available": True,
+        "subject":              req.subject,
+        "study_period":         req.study_period,
+        "coverage_status":      coverage_tier,
+        "result":               result["prediction"],
+        "pass_percentage":      result["probability"],
+        "risk_band":            result["risk_band"],
+        "estimate_type":        result.get("estimate_type"),
+        "model_version":        result["model_version"],
+    }
 
 
 # ═══════════════════════════════════════════════════════════════════════════
