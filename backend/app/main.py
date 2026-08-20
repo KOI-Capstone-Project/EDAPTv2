@@ -422,13 +422,12 @@ def _current_attendance_path() -> Path:
     return ingested if ingested.exists() else _ATTENDANCE_PATH
 
 
-# Load the bundled sample, or whatever was last ingested via the UI, on
-# server start — so a real deployment's already-uploaded data survives a
-# restart instead of reverting to the bundled demo file (or nothing at
-# all). The /api/ingest endpoint handles runtime uploads and overwrites
-# _DATA from then on, for the lifetime of this process.
-try:
-    _df = pd.read_csv(_current_capstone_path())
+def _load_capstone_dataframe(path: Path) -> pd.DataFrame:
+    """Parse+clean one capstone CSV into the shape _DATA expects — shared
+    by the startup load below and by DELETE /api/ingest/datasets/{kind},
+    which needs to reload _DATA from whatever's left (the bundled sample,
+    or nothing) exactly the same way startup does."""
+    _df = pd.read_csv(path)
     _df.columns = [c.strip() for c in _df.columns]
     if "MARKPERCENT" in _df.columns:
         _df["MARKPERCENT"] = pd.to_numeric(_df["MARKPERCENT"], errors="coerce")
@@ -437,7 +436,38 @@ try:
         _df["STUDYPERIOD"] = _df["STUDYPERIOD"].apply(
             lambda x: str(round(float(x), 1)) if pd.notna(x) else ""
         )
-    _DATA = _df
+    return _df
+
+
+def _load_attendance_dataframe() -> pd.DataFrame:
+    """Rebuild _ATTENDANCE from whatever's currently on disk (ingested
+    override or bundled sample, via _current_attendance_path/
+    _current_capstone_path) — shared by the startup load below and by
+    DELETE /api/ingest/datasets/{kind}. Depends on _DATA already being
+    the dataframe you want the PASS target merged from — call this AFTER
+    _DATA is set to whatever it should be."""
+    from app.ml.train_model import collapse_attempts_to_latest_per_type, build_target
+    from app.ml.build_attendance_features import build_attendance_features
+
+    att_features = build_attendance_features(
+        attendance_path=_current_attendance_path(), capstone_path=_current_capstone_path()
+    )
+    if not _DATA.empty:
+        collapsed = collapse_attempts_to_latest_per_type(_DATA.copy())
+        target = build_target(collapsed)
+        att_features = att_features.merge(
+            target, on=["STUDENTID_MASKED", "SUBJECTCODE", "STUDYPERIOD"], how="left"
+        )
+    return att_features
+
+
+# Load the bundled sample, or whatever was last ingested via the UI, on
+# server start — so a real deployment's already-uploaded data survives a
+# restart instead of reverting to the bundled demo file (or nothing at
+# all). The /api/ingest endpoint handles runtime uploads and overwrites
+# _DATA from then on, for the lifetime of this process.
+try:
+    _DATA = _load_capstone_dataframe(_current_capstone_path())
     logger.info("Startup data loaded: %s rows, %d columns", f"{len(_DATA):,}", len(_DATA.columns))
 except FileNotFoundError:
     logger.error("Startup CSV not found at %s — upload a dataset via /api/ingest", _current_capstone_path())
@@ -454,19 +484,7 @@ except Exception as _e:
 # an attendance-vs-outcome correlation means the same "pass" everywhere else
 # in this project means.
 try:
-    from app.ml.train_model import collapse_attempts_to_latest_per_type, build_target
-    from app.ml.build_attendance_features import build_attendance_features
-
-    _att_features = build_attendance_features(
-        attendance_path=_current_attendance_path(), capstone_path=_current_capstone_path()
-    )
-    if not _DATA.empty:
-        _collapsed_for_target = collapse_attempts_to_latest_per_type(_DATA.copy())
-        _target = build_target(_collapsed_for_target)
-        _att_features = _att_features.merge(
-            _target, on=["STUDENTID_MASKED", "SUBJECTCODE", "STUDYPERIOD"], how="left"
-        )
-    _ATTENDANCE = _att_features
+    _ATTENDANCE = _load_attendance_dataframe()
     logger.info("Attendance features loaded: %s enrolments", f"{len(_ATTENDANCE):,}")
 except FileNotFoundError:
     logger.warning("Attendance data not found at %s — attendance endpoints will return empty", _current_attendance_path())
@@ -2102,7 +2120,7 @@ async def ingest_capstone_confirm(
     csv_bytes, filename = pending_row.csv_bytes, pending_row.filename
     await _delete_pending_ingest(db, "capstone")
 
-    job = IngestJob(kind="capstone", filename=filename, started_by=user["sub"])
+    job = IngestJob(kind="capstone", filename=filename, mode=mode, started_by=user["sub"])
     db.add(job)
     await db.commit()
     await db.refresh(job)
@@ -2336,7 +2354,7 @@ async def ingest_attendance_confirm(
     csv_bytes, filename = pending_row.csv_bytes, pending_row.filename
     await _delete_pending_ingest(db, "attendance")
 
-    job = IngestJob(kind="attendance", filename=filename, started_by=user["sub"])
+    job = IngestJob(kind="attendance", filename=filename, mode=mode, started_by=user["sub"])
     db.add(job)
     await db.commit()
     await db.refresh(job)
@@ -2419,6 +2437,15 @@ async def ingest_dataset_summary(
     browser tab. Also what the frontend checks before offering the
     incremental-vs-override wizard: that choice only makes sense once
     there's existing data to merge into or replace.
+
+    filename/mode/uploaded_by/uploaded_at describe the last SUCCESSFUL,
+    NOT-SINCE-CLEARED confirm specifically (not just the most recent
+    attempt, which last_job_id/last_status/last_ingested_at below still
+    track) — a failed retry after a successful ingest must not overwrite
+    what's shown as the currently active dataset's source, and a job whose
+    data has since been cleared via DELETE /api/ingest/datasets/{kind}
+    (see IngestJob.cleared_at) must stop being reported as active at all,
+    consistent with has_data having flipped to false.
     """
     summary = {}
     for kind, df in (("capstone", _DATA), ("attendance", _ATTENDANCE)):
@@ -2426,6 +2453,14 @@ async def ingest_dataset_summary(
             select(IngestJob).where(IngestJob.kind == kind).order_by(IngestJob.id.desc()).limit(1)
         )
         last_job = result.scalar_one_or_none()
+
+        result_success = await db.execute(
+            select(IngestJob)
+            .where(IngestJob.kind == kind, IngestJob.status == "success", IngestJob.cleared_at.is_(None))
+            .order_by(IngestJob.id.desc()).limit(1)
+        )
+        active_job = result_success.scalar_one_or_none()
+
         summary[kind] = {
             "has_data":  bool(df is not None and not df.empty),
             "row_count": int(len(df)) if df is not None else 0,
@@ -2435,8 +2470,92 @@ async def ingest_dataset_summary(
                 last_job.finished_at.isoformat()
                 if last_job and last_job.finished_at else None
             ),
+            "filename":    active_job.filename if active_job else None,
+            "mode":        active_job.mode if active_job else None,
+            "uploaded_by": active_job.started_by if active_job else None,
+            "uploaded_at": (
+                active_job.finished_at.isoformat()
+                if active_job and active_job.finished_at else None
+            ),
         }
     return summary
+
+
+@app.delete("/api/ingest/datasets/{kind}", tags=["Ingest"])
+async def delete_ingested_dataset(
+    kind: str,
+    user: dict         = Depends(require_head_of_school),
+    db:   AsyncSession = Depends(get_db),
+):
+    """
+    Clears the ingested override for one kind (capstone/attendance) and
+    reloads the live in-memory dataset from whatever's left — the bundled
+    sample file, or nothing at all if that isn't present either (see
+    _current_capstone_path/_current_attendance_path). Admin-only: this is
+    the one action that can make prediction/dashboard data disappear
+    outright, so it's deliberately not something a lecturer — or an
+    accidental click — can trigger.
+
+    Clearing capstone also refreshes _ATTENDANCE's merged PASS target
+    (same reasoning _do_capstone_confirm already applies when NEW capstone
+    data lands — a cleared capstone dataset must not leave attendance
+    scored against a target that no longer reflects what's live).
+
+    Does not delete IngestJob history — the row that ingested this data
+    stays, for the audit trail — but its cleared_at gets stamped so
+    ingest_dataset_summary's "currently active" lookup stops pointing at
+    it (see that endpoint's docstring), instead of the job row remaining
+    reachable via a status='success' filter alone and reporting stale
+    filename/mode next to has_data: false.
+    """
+    global _DATA, _ATTENDANCE
+
+    if kind not in ("capstone", "attendance"):
+        raise HTTPException(404, "kind must be 'capstone' or 'attendance'")
+
+    active_job_result = await db.execute(
+        select(IngestJob)
+        .where(IngestJob.kind == kind, IngestJob.status == "success", IngestJob.cleared_at.is_(None))
+        .order_by(IngestJob.id.desc()).limit(1)
+    )
+    active_job = active_job_result.scalar_one_or_none()
+    if active_job is not None:
+        active_job.cleared_at = datetime.now(timezone.utc)
+
+    import app.ml.train_model as train_model_mod
+    train_model_mod.INGESTED_DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+    if kind == "capstone":
+        (train_model_mod.INGESTED_DATA_DIR / "ingested_capstone.csv").unlink(missing_ok=True)
+        try:
+            _DATA = _load_capstone_dataframe(_current_capstone_path())
+        except Exception:
+            _DATA = pd.DataFrame()
+        # build_attendance_features scopes attendance rows to the capstone
+        # data's own subjects/years — if there's now no capstone data to
+        # scope against either (no bundled sample present), attendance
+        # can't be correctly rebuilt, and must not be left showing its
+        # STALE pre-clear features as if they were still valid (the same
+        # failure mode startup already handles by falling back to empty).
+        try:
+            _ATTENDANCE = _load_attendance_dataframe()
+        except Exception:
+            _ATTENDANCE = pd.DataFrame()
+    else:
+        (train_model_mod.INGESTED_DATA_DIR / "ingested_attendance_raw.csv").unlink(missing_ok=True)
+        try:
+            _ATTENDANCE = _load_attendance_dataframe()
+        except Exception:
+            _ATTENDANCE = pd.DataFrame()
+
+    await _append_audit_db(
+        db, user_uid=user["sub"], action_type="Data Upload", status="Success",
+        detail=f"Cleared the ingested {kind} dataset",
+    )
+    await db.commit()
+
+    current_df = _DATA if kind == "capstone" else _ATTENDANCE
+    return {"kind": kind, "cleared": True, "has_data": bool(current_df is not None and not current_df.empty)}
 
 
 @app.post("/api/ingest/columns/decide", tags=["Ingest"])

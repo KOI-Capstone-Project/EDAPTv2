@@ -460,6 +460,11 @@ class IngestJob(Base):
 
     filename: str | None = Column(String(255), nullable=True)
 
+    mode: str | None = Column(
+        String(20), nullable=True,
+        comment="'override' or 'incremental' — the mode this confirm ran with",
+    )
+
     started_by: str = Column(
         String(254), nullable=False,
         comment="Email/uid of the admin who confirmed this ingestion",
@@ -467,6 +472,17 @@ class IngestJob(Base):
 
     started_at: datetime = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     finished_at: datetime | None = Column(DateTime(timezone=True), nullable=True)
+
+    cleared_at: datetime | None = Column(
+        DateTime(timezone=True), nullable=True,
+        comment=(
+            "Set when DELETE /api/ingest/datasets/{kind} clears the data this "
+            "successful job ingested. The job row itself is kept — this isn't "
+            "an edit to history, just a marker so ingest_dataset_summary's "
+            "'currently active' lookup (latest success, cleared_at IS NULL) "
+            "stops pointing at a job whose data no longer backs the live app."
+        ),
+    )
 
     result: dict | None = Column(
         JSON, nullable=True,

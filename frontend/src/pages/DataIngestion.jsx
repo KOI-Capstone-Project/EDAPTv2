@@ -63,11 +63,14 @@ function DatasetStatusBadge({ summary, runningJob, nowMs }) {
 
 // ── One upload card — capstone or attendance, fully independent state ────────
 
-function UploadCard({ kind, title, hint, maxSizeMB, analyzeUrl, onJobStarted, onCleared, analysis, restored, activeJob, datasetSummary, runningJob, nowMs }) {
+function UploadCard({ kind, title, hint, maxSizeMB, analyzeUrl, onJobStarted, onCleared, onDeleteDataset, analysis, restored, activeJob, datasetSummary, runningJob, nowMs }) {
   const fileRef = useRef(null);
   const [dragging,  setDragging]  = useState(false);
   const [file,      setFile]      = useState(null);
   const [error,     setError]     = useState(null); // immediate, synchronous rejection only (bad type/size, or the upload request itself failing)
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [deleting,         setDeleting]         = useState(false);
+  const [deleteError,      setDeleteError]      = useState(null);
   // True only while the multipart POST itself is in flight — the one
   // window activeJob can't cover, since the server hasn't accepted the
   // upload (and so hasn't handed back a job id to poll) yet. Without this,
@@ -151,6 +154,19 @@ function UploadCard({ kind, title, hint, maxSizeMB, analyzeUrl, onJobStarted, on
     onCleared(kind);
   };
 
+  const handleDeleteDataset = async () => {
+    setDeleting(true);
+    setDeleteError(null);
+    try {
+      await onDeleteDataset(kind);
+      setConfirmingDelete(false);
+    } catch (err) {
+      setDeleteError(err.response?.data?.detail || 'Could not clear this dataset. Please try again.');
+    } finally {
+      setDeleting(false);
+    }
+  };
+
   const displayFilename = file?.name || activeJob?.filename || restored?.filename || null;
 
   return (
@@ -197,6 +213,43 @@ function UploadCard({ kind, title, hint, maxSizeMB, analyzeUrl, onJobStarted, on
       {(file || restored || isAnalyzing) && (
         <button style={s.resetBtn} onClick={handleReset}>Remove file</button>
       )}
+
+      {/* ── Currently-active dataset: what it is, and a way to clear it ── */}
+      {!file && !isAnalyzing && !restored && datasetSummary?.has_data && (
+        <div style={s.currentDatasetBox}>
+          <div style={s.currentDatasetInfo}>
+            <div style={s.currentDatasetTop}>
+              <span style={s.currentDatasetFilename}>{datasetSummary.filename || 'Unknown filename'}</span>
+              {datasetSummary.mode && (
+                <span style={datasetSummary.mode === 'incremental' ? s.modeBadgeIncremental : s.modeBadgeOverride}>
+                  {datasetSummary.mode === 'incremental' ? 'Incremental' : 'Override'}
+                </span>
+              )}
+            </div>
+            <p style={s.currentDatasetMeta}>
+              Uploaded by {datasetSummary.uploaded_by || 'unknown'}
+              {datasetSummary.uploaded_at && <> · {timeAgo(datasetSummary.uploaded_at, nowMs)}</>}
+            </p>
+          </div>
+
+          {!confirmingDelete ? (
+            <button style={s.deleteDatasetBtn} onClick={() => setConfirmingDelete(true)}>
+              Delete
+            </button>
+          ) : (
+            <div style={s.confirmDeleteRow}>
+              <span style={s.confirmDeleteText}>Clear all ingested {title.toLowerCase()}?</span>
+              <button style={s.confirmDeleteCancelBtn} onClick={() => setConfirmingDelete(false)} disabled={deleting}>
+                Cancel
+              </button>
+              <button style={{ ...s.confirmDeleteYesBtn, opacity: deleting ? 0.6 : 1 }} onClick={handleDeleteDataset} disabled={deleting}>
+                {deleting ? 'Clearing…' : 'Yes, clear it'}
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+      {deleteError && <p style={s.errorLine}>⚠ {deleteError}</p>}
     </div>
   );
 }
@@ -560,6 +613,15 @@ export default function DataIngestion() {
     return () => clearInterval(timer);
   }, [fetchDatasetSummary]);
 
+  // Clears the ingested override for one kind server-side (reverts to the
+  // bundled sample or nothing) — admin-only, see DELETE
+  // /api/ingest/datasets/{kind}. Re-throws on failure so UploadCard's own
+  // handler can show the error inline next to the button that triggered it.
+  const handleDeleteDataset = async (kind) => {
+    await api.delete(`/api/ingest/datasets/${kind}`);
+    await fetchDatasetSummary();
+  };
+
   // Incremental-vs-override wizard — only shown for a kind that already has
   // live data to merge into or replace; wizardPending is null when the
   // modal isn't open.
@@ -807,6 +869,7 @@ export default function DataIngestion() {
           analyzeUrl="/api/ingest/capstone/analyze"
           onJobStarted={handleJobStarted}
           onCleared={handleCleared}
+          onDeleteDataset={handleDeleteDataset}
           analysis={capstoneAnalysis}
           restored={restoredCapstone}
           activeJob={analyzeJobs.capstone}
@@ -822,6 +885,7 @@ export default function DataIngestion() {
           analyzeUrl="/api/ingest/attendance/analyze"
           onJobStarted={handleJobStarted}
           onCleared={handleCleared}
+          onDeleteDataset={handleDeleteDataset}
           analysis={attendanceAnalysis}
           restored={restoredAttendance}
           activeJob={analyzeJobs.attendance}
@@ -914,6 +978,38 @@ const s = {
   resetBtn: {
     marginTop: 10, padding: '6px 14px', borderRadius: 7, border: '0.5px solid #C5D2DC',
     background: '#fff', color: '#64748B', fontSize: 12, cursor: 'pointer',
+  },
+
+  currentDatasetBox: {
+    marginTop: 10, padding: '10px 12px', borderRadius: 8,
+    background: '#F8FAFC', border: '0.5px solid #E2E8F0',
+    display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12,
+  },
+  currentDatasetInfo: { minWidth: 0 },
+  currentDatasetTop: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' },
+  currentDatasetFilename: { fontSize: 12.5, fontWeight: 600, color: '#1A2E40', wordBreak: 'break-all' },
+  currentDatasetMeta: { margin: '3px 0 0', fontSize: 11, color: '#94A3B8' },
+  modeBadgeOverride: {
+    fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 20,
+    background: '#E2E8F0', color: '#475569', textTransform: 'uppercase', letterSpacing: 0.4,
+  },
+  modeBadgeIncremental: {
+    fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 20,
+    background: '#CCFBF1', color: '#0F766E', textTransform: 'uppercase', letterSpacing: 0.4,
+  },
+  deleteDatasetBtn: {
+    flexShrink: 0, padding: '6px 14px', borderRadius: 7, border: '0.5px solid #FECACA',
+    background: '#fff', color: '#DC2626', fontSize: 12, fontWeight: 600, cursor: 'pointer',
+  },
+  confirmDeleteRow: { flexShrink: 0, display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 6 },
+  confirmDeleteText: { fontSize: 11, color: '#64748B', textAlign: 'right' },
+  confirmDeleteCancelBtn: {
+    padding: '5px 12px', borderRadius: 7, border: '0.5px solid #C5D2DC',
+    background: '#fff', color: '#475569', fontSize: 11.5, cursor: 'pointer', marginRight: 6,
+  },
+  confirmDeleteYesBtn: {
+    padding: '5px 12px', borderRadius: 7, border: 'none',
+    background: '#DC2626', color: '#fff', fontSize: 11.5, fontWeight: 600, cursor: 'pointer',
   },
 
   card:      { background: '#fff', border: '0.5px solid #DDE4EA', borderRadius: 12, padding: '20px', marginBottom: 20 },
