@@ -41,6 +41,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.db.models import ApiKey, AuditLog, Base, IngestJob, Intervention, PendingIngest, Prediction, User as UserModel
+from app import oauth_providers
 # Light module — pure functions over an already-computed SHAP dict, no model
 # loading, so it is safe to import at module scope unlike app.ml.predictor.
 from app.ml.actionable import excluded_factor_summary, top_actionable_factor
@@ -673,6 +674,12 @@ class LoginRequest(BaseModel):
     password: str = Field(..., max_length=128)
 
 
+class OAuthLoginRequest(BaseModel):
+    # Raw ID token as returned by the provider's own JS SDK — verified
+    # server-side before it's trusted for anything.
+    id_token: str = Field(..., max_length=4096)
+
+
 class CreateUserRequest(BaseModel):
     email:    str = Field(..., max_length=254, pattern=_EMAIL_REGEX)
     password: str
@@ -982,6 +989,29 @@ async def api_health(response: Response, db: AsyncSession = Depends(get_db)):
     }
 
 
+def _build_login_response(db_user: UserModel) -> dict:
+    subjects       = db_user.subjects or []
+    is_super_admin = bool(db_user.is_super_admin)
+    token = _create_token({
+        "sub":            db_user.email,
+        "role":           db_user.role,
+        "name":           db_user.name,
+        "subjects":       subjects,
+        "is_super_admin": is_super_admin,
+    })
+    return {
+        "access_token": token,
+        "token_type":   "bearer",
+        "user": {
+            "email":          db_user.email,
+            "name":           db_user.name,
+            "role":           db_user.role,
+            "subjects":       subjects,
+            "is_super_admin": is_super_admin,
+        },
+    }
+
+
 @app.post("/api/auth/login", tags=["Auth"])
 async def login(req: LoginRequest, db: AsyncSession = Depends(get_db)):
     """Authenticate a staff member and return a signed JWT."""
@@ -1001,28 +1031,60 @@ async def login(req: LoginRequest, db: AsyncSession = Depends(get_db)):
         )
 
     _FAILED_LOGINS.pop(req.email, None)
-    subjects       = db_user.subjects or []
-    is_super_admin = bool(db_user.is_super_admin)
-    token = _create_token({
-        "sub":            db_user.email,
-        "role":           db_user.role,
-        "name":           db_user.name,
-        "subjects":       subjects,
-        "is_super_admin": is_super_admin,
-    })
     await _append_audit_db(db, user_uid=db_user.email, action_type="Login",
                            status="Success", detail=f"Successful login as {db_user.role}")
-    return {
-        "access_token": token,
-        "token_type":   "bearer",
-        "user": {
-            "email":          db_user.email,
-            "name":           db_user.name,
-            "role":           db_user.role,
-            "subjects":       subjects,
-            "is_super_admin": is_super_admin,
-        },
-    }
+    return _build_login_response(db_user)
+
+
+async def _complete_oauth_login(db: AsyncSession, email: str, provider: str) -> dict:
+    """
+    Map a verified OAuth email onto an existing EDAPT account.
+
+    Deliberately invite-only, same as password login: a Google/Microsoft
+    sign-in never creates a new user row on its own — an admin must have
+    already provisioned the account via /api/users. This keeps the single
+    `users` table and its role/subject assignments as the one source of
+    truth for who can access what, regardless of how they authenticate.
+    """
+    result  = await db.execute(select(UserModel).where(UserModel.email == email))
+    db_user = result.scalar_one_or_none()
+
+    if not db_user:
+        await _append_audit_db(db, user_uid=email, action_type="Login Failed",
+                               status="Alert", detail=f"No account for {provider} sign-in")
+        raise HTTPException(
+            status_code=403,
+            detail="No EDAPT account is registered for this email. Ask an administrator to create one first.",
+        )
+
+    if not db_user.is_active:
+        raise HTTPException(
+            status_code=403, detail="Account is deactivated. Contact your administrator."
+        )
+
+    await _append_audit_db(db, user_uid=db_user.email, action_type="Login",
+                           status="Success", detail=f"Successful login as {db_user.role} via {provider}")
+    return _build_login_response(db_user)
+
+
+@app.post("/api/auth/google", tags=["Auth"])
+async def login_google(req: OAuthLoginRequest, db: AsyncSession = Depends(get_db)):
+    """Sign in with a Google-verified ID token."""
+    try:
+        email = oauth_providers.verify_google_id_token(req.id_token)
+    except oauth_providers.OAuthVerificationError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
+    return await _complete_oauth_login(db, email, provider="Google")
+
+
+@app.post("/api/auth/microsoft", tags=["Auth"])
+async def login_microsoft(req: OAuthLoginRequest, db: AsyncSession = Depends(get_db)):
+    """Sign in with a Microsoft-verified ID token."""
+    try:
+        email = await oauth_providers.verify_microsoft_id_token(req.id_token)
+    except oauth_providers.OAuthVerificationError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
+    return await _complete_oauth_login(db, email, provider="Microsoft")
 
 
 @app.post("/api/auth/forgot-password", tags=["Auth"])

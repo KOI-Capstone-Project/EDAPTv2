@@ -74,6 +74,7 @@ backend/app/ml/models_simulated/*
 backend/app/ml/attendance_features.csv
 backend/app/ml/column_review_decisions.json
 backend/app/ml/ingested_capstone.csv
+backend/app/ml/ingested_attendance_raw.csv
 backend/app/ml/.ingest.lock
 
 # ── OS ───────────────────────────────────────────────────
