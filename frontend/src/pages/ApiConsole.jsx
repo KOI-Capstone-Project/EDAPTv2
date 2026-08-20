@@ -2,9 +2,19 @@
 // external pass/fail prediction endpoint (/api/v1/predict), and get the
 // usage docs needed to call it from outside the app.
 import { useState, useEffect, useCallback } from 'react';
+import {
+  LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer,
+} from 'recharts';
 import api from '../services/api';
 
 const API_BASE_URL = process.env.REACT_APP_API_BASE_URL || 'http://localhost:8000';
+
+// Fixed 4-slot categorical order for the "By Key" view, validated CVD-safe
+// against a white chart surface (adjacent + all-pairs, light mode) — see
+// dataviz skill's palette validator. Never cycled/regenerated per extra key;
+// a 5th+ key folds into "Other" (muted gray) instead of growing the palette.
+const KEY_COLORS = ['#2a78d6', '#eb6834', '#1baf7a', '#eda100'];
+const OTHER_COLOR = '#8BA5B8';
 
 const SAMPLE_REQUEST = `curl -X POST ${API_BASE_URL}/api/v1/predict \\
   -H "X-API-Key: <your-key>" \\
@@ -51,6 +61,16 @@ function fmt(d) {
   return new Date(d).toLocaleString('en-AU', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
 }
 
+function fmtDay(iso) {
+  return new Date(iso + 'T00:00:00').toLocaleDateString('en-AU', { day: '2-digit', month: 'short' });
+}
+
+const NoData = () => (
+  <div style={{ height: 240, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#94A3B8', fontSize: 13 }}>
+    No API requests in this window yet
+  </div>
+);
+
 export default function ApiConsole() {
   const [keys,        setKeys]        = useState([]);
   const [loading,     setLoading]     = useState(true);
@@ -61,6 +81,10 @@ export default function ApiConsole() {
   const [revealed,    setRevealed]    = useState(null); // { name, api_key, created_at } — shown once
   const [copied,      setCopied]      = useState(false);
 
+  const [usage,        setUsage]        = useState(null);
+  const [usageLoading,  setUsageLoading] = useState(true);
+  const [usageView,     setUsageView]    = useState('total'); // 'total' | 'byKey'
+
   const fetchKeys = useCallback(() => {
     setLoading(true);
     api.get('/api/api-keys')
@@ -69,7 +93,22 @@ export default function ApiConsole() {
       .finally(() => setLoading(false));
   }, []);
 
-  useEffect(() => { fetchKeys(); }, [fetchKeys]);
+  const fetchUsage = useCallback(() => {
+    setUsageLoading(true);
+    api.get('/api/api-keys/usage', { params: { days: 30 } })
+      .then(res => setUsage(res.data))
+      .catch(() => setUsage(null))
+      .finally(() => setUsageLoading(false));
+  }, []);
+
+  useEffect(() => { fetchKeys(); fetchUsage(); }, [fetchKeys, fetchUsage]);
+
+  const usageChartData = (usage?.days || []).map((day, i) => {
+    const row = { day: fmtDay(day), total: usage.total[i] };
+    for (const k of usage.by_key) row[k.name] = k.counts[i];
+    return row;
+  });
+  const hasUsageData = (usage?.total || []).some(v => v > 0);
 
   const handleCreate = async () => {
     if (!name.trim()) { setNameErr('Give this key a name so you can recognize it later.'); return; }
@@ -164,6 +203,62 @@ export default function ApiConsole() {
           </div>
         </div>
       )}
+
+      {/* ── API usage chart ─────────────────────────────────────────── */}
+      <div style={s.chartCard}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14, flexWrap: 'wrap', gap: 10 }}>
+          <h3 style={s.chartTitle}>API Usage — last 30 days</h3>
+          <div style={s.viewToggle}>
+            <button
+              style={{ ...s.viewToggleBtn, ...(usageView === 'total' ? s.viewToggleBtnActive : {}) }}
+              onClick={() => setUsageView('total')}
+            >
+              Total
+            </button>
+            <button
+              style={{ ...s.viewToggleBtn, ...(usageView === 'byKey' ? s.viewToggleBtnActive : {}) }}
+              onClick={() => setUsageView('byKey')}
+            >
+              By Key
+            </button>
+          </div>
+        </div>
+
+        {usageLoading ? (
+          <div style={{ height: 240, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+            <div style={{ width: 32, height: 32, border: '3px solid #F0F4F8', borderTop: '3px solid #2E6E8E', borderRadius: '50%', animation: 'spin 0.8s linear infinite' }} />
+          </div>
+        ) : !hasUsageData ? (
+          <NoData />
+        ) : (
+          <ResponsiveContainer width="100%" height={240}>
+            <LineChart data={usageChartData} margin={{ top: 4, right: 12, left: 0, bottom: 0 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" />
+              <XAxis dataKey="day" tick={{ fontSize: 11 }} interval={3} />
+              <YAxis allowDecimals={false} tick={{ fontSize: 11 }} />
+              <Tooltip />
+              {usageView === 'total' ? (
+                <Line type="monotone" dataKey="total" name="Requests" stroke="#2E6E8E" strokeWidth={2} dot={false} />
+              ) : (
+                <>
+                  <Legend />
+                  {usage.by_key.map((k, i) => (
+                    <Line
+                      key={k.name}
+                      type="monotone"
+                      dataKey={k.name}
+                      name={k.name}
+                      stroke={k.name === 'Other' ? OTHER_COLOR : KEY_COLORS[i % KEY_COLORS.length]}
+                      strokeWidth={2}
+                      dot={false}
+                    />
+                  ))}
+                </>
+              )}
+            </LineChart>
+          </ResponsiveContainer>
+        )}
+      </div>
 
       {/* ── Main content: keys table + docs side panel ───────────────── */}
       <div style={s.contentGrid}>
@@ -289,6 +384,15 @@ const s = {
     flexShrink: 0, padding: '6px 14px', borderRadius: 6, border: 'none',
     background: '#2E6E8E', color: '#fff', fontSize: 12, fontWeight: 500, cursor: 'pointer',
   },
+
+  chartCard:  { background: '#fff', border: '0.5px solid #DDE4EA', borderRadius: 12, padding: '20px', marginBottom: 20 },
+  chartTitle: { margin: 0, fontSize: 14, fontWeight: 500, color: '#1A2E40' },
+  viewToggle: { display: 'flex', background: '#F0F4F8', borderRadius: 8, padding: 3, gap: 2 },
+  viewToggleBtn: {
+    padding: '5px 14px', borderRadius: 6, border: 'none', background: 'transparent',
+    fontSize: 12, fontWeight: 500, color: '#5A7A8A', cursor: 'pointer',
+  },
+  viewToggleBtnActive: { background: '#fff', color: '#1A2E40', boxShadow: '0 1px 2px rgba(0,0,0,0.08)' },
 
   contentGrid: { display: 'grid', gridTemplateColumns: 'minmax(0, 2fr) minmax(280px, 1fr)', gap: 20, alignItems: 'start' },
 

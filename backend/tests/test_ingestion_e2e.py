@@ -46,6 +46,30 @@ async def _login(client) -> str:
     return login.json()["access_token"]
 
 
+async def _confirm_and_get_job(client, headers, kind: str, token: str) -> dict:
+    """
+    Confirm now returns 202 + a job id immediately (the actual parse/
+    retrain-check/commit work runs via FastAPI BackgroundTasks, not inline
+    in the request) instead of the old synchronous 200-with-full-result.
+    Fetches the finished job's status/result via GET /api/ingest/jobs/{id}
+    so tests can assert on the same fields as before.
+
+    No polling loop needed: httpx's ASGITransport calls the app in-process
+    with no real server boundary, and Starlette runs BackgroundTasks via a
+    plain `await` inside Response.__call__ before the ASGI call returns —
+    so by the time `client.post(...)` comes back here, the background job
+    has already run to completion.
+    """
+    res = await client.post(f"/api/ingest/{kind}/confirm", headers=headers, json={"token": token})
+    assert res.status_code == 202, f"expected 202-accepted, got {res.status_code}: {res.text}"
+    job_id = res.json()["job_id"]
+    job_res = await client.get(f"/api/ingest/jobs/{job_id}", headers=headers)
+    assert job_res.status_code == 200
+    job = job_res.json()
+    assert job["status"] != "running", "background job did not finish synchronously as expected under ASGITransport"
+    return job
+
+
 def _lock_contention_worker(role: str, hold_seconds: float, result_path: str) -> None:
     """
     Runs in a genuinely separate OS process (see the test below) — the
@@ -231,12 +255,13 @@ def _isolate_ml_paths(seed_live_period: str | None = None):
 async def _preserve_app_state():
     """
     Snapshot + restore app.main's live in-memory dataset globals around a
-    test, clean up any pending_ingests DB rows the test created (that
-    table is the SHARED, cross-worker pending-upload store — see
-    PendingIngest in app/db/models.py — so leftover test rows would be
-    visible to the real dev server's own ingestion flow too, not just this
-    process), and delete backend/app/ml/ingested_capstone.csv if a test
-    left synthetic data there. That file is now train_model.DATA_PATH's
+    test, clean up any pending_ingests / ingest_jobs DB rows the test
+    created (both are SHARED, cross-worker Postgres tables — see
+    PendingIngest and IngestJob in app/db/models.py — so leftover test rows
+    would show up in the real dev server's own pending-upload flow and
+    ingestion notification badge too, not just this process), and delete
+    backend/app/ml/ingested_capstone.csv if a test left synthetic data
+    there. That file is now train_model.DATA_PATH's
     real, persistent override target (see train_model.py) — read fresh by
     ANY independent process, including the real scheduler and a real
     admin's manual check_new_period.py run — so leaving fake test rows
@@ -254,8 +279,9 @@ async def _preserve_app_state():
         main_mod._DATA       = original_data
         main_mod._ATTENDANCE = original_attendance
         async with main_mod._AsyncSession() as session:
-            from app.db.models import PendingIngest
+            from app.db.models import IngestJob, PendingIngest
             await session.execute(delete(PendingIngest))
+            await session.execute(delete(IngestJob))
             await session.commit()
         # Restore, not just delete — a real admin's previously-ingested
         # real data (if this file existed before the test touched it) must
@@ -369,14 +395,12 @@ async def test_confirm_works_from_a_pending_row_it_never_wrote_itself():
             auth_token = await _login(client)
             headers = {"Authorization": f"Bearer {auth_token}"}
             with _isolate_ml_paths(seed_live_period="99.9"):  # newer than the data -> no retrain
-                res = await client.post(
-                    "/api/ingest/capstone/confirm", headers=headers, json={"token": token},
-                )
+                job = await _confirm_and_get_job(client, headers, "capstone", token)
 
-    assert res.status_code == 200
-    body = res.json()
-    assert body["row_count"] == 15  # the 9-case CSV's real row count (9 scenarios, 15 rows total)
-    assert body["retrain"]["triggered"] is False
+    assert job["status"] == "success"
+    result = job["result"]
+    assert result["row_count"] == 15  # the 9-case CSV's real row count (9 scenarios, 15 rows total)
+    assert result["retrain"]["triggered"] is False
 
     # And the row must be gone afterward — confirm() consumes it, so a
     # second confirm with the same token must now correctly 404.
@@ -477,11 +501,9 @@ async def test_resit_collapsing_combines_across_attempts_at_type_level():
             )
             token_id = analyze.json()["token"]
             with _isolate_ml_paths(seed_live_period="99.9"):  # newer than 99.2 -> no retrain triggered
-                confirm = await client.post(
-                    "/api/ingest/capstone/confirm", headers=headers, json={"token": token_id},
-                )
-            assert confirm.status_code == 200
-            assert confirm.json()["retrain"]["triggered"] is False
+                job = await _confirm_and_get_job(client, headers, "capstone", token_id)
+            assert job["status"] == "success"
+            assert job["result"]["retrain"]["triggered"] is False
 
             # StudentR1's resit: attempt-1 TX(50%,mark=40) + attempt-2 FE(50%,mark=90) should
             # COMBINE (not "latest attempt only", which would keep just FE and lose TX) —
@@ -535,10 +557,8 @@ async def test_dashboard_reflects_newly_ingested_data():
             )
             token_id = analyze.json()["token"]
             with _isolate_ml_paths(seed_live_period="99.9"):
-                confirm = await client.post(
-                    "/api/ingest/capstone/confirm", headers=headers, json={"token": token_id},
-                )
-            assert confirm.status_code == 200
+                job = await _confirm_and_get_job(client, headers, "capstone", token_id)
+            assert job["status"] == "success"
 
             summary = await client.get("/api/dashboard/summary", headers=headers)
             assert summary.status_code == 200
@@ -566,11 +586,9 @@ async def test_retrain_trigger_same_period_vs_new_period():
             )
             token_id = analyze.json()["token"]
             with _isolate_ml_paths(seed_live_period="99.2"):  # same as the data's latest period
-                confirm_same = await client.post(
-                    "/api/ingest/capstone/confirm", headers=headers, json={"token": token_id},
-                )
-        assert confirm_same.status_code == 200
-        assert confirm_same.json()["retrain"]["triggered"] is False
+                job_same = await _confirm_and_get_job(client, headers, "capstone", token_id)
+        assert job_same["status"] == "success"
+        assert job_same["result"]["retrain"]["triggered"] is False
 
         # ── Case B: genuinely new period — must retrain (candidate only) ──
         # Real-subject data, duplicating the CI-loaded real dataset's latest
@@ -599,11 +617,9 @@ async def test_retrain_trigger_same_period_vs_new_period():
             assert analyze_b.status_code == 200
             token_id_b = analyze_b.json()["token"]
             with _isolate_ml_paths(seed_live_period=real_latest) as (_tmp_dir, isolated_registry_path):
-                confirm_new = await client.post(
-                    "/api/ingest/capstone/confirm", headers=headers, json={"token": token_id_b},
-                )
-                assert confirm_new.status_code == 200
-                retrain = confirm_new.json()["retrain"]
+                job_new = await _confirm_and_get_job(client, headers, "capstone", token_id_b)
+                assert job_new["status"] == "success", job_new.get("error_detail")
+                retrain = job_new["result"]["retrain"]
                 assert retrain["triggered"] is True
                 assert retrain["candidate_version"] is not None
 

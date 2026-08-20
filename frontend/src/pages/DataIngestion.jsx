@@ -3,8 +3,9 @@
 // file is picked, with nothing committed to the live dataset until
 // "Confirm and Ingest" is pressed. Column classification (Kept/Skipped/New)
 // is shared across both slots in one panel, tagged by source dataset.
-import { useRef, useState, useCallback } from 'react';
+import { useRef, useState, useCallback, useEffect } from 'react';
 import api from '../services/api';
+import { markIngestJobsSeen } from '../utils/ingestNotifications';
 
 const IconCloud = () => (
   <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor"
@@ -12,13 +13,6 @@ const IconCloud = () => (
     <polyline points="16 16 12 12 8 16"/>
     <line x1="12" y1="12" x2="12" y2="21"/>
     <path d="M20.39 18.39A5 5 0 0 0 18 9h-1.26A8 8 0 1 0 3 16.3"/>
-  </svg>
-);
-
-const IconCheck = () => (
-  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-    strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
-    <polyline points="20 6 9 17 4 12"/>
   </svg>
 );
 
@@ -34,9 +28,42 @@ function Spinner({ label = 'Processing…' }) {
   );
 }
 
+// ── Persistent per-kind status — "has this ever been ingested?" survives a
+// refresh because it's derived from the server (GET /api/ingest/dataset-summary
+// + the jobs list), not from React state that resets on page load. ──────────
+
+function timeAgo(iso, nowMs) {
+  if (!iso) return '';
+  const diffSec = Math.max(0, Math.round((nowMs - new Date(iso).getTime()) / 1000));
+  if (diffSec < 5) return 'just now';
+  if (diffSec < 60) return `${diffSec}s ago`;
+  const diffMin = Math.round(diffSec / 60);
+  if (diffMin < 60) return `${diffMin} min ago`;
+  return `${Math.round(diffMin / 60)}h ago`;
+}
+
+function DatasetStatusBadge({ summary, runningJob, nowMs }) {
+  if (runningJob) {
+    return (
+      <span style={{ ...s.datasetStatus, ...s.datasetStatusRunning }}>
+        <span style={{ ...s.jobDot, ...s.jobDotRunning }} /> Ingestion in progress…
+      </span>
+    );
+  }
+  if (!summary || !summary.has_data) {
+    return <span style={{ ...s.datasetStatus, ...s.datasetStatusNone }}>Not yet ingested</span>;
+  }
+  return (
+    <span style={{ ...s.datasetStatus, ...s.datasetStatusDone }}>
+      <span style={{ ...s.jobDot, ...s.jobDotSuccess }} /> Ingested — {summary.row_count.toLocaleString()} rows
+      {summary.last_ingested_at && <> · updated {timeAgo(summary.last_ingested_at, nowMs)}</>}
+    </span>
+  );
+}
+
 // ── One upload card — capstone or attendance, fully independent state ────────
 
-function UploadCard({ kind, title, hint, maxSizeMB, analyzeUrl, onAnalyzed, onCleared, committed }) {
+function UploadCard({ kind, title, hint, maxSizeMB, analyzeUrl, onAnalyzed, onCleared, restored, datasetSummary, runningJob, nowMs }) {
   const fileRef = useRef(null);
   const [dragging, setDragging] = useState(false);
   const [file,     setFile]     = useState(null);
@@ -109,7 +136,10 @@ function UploadCard({ kind, title, hint, maxSizeMB, analyzeUrl, onAnalyzed, onCl
 
   return (
     <div style={s.uploadCard}>
-      <h3 style={s.uploadCardTitle}>{title}</h3>
+      <div style={s.uploadCardHeader}>
+        <h3 style={s.uploadCardTitle}>{title}</h3>
+        <DatasetStatusBadge summary={datasetSummary} runningJob={runningJob} nowMs={nowMs} />
+      </div>
       <div
         style={{ ...s.dropZone, ...(dragging ? s.dropActive : {}) }}
         onDragOver={onDragOver} onDragLeave={onDragLeave} onDrop={onDrop}
@@ -135,14 +165,15 @@ function UploadCard({ kind, title, hint, maxSizeMB, analyzeUrl, onAnalyzed, onCl
           {analysis.subjects != null && <span style={s.analyzedSub}>· {analysis.subjects} subjects</span>}
         </div>
       )}
-      {committed != null && (
-        <div style={s.committedBanner}>
-          <span style={s.committedIcon}><IconCheck /></span>
-          Committed — {committed.row_count.toLocaleString()} rows live
+      {!file && status === 'IDLE' && restored && (
+        <div style={s.restoredBanner}>
+          Resumed <strong>{restored.filename}</strong> — {restored.row_count.toLocaleString()} rows,
+          analyzed earlier and still waiting to be confirmed. Expires in{' '}
+          {Math.max(1, Math.round(restored.expires_in_seconds / 60))} min if not confirmed.
         </div>
       )}
 
-      {file && (
+      {(file || restored) && (
         <button style={s.resetBtn} onClick={handleReset}>Remove file</button>
       )}
     </div>
@@ -273,6 +304,146 @@ function ColumnCheckPanel({ capstoneCols, attendanceCols, onDecide }) {
   );
 }
 
+// ── Ingest jobs panel ──────────────────────────────────────────────────────────
+// Confirm now returns immediately and the real work (parse/build features/
+// retrain-check/commit) finishes later in the background (see IngestJob in
+// backend/app/db/models.py). This panel is the real status readout — every
+// number here comes from the server, not a client-side estimate: a "running"
+// row's elapsed time is computed from the job's actual started_at, and a
+// finished row's detail is the job's actual result payload.
+
+const KIND_LABEL = { capstone: 'Capstone Data', attendance: 'Attendance Data' };
+
+function formatElapsed(startedIso, nowMs) {
+  const sec = Math.max(0, Math.round((nowMs - new Date(startedIso).getTime()) / 1000));
+  const mm = String(Math.floor(sec / 60)).padStart(2, '0');
+  const ss = String(sec % 60).padStart(2, '0');
+  return `${mm}:${ss}`;
+}
+
+function IngestJobRow({ job, nowMs }) {
+  const isRunning = job.status === 'running';
+  const isFailed  = job.status === 'failed';
+  const dotStyle  = isRunning ? s.jobDotRunning : isFailed ? s.jobDotFailed : s.jobDotSuccess;
+  const pillStyle = isRunning ? s.jobStatusRunning : isFailed ? s.jobStatusFailed : s.jobStatusSuccess;
+
+  return (
+    <div style={s.jobRow}>
+      <div style={s.jobRowTop}>
+        <span style={{ ...s.jobDot, ...dotStyle }} />
+        <span style={s.jobKind}>{KIND_LABEL[job.kind] || job.kind}</span>
+        <span style={s.jobFilename}>{job.filename}</span>
+        <span style={{ ...s.jobStatusPill, ...pillStyle }}>
+          {isRunning ? 'Processing…' : isFailed ? 'Failed' : 'Completed'}
+        </span>
+      </div>
+      <div style={s.jobRowMeta}>
+        {isRunning
+          ? <>Started by {job.started_by} — running {formatElapsed(job.started_at, nowMs)}. You'll be notified here (and in the sidebar) once it finishes — feel free to navigate away.</>
+          : <>Started by {job.started_by} · {timeAgo(job.finished_at || job.started_at, nowMs)}</>}
+      </div>
+      {job.status === 'success' && job.result && job.kind === 'capstone' && (
+        <div style={s.jobResult}>
+          <span><strong>{job.result.row_count?.toLocaleString()}</strong> rows</span>
+          <span>Subjects reclassified: <strong>{job.result.subjects_reclassified}</strong></span>
+          <span>
+            {job.result.retrain?.triggered
+              ? `🔄 Retrain candidate${job.result.retrain.candidate_version ? ` ${job.result.retrain.candidate_version}` : ''} registered`
+              : `ℹ ${job.result.retrain?.reason}`}
+          </span>
+        </div>
+      )}
+      {job.status === 'success' && job.result && job.kind === 'attendance' && (
+        <div style={s.jobResult}>
+          <span><strong>{job.result.row_count?.toLocaleString()}</strong> enrolments</span>
+          <span>Match rate: <strong>{job.result.match_rate}%</strong></span>
+        </div>
+      )}
+      {job.status === 'success' && job.result?.merge_stats && (
+        <div style={s.jobMergeStats}>
+          Incremental merge — <strong>{job.result.merge_stats.new_rows.toLocaleString()}</strong> new,{' '}
+          <strong>{job.result.merge_stats.updated_rows.toLocaleString()}</strong> updated,{' '}
+          <strong>{job.result.merge_stats.redundant_rows.toLocaleString()}</strong> redundant rows found and skipped
+        </div>
+      )}
+      {isFailed && <div style={s.jobError}>⚠ {job.error_detail || 'Ingestion failed.'}</div>}
+    </div>
+  );
+}
+
+function IngestJobsPanel({ jobs, nowMs }) {
+  if (!jobs.length) return null;
+  return (
+    <div style={s.card}>
+      <style>{`@keyframes ingestPulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.4; transform: scale(0.7); } }`}</style>
+      <h3 style={s.cardTitle}>Ingestion Activity</h3>
+      <div style={s.jobList}>
+        {jobs.map(job => <IngestJobRow key={job.id} job={job} nowMs={nowMs} />)}
+      </div>
+    </div>
+  );
+}
+
+// ── Incremental vs. Override wizard ────────────────────────────────────────────
+// Shown at confirm time only for a kind that already has live data — with
+// nothing to merge into or replace yet, there's no real choice to make, so a
+// first-time ingestion skips this entirely and goes straight through.
+
+function IngestModeWizard({ pending, modes, onModeChange, onCancel, onConfirm }) {
+  return (
+    <div style={s.modalOverlay} role="dialog" aria-modal="true">
+      <div style={s.modalCard}>
+        <h3 style={s.modalTitle}>Choose how to ingest</h3>
+        <p style={s.modalSub}>
+          Live data already exists for the dataset{pending.length > 1 ? 's' : ''} below. Pick how this upload should be applied to each.
+        </p>
+
+        {pending.map(({ kind, filename, rowCount, existingRowCount }) => (
+          <div key={kind} style={s.modalKindBlock}>
+            <div style={s.modalKindHeader}>
+              {KIND_LABEL[kind]} <span style={s.modalKindFile}>— {filename}</span>
+            </div>
+            <p style={s.modalKindMeta}>
+              {rowCount.toLocaleString()} rows in this upload · {existingRowCount.toLocaleString()} rows currently live
+            </p>
+            <div style={s.modalOptions}>
+              <label style={{ ...s.modalOption, ...(modes[kind] === 'incremental' ? s.modalOptionSelected : {}) }}>
+                <input
+                  type="radio" name={`mode-${kind}`} checked={modes[kind] === 'incremental'}
+                  onChange={() => onModeChange(kind, 'incremental')}
+                />
+                <div>
+                  <strong>Incremental Ingestion</strong>
+                  <p style={s.modalOptionText}>
+                    Merge new rows into the existing data. An exact-duplicate row is skipped; a row with
+                    the same key (e.g. student + subject + period) but a different value is treated as a
+                    correction and replaces the old one; a genuinely new row is added.
+                  </p>
+                </div>
+              </label>
+              <label style={{ ...s.modalOption, ...(modes[kind] === 'override' ? s.modalOptionSelected : {}) }}>
+                <input
+                  type="radio" name={`mode-${kind}`} checked={modes[kind] === 'override'}
+                  onChange={() => onModeChange(kind, 'override')}
+                />
+                <div>
+                  <strong>Override Previous Ingestion</strong>
+                  <p style={s.modalOptionText}>Replace the existing data entirely with this upload.</p>
+                </div>
+              </label>
+            </div>
+          </div>
+        ))}
+
+        <div style={s.modalActions}>
+          <button style={s.modalCancelBtn} onClick={onCancel}>Cancel</button>
+          <button style={s.modalConfirmBtn} onClick={onConfirm}>Confirm and Ingest</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Main page ──────────────────────────────────────────────────────────────────
 
 export default function DataIngestion() {
@@ -283,28 +454,117 @@ export default function DataIngestion() {
 
   const [committing, setCommitting] = useState(false);
   const [commitError, setCommitError] = useState(null);
-  const [capstoneResult,   setCapstoneResult]   = useState(null);
-  const [attendanceResult, setAttendanceResult] = useState(null);
+
+  // Info about a pending upload resumed from the server on page load (no
+  // File object — the browser never held one this session). Kept separate
+  // from *Analysis so the "Resumed …" banner can tell that case apart from
+  // a freshly-analyzed local file.
+  const [restoredCapstone,   setRestoredCapstone]   = useState(null);
+  const [restoredAttendance, setRestoredAttendance] = useState(null);
+
+  // Real ingestion job history/status (see IngestJob in backend/app/db/models.py)
+  // — confirm now starts a background job instead of blocking, so this list,
+  // not a synchronous response, is the actual source of truth for what
+  // happened. nowMs ticks every second purely to keep running jobs' elapsed
+  // timers live; jobs itself refreshes on its own slower poll.
+  const [jobs, setJobs] = useState([]);
+  const [nowMs, setNowMs] = useState(Date.now());
+
+  const fetchJobs = useCallback(async () => {
+    try {
+      const res = await api.get('/api/ingest/jobs', { params: { limit: 20 } });
+      setJobs(res.data.jobs);
+      // Visiting this page IS acknowledging its ingestion activity — clears
+      // the sidebar badge for anything already visible here.
+      markIngestJobsSeen(res.data.jobs);
+    } catch { /* history is best-effort; leave the prior list showing */ }
+  }, []);
+
+  useEffect(() => { fetchJobs(); }, [fetchJobs]);
+  useEffect(() => {
+    const timer = setInterval(fetchJobs, 5000);
+    return () => clearInterval(timer);
+  }, [fetchJobs]);
+  useEffect(() => {
+    const timer = setInterval(() => setNowMs(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  // Persistent per-kind status ("Ingested — 327,501 rows, updated 2 min ago"
+  // vs "Not yet ingested") — server-derived (GET /api/ingest/dataset-summary),
+  // so it survives a refresh instead of the page looking blank until
+  // something new happens in this browser tab. Also what decides whether the
+  // incremental-vs-override wizard even needs to appear at confirm time.
+  const [datasetSummary, setDatasetSummary] = useState(null);
+  const fetchDatasetSummary = useCallback(async () => {
+    try {
+      const res = await api.get('/api/ingest/dataset-summary');
+      setDatasetSummary(res.data);
+    } catch { /* status strip is best-effort; leave the prior summary showing */ }
+  }, []);
+  useEffect(() => { fetchDatasetSummary(); }, [fetchDatasetSummary]);
+  useEffect(() => {
+    const timer = setInterval(fetchDatasetSummary, 5000);
+    return () => clearInterval(timer);
+  }, [fetchDatasetSummary]);
+
+  // Incremental-vs-override wizard — only shown for a kind that already has
+  // live data to merge into or replace; wizardPending is null when the
+  // modal isn't open.
+  const [wizardPending, setWizardPending] = useState(null); // [{kind, filename, rowCount, existingRowCount}] | null
+  const [wizardModes, setWizardModes] = useState({});
+
+  // The server keeps an analyzed-but-not-yet-confirmed upload for 30 minutes
+  // (PendingIngest / PENDING_INGEST_TTL_MINUTES in main.py) so it survives a
+  // page refresh — but only the frontend knowing about it saves the user
+  // from re-uploading a file that can be up to 200MB just to get back here.
+  useEffect(() => {
+    let cancelled = false;
+    const restore = async (kind, setAnalysis, setRestored) => {
+      try {
+        const res = await api.get(`/api/ingest/${kind}/status`);
+        if (cancelled || !res.data.pending) return;
+        setAnalysis(res.data);
+        setRestored(res.data);
+      } catch { /* nothing to resume, or the check itself failed — safe to ignore */ }
+    };
+    restore('capstone', setCapstoneAnalysis, setRestoredCapstone);
+    restore('attendance', setAttendanceAnalysis, setRestoredAttendance);
+    return () => { cancelled = true; };
+  }, []);
 
   const handleAnalyzed = (kind, data, file) => {
-    if (kind === 'capstone') { setCapstoneAnalysis(data); setCapstoneFile(data ? file : null); }
-    else                     { setAttendanceAnalysis(data); setAttendanceFile(data ? file : null); }
+    if (kind === 'capstone') { setCapstoneAnalysis(data); setCapstoneFile(data ? file : null); setRestoredCapstone(null); }
+    else                     { setAttendanceAnalysis(data); setAttendanceFile(data ? file : null); setRestoredAttendance(null); }
   };
   const handleCleared = (kind) => {
-    if (kind === 'capstone') { setCapstoneAnalysis(null); setCapstoneFile(null); setCapstoneResult(null); }
-    else                     { setAttendanceAnalysis(null); setAttendanceFile(null); setAttendanceResult(null); }
+    if (kind === 'capstone') {
+      setCapstoneAnalysis(null); setCapstoneFile(null); setRestoredCapstone(null);
+    } else {
+      setAttendanceAnalysis(null); setAttendanceFile(null); setRestoredAttendance(null);
+    }
   };
 
   const reanalyze = async (kind) => {
     const file = kind === 'capstone' ? capstoneFile : attendanceFile;
-    if (!file) return;
-    const url = kind === 'capstone' ? '/api/ingest/capstone/analyze' : '/api/ingest/attendance/analyze';
     try {
-      const form = new FormData();
-      form.append('file', file);
-      const res = await api.post(url, form, { headers: { 'Content-Type': 'multipart/form-data' } });
-      if (kind === 'capstone') setCapstoneAnalysis(res.data);
-      else setAttendanceAnalysis(res.data);
+      if (file) {
+        const url = kind === 'capstone' ? '/api/ingest/capstone/analyze' : '/api/ingest/attendance/analyze';
+        const form = new FormData();
+        form.append('file', file);
+        const res = await api.post(url, form, { headers: { 'Content-Type': 'multipart/form-data' } });
+        if (kind === 'capstone') setCapstoneAnalysis(res.data);
+        else setAttendanceAnalysis(res.data);
+      } else {
+        // No local File held for this kind — this upload was resumed from a
+        // page refresh. Reclassify from the bytes the server already has
+        // rather than asking the user to re-pick the file just to reflect
+        // one column decision.
+        const res = await api.get(`/api/ingest/${kind}/status`);
+        if (!res.data.pending) return;
+        if (kind === 'capstone') setCapstoneAnalysis(res.data);
+        else setAttendanceAnalysis(res.data);
+      }
     } catch { /* leave prior analysis in place on failure */ }
   };
 
@@ -315,27 +575,77 @@ export default function DataIngestion() {
     } catch { /* surfaced implicitly — column stays in New if this fails */ }
   };
 
-  const handleConfirm = async () => {
+  // The actual confirm calls, run with each kind's chosen mode (defaults to
+  // "override" for a kind the wizard never asked about — i.e. one with no
+  // existing data to merge into or replace anyway).
+  const runConfirm = async (modes) => {
     setCommitting(true);
     setCommitError(null);
     try {
       if (capstoneAnalysis) {
-        const res = await api.post('/api/ingest/capstone/confirm', { token: capstoneAnalysis.token });
-        setCapstoneResult(res.data);
+        await api.post('/api/ingest/capstone/confirm', {
+          token: capstoneAnalysis.token, mode: modes.capstone || 'override',
+        });
+        // The server deletes this pending row the instant confirm is
+        // accepted (one-shot per kind, not just once the background job
+        // finishes) — clear it here too, or a stray extra click on
+        // "Confirm and Ingest" would resubmit the same now-dead token and
+        // 404 with "No matching pending upload".
+        setCapstoneAnalysis(null);
+        setCapstoneFile(null);
+        setRestoredCapstone(null);
       }
       if (attendanceAnalysis) {
-        const res = await api.post('/api/ingest/attendance/confirm', { token: attendanceAnalysis.token });
-        setAttendanceResult(res.data);
+        await api.post('/api/ingest/attendance/confirm', {
+          token: attendanceAnalysis.token, mode: modes.attendance || 'override',
+        });
+        setAttendanceAnalysis(null);
+        setAttendanceFile(null);
+        setRestoredAttendance(null);
       }
+      // Confirm only accepts the job — pull the list (and the now-stale
+      // dataset summary) immediately so the new "running" row and updated
+      // status show up right away instead of waiting for the next poll tick.
+      await Promise.all([fetchJobs(), fetchDatasetSummary()]);
     } catch (err) {
-      setCommitError(err.response?.data?.detail || 'Ingestion failed. Please try again.');
+      setCommitError(err.response?.data?.detail || 'Could not start ingestion. Please try again.');
     } finally {
       setCommitting(false);
     }
   };
 
+  const handleConfirm = () => {
+    // Only offer a real choice for a kind that already has live data — a
+    // first-time ingestion has nothing to merge into or replace, so it just
+    // goes straight through as a plain load (mode is moot either way).
+    const candidates = [
+      capstoneAnalysis && { kind: 'capstone', analysis: capstoneAnalysis },
+      attendanceAnalysis && { kind: 'attendance', analysis: attendanceAnalysis },
+    ].filter(Boolean);
+
+    const needsWizard = candidates.filter(({ kind }) => datasetSummary?.[kind]?.has_data);
+
+    if (needsWizard.length === 0) {
+      runConfirm({});
+      return;
+    }
+
+    setWizardPending(needsWizard.map(({ kind, analysis }) => ({
+      kind,
+      filename: analysis.filename,
+      rowCount: analysis.row_count,
+      existingRowCount: datasetSummary[kind].row_count,
+    })));
+    setWizardModes(Object.fromEntries(needsWizard.map(({ kind }) => [kind, 'incremental'])));
+  };
+
+  const handleWizardConfirm = () => {
+    const modes = wizardModes;
+    setWizardPending(null);
+    runConfirm(modes);
+  };
+
   const canConfirm = (capstoneAnalysis || attendanceAnalysis) && !committing;
-  const hasResult  = capstoneResult || attendanceResult;
 
   return (
     <div>
@@ -354,7 +664,10 @@ export default function DataIngestion() {
           analyzeUrl="/api/ingest/capstone/analyze"
           onAnalyzed={handleAnalyzed}
           onCleared={handleCleared}
-          committed={capstoneResult}
+          restored={restoredCapstone}
+          datasetSummary={datasetSummary?.capstone}
+          runningJob={jobs.find(j => j.kind === 'capstone' && j.status === 'running')}
+          nowMs={nowMs}
         />
         <UploadCard
           kind="attendance"
@@ -364,7 +677,10 @@ export default function DataIngestion() {
           analyzeUrl="/api/ingest/attendance/analyze"
           onAnalyzed={handleAnalyzed}
           onCleared={handleCleared}
-          committed={attendanceResult}
+          restored={restoredAttendance}
+          datasetSummary={datasetSummary?.attendance}
+          runningJob={jobs.find(j => j.kind === 'attendance' && j.status === 'running')}
+          nowMs={nowMs}
         />
       </div>
 
@@ -375,49 +691,6 @@ export default function DataIngestion() {
         onDecide={handleDecide}
       />
 
-      {/* ── Summary metric cards (after commit) ── */}
-      {hasResult && (
-        <div style={s.cardRow}>
-          <div style={s.statCard}>
-            <p style={s.cardLabel}>Enrolments Processed</p>
-            <p style={s.cardValue}>
-              {capstoneResult ? capstoneResult.row_count.toLocaleString() : '— — —'}
-            </p>
-          </div>
-          <div style={s.statCard}>
-            <p style={s.cardLabel}>Attendance Match Rate</p>
-            <p style={s.cardValue}>
-              {attendanceResult?.match_rate != null ? `${attendanceResult.match_rate}%` : '— — —'}
-            </p>
-          </div>
-          <div style={s.statCard}>
-            <p style={s.cardLabel}>Subjects Reclassified</p>
-            <p style={s.cardValue}>
-              {capstoneResult ? capstoneResult.subjects_reclassified : '— — —'}
-            </p>
-          </div>
-        </div>
-      )}
-
-      {/* ── Status bar (after commit) ── */}
-      {capstoneResult && (
-        <div style={s.statusBar}>
-          <div style={{
-            ...s.statusRow,
-            background: capstoneResult.retrain.triggered ? '#EFF6FF' : '#F8FAFC',
-            color:      capstoneResult.retrain.triggered ? '#1D4ED8' : '#5A7A8A',
-          }}>
-            {capstoneResult.retrain.triggered ? '🔄' : 'ℹ'} {capstoneResult.retrain.reason}
-            {capstoneResult.retrain.triggered && capstoneResult.retrain.candidate_version && (
-              <strong> — candidate {capstoneResult.retrain.candidate_version} registered</strong>
-            )}
-          </div>
-          <div style={s.statusRowConstraint}>
-            🔒 {capstoneResult.promotion_note}
-          </div>
-        </div>
-      )}
-
       {commitError && <div style={s.errorBanner}>⚠ {commitError}</div>}
 
       {/* ── Confirm and ingest ── */}
@@ -427,9 +700,22 @@ export default function DataIngestion() {
           disabled={!canConfirm}
           onClick={handleConfirm}
         >
-          {committing ? <Spinner label="Ingesting…" /> : 'Confirm and Ingest'}
+          {committing ? <Spinner label="Starting…" /> : 'Confirm and Ingest'}
         </button>
       </div>
+
+      {/* ── Ingestion activity — real background job status, not an estimate ── */}
+      <IngestJobsPanel jobs={jobs} nowMs={nowMs} />
+
+      {wizardPending && (
+        <IngestModeWizard
+          pending={wizardPending}
+          modes={wizardModes}
+          onModeChange={(kind, mode) => setWizardModes(m => ({ ...m, [kind]: mode }))}
+          onCancel={() => setWizardPending(null)}
+          onConfirm={handleWizardConfirm}
+        />
+      )}
     </div>
   );
 }
@@ -441,7 +727,19 @@ const s = {
 
   uploadRow: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 20, marginBottom: 20 },
   uploadCard: { background: '#fff', border: '0.5px solid #DDE4EA', borderRadius: 12, padding: '18px 20px' },
-  uploadCardTitle: { margin: '0 0 12px', fontSize: 14, fontWeight: 600, color: '#1A2E40' },
+  uploadCardHeader: {
+    display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+    gap: 8, flexWrap: 'wrap', marginBottom: 12,
+  },
+  uploadCardTitle: { margin: 0, fontSize: 14, fontWeight: 600, color: '#1A2E40' },
+
+  datasetStatus: {
+    display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 11.5, fontWeight: 600,
+    borderRadius: 999, padding: '3px 10px', whiteSpace: 'nowrap',
+  },
+  datasetStatusNone:    { background: '#F1F5F9', color: '#64748B' },
+  datasetStatusDone:    { background: '#ECFDF5', color: '#065F46' },
+  datasetStatusRunning: { background: '#EFF6FF', color: '#1D4ED8' },
 
   dropZone: {
     background: '#2E6E8E', border: '2px dashed rgba(255,255,255,0.35)', borderRadius: 12,
@@ -461,14 +759,9 @@ const s = {
   analyzedRow: { display: 'flex', alignItems: 'center', gap: 6, marginTop: 10, fontSize: 13, color: '#1A2E40' },
   analyzedRowLabel: { fontSize: 11, fontWeight: 600, color: '#8BA5B8', textTransform: 'uppercase' },
   analyzedSub: { color: '#5A7A8A', fontSize: 12 },
-  committedBanner: {
-    display: 'flex', alignItems: 'center', gap: 8, marginTop: 10,
-    fontSize: 12, fontWeight: 600, color: '#065F46', background: '#ECFDF5',
-    border: '1px solid #A7F3D0', borderRadius: 8, padding: '8px 12px',
-  },
-  committedIcon: {
-    display: 'flex', alignItems: 'center', justifyContent: 'center',
-    width: 18, height: 18, borderRadius: '50%', background: '#059669', color: '#fff', flexShrink: 0,
+  restoredBanner: {
+    marginTop: 10, fontSize: 12, lineHeight: 1.5, color: '#1D4ED8',
+    background: '#EFF6FF', border: '1px solid #BFDBFE', borderRadius: 8, padding: '8px 12px',
   },
   resetBtn: {
     marginTop: 10, padding: '6px 14px', borderRadius: 7, border: '0.5px solid #C5D2DC',
@@ -514,32 +807,79 @@ const s = {
     background: '#DC2626', color: '#fff', fontSize: 11.5, fontWeight: 600, cursor: 'pointer',
   },
 
-  cardRow:   { display: 'flex', gap: 16, marginBottom: 20 },
-  statCard:  {
-    flex: 1, background: '#fff', border: '0.5px solid #DDE4EA',
-    borderRadius: 10, padding: '18px 22px', display: 'flex', flexDirection: 'column', gap: 8,
-  },
-  cardLabel: { margin: 0, fontSize: 11, fontWeight: 700, color: '#94A3B8', textTransform: 'uppercase', letterSpacing: 0.5 },
-  cardValue: { margin: 0, fontSize: 26, fontWeight: 700, color: '#1A2E40', letterSpacing: -0.5 },
-
-  statusBar: { display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 20 },
-  statusRow: {
-    borderRadius: 8, padding: '10px 16px', fontSize: 13, fontWeight: 500,
-  },
-  statusRowConstraint: {
-    borderRadius: 8, padding: '10px 16px', fontSize: 13, fontWeight: 600,
-    background: '#F1F5F9', color: '#334155', border: '0.5px solid #DDE4EA',
-  },
-
   errorBanner: {
     background: 'rgba(220,38,38,0.08)', border: '1px solid rgba(220,38,38,0.25)',
     color: '#DC2626', borderRadius: 8, padding: '10px 16px', fontSize: 13, marginBottom: 16,
   },
 
   actions:    { display: 'flex', gap: 12, marginBottom: 28 },
+
+  jobList: { display: 'flex', flexDirection: 'column', gap: 12 },
+  jobRow: {
+    border: '0.5px solid #DDE4EA', borderRadius: 10, padding: '12px 16px',
+    display: 'flex', flexDirection: 'column', gap: 6,
+  },
+  jobRowTop: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' },
+  jobDot: { width: 8, height: 8, borderRadius: '50%', flexShrink: 0 },
+  jobDotRunning: { background: '#2E6E8E', animation: 'ingestPulse 1.1s ease-in-out infinite' },
+  jobDotSuccess: { background: '#059669' },
+  jobDotFailed:  { background: '#DC2626' },
+  jobKind:     { fontSize: 13, fontWeight: 700, color: '#1A2E40' },
+  jobFilename: { fontSize: 12.5, color: '#5A7A8A', fontFamily: "'SF Mono','Fira Code',monospace" },
+  jobStatusPill: {
+    marginLeft: 'auto', fontSize: 11, fontWeight: 700, borderRadius: 999,
+    padding: '3px 10px', textTransform: 'uppercase', letterSpacing: 0.3,
+  },
+  jobStatusRunning: { background: '#EFF6FF', color: '#1D4ED8' },
+  jobStatusSuccess: { background: '#ECFDF5', color: '#065F46' },
+  jobStatusFailed:  { background: '#FEF2F2', color: '#991B1B' },
+  jobRowMeta: { fontSize: 12, color: '#8BA5B8' },
+  jobResult: { display: 'flex', gap: 16, flexWrap: 'wrap', fontSize: 12.5, color: '#334155' },
+  jobMergeStats: {
+    fontSize: 12, color: '#1D4ED8', background: '#EFF6FF',
+    border: '1px solid #BFDBFE', borderRadius: 6, padding: '6px 10px',
+  },
+  jobError:  { fontSize: 12.5, color: '#DC2626' },
   btnPrimary: {
     padding: '12px 32px', background: '#2E6E8E', color: '#fff',
     border: 'none', borderRadius: 8, fontSize: 14, fontWeight: 600,
     cursor: 'pointer', transition: 'opacity 0.15s', minWidth: 200,
+  },
+
+  modalOverlay: {
+    position: 'fixed', inset: 0, background: 'rgba(15,23,42,0.45)',
+    display: 'flex', alignItems: 'center', justifyContent: 'center',
+    padding: 20, zIndex: 100,
+  },
+  modalCard: {
+    background: '#fff', borderRadius: 14, padding: '24px 28px', width: '100%',
+    maxWidth: 520, maxHeight: '85vh', overflowY: 'auto',
+    boxShadow: '0 20px 50px rgba(0,0,0,0.25)',
+  },
+  modalTitle: { margin: '0 0 6px', fontSize: 18, fontWeight: 700, color: '#1A2E40' },
+  modalSub:   { margin: '0 0 18px', fontSize: 13, color: '#5A7A8A', lineHeight: 1.5 },
+  modalKindBlock: {
+    border: '0.5px solid #DDE4EA', borderRadius: 10, padding: '14px 16px', marginBottom: 14,
+  },
+  modalKindHeader: { fontSize: 13.5, fontWeight: 700, color: '#1A2E40', marginBottom: 4 },
+  modalKindFile: { fontWeight: 400, color: '#5A7A8A', fontFamily: "'SF Mono','Fira Code',monospace", fontSize: 12 },
+  modalKindMeta: { margin: '0 0 12px', fontSize: 12, color: '#8BA5B8' },
+  modalOptions: { display: 'flex', flexDirection: 'column', gap: 8 },
+  modalOption: {
+    display: 'flex', alignItems: 'flex-start', gap: 10, cursor: 'pointer',
+    border: '1px solid #DDE4EA', borderRadius: 8, padding: '10px 12px',
+  },
+  modalOptionSelected: { borderColor: '#2E6E8E', background: '#F0F7FA' },
+  modalOptionText: { margin: '4px 0 0', fontSize: 12, color: '#5A7A8A', lineHeight: 1.5 },
+  modalActions: {
+    display: 'flex', justifyContent: 'flex-end', gap: 10, marginTop: 20,
+  },
+  modalCancelBtn: {
+    padding: '10px 20px', borderRadius: 8, border: '0.5px solid #C5D2DC',
+    background: '#fff', color: '#64748B', fontSize: 13, fontWeight: 600, cursor: 'pointer',
+  },
+  modalConfirmBtn: {
+    padding: '10px 20px', borderRadius: 8, border: 'none',
+    background: '#2E6E8E', color: '#fff', fontSize: 13, fontWeight: 600, cursor: 'pointer',
   },
 };

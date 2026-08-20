@@ -363,6 +363,52 @@ class PendingIngest(Base):
     created_at: datetime = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
 
+class IngestJob(Base):
+    """
+    Tracks one confirm-time ingestion run so it can happen in the background.
+
+    Confirm used to block the HTTP request for as long as the actual
+    parse/feature-build/merge/commit took — a real problem on a 200MB /
+    2.5M-row attendance file, where that work can run well past any
+    reasonable client timeout. Confirm now returns immediately with a job
+    id, the real work runs after the response via FastAPI BackgroundTasks,
+    and progress is exposed by polling this table instead of by holding the
+    request open.
+
+    A real table, not an in-memory dict — this project already learned that
+    lesson once with PendingIngest: prod runs 4 gunicorn workers, so a status
+    poll needs to see this row regardless of which worker actually ran the
+    background task.
+    """
+
+    __tablename__ = "ingest_jobs"
+
+    id: int = Column(Integer, primary_key=True, autoincrement=True)
+
+    kind: str = Column(String(20), nullable=False, comment="'capstone' or 'attendance'")
+
+    status: str = Column(
+        String(20), nullable=False, default="running", server_default="running",
+        comment="running | success | failed",
+    )
+
+    filename: str | None = Column(String(255), nullable=True)
+
+    started_by: str = Column(
+        String(254), nullable=False,
+        comment="Email/uid of the admin who confirmed this ingestion",
+    )
+
+    started_at: datetime = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    finished_at: datetime | None = Column(DateTime(timezone=True), nullable=True)
+
+    result: dict | None = Column(
+        JSON, nullable=True,
+        comment="Same payload the old synchronous confirm endpoint returned, once finished successfully",
+    )
+    error_detail: str | None = Column(Text, nullable=True)
+
+
 class AuditLog(Base):
     """
     Persistent audit trail for all significant system events.
