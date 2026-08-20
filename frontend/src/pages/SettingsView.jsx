@@ -3,7 +3,7 @@
 // lecturer role additionally sees its assigned-subjects list and a
 // default-subject preference that doesn't apply to an admin, who has no
 // fixed subject scope.
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef } from 'react';
 import { getUser, getUserName, getUserInitials } from '../utils/auth';
 import api from '../services/api';
 
@@ -97,41 +97,6 @@ export default function SettingsView({ isLecturer }) {
     }
   };
 
-  // ── Section 3b: Risk Email Template (admin only — Head of Technology / Head
-  // of School, matching the backend's require_head_of_school gate on the PUT).
-  // Reference wording only: this system has no real student email anywhere
-  // (see RiskEmailTemplate's backend docstring), so nothing is ever sent from
-  // here — staff copy this into the real email they send themselves, then
-  // use the "Log as emailed" bulk action on Students at Risk to record it.
-  const [riskEmailSubject, setRiskEmailSubject] = useState('');
-  const [riskEmailBody,    setRiskEmailBody]    = useState('');
-  const [riskEmailMsg,     setRiskEmailMsg]     = useState(null);
-  const [riskEmailSaving,  setRiskEmailSaving]  = useState(false);
-
-  useEffect(() => {
-    if (isLecturer) return;
-    api.get('/api/risk-email-template')
-      .then(r => { setRiskEmailSubject(r.data.subject); setRiskEmailBody(r.data.body); })
-      .catch(() => {});
-  }, [isLecturer]);
-
-  const handleSaveRiskEmailTemplate = async () => {
-    setRiskEmailSaving(true);
-    setRiskEmailMsg(null);
-    try {
-      const res = await api.put('/api/risk-email-template', {
-        subject: riskEmailSubject, body: riskEmailBody,
-      });
-      setRiskEmailSubject(res.data.subject);
-      setRiskEmailBody(res.data.body);
-      setRiskEmailMsg({ type: 'success', text: 'Template saved.' });
-    } catch (err) {
-      setRiskEmailMsg({ type: 'error', text: err.response?.data?.detail || 'Failed to save template.' });
-    } finally {
-      setRiskEmailSaving(false);
-    }
-  };
-
   // ── Section 3: Preferences ───────────────────────────────────────────────
   const [prefSubject,   setPrefSubject]   = useState(localStorage.getItem('pref_default_subject')   || '');
   const [prefTrimester, setPrefTrimester] = useState(localStorage.getItem('pref_default_trimester') || '');
@@ -154,7 +119,7 @@ export default function SettingsView({ isLecturer }) {
     <div style={{ maxWidth: 720 }}>
 
       <div style={s.pageHeader}>
-        <h1 style={s.pageTitle}>Settings</h1>
+        <h1 style={s.pageTitle}>My Profile</h1>
         <p style={s.pageSub}>Manage your account and preferences</p>
       </div>
 
@@ -304,58 +269,6 @@ export default function SettingsView({ isLecturer }) {
           </button>
         </form>
       </div>
-
-      {/* ── Section: Risk Email Template (admin only) ───────────── */}
-      {!isLecturer && (
-        <div style={s.card}>
-          <h2 style={s.cardTitle}>Risk Email Template</h2>
-          <p style={s.muted}>
-            Reference wording for the "Log as emailed" action on the Students at Risk page.
-            This system has no real student email address on file, so nothing is sent
-            automatically — copy this into the real email you send yourself, then use the
-            bulk action there to record that it happened.
-          </p>
-
-          <div style={s.formField}>
-            <label style={s.label}>Subject</label>
-            <input
-              style={s.input}
-              value={riskEmailSubject}
-              onChange={e => setRiskEmailSubject(e.target.value)}
-            />
-          </div>
-
-          <div style={{ ...s.formField, marginTop: 14 }}>
-            <label style={s.label}>Body</label>
-            <textarea
-              style={{ ...s.input, height: 170, padding: '10px 12px', resize: 'vertical', fontFamily: 'inherit' }}
-              value={riskEmailBody}
-              onChange={e => setRiskEmailBody(e.target.value)}
-            />
-          </div>
-
-          <p style={s.fieldNote}>
-            Placeholders: <code>{'{{student_id}}'}</code>{' '}
-            <code>{'{{subject_code}}'}</code>{' '}
-            <code>{'{{study_period}}'}</code>{' '}
-            <code>{'{{risk_band}}'}</code>
-          </p>
-
-          {riskEmailMsg && (
-            <div style={riskEmailMsg.type === 'success' ? s.successBox : s.errorBox}>
-              {riskEmailMsg.text}
-            </div>
-          )}
-
-          <button
-            style={{ ...s.tealBtn, opacity: riskEmailSaving ? 0.6 : 1 }}
-            disabled={riskEmailSaving}
-            onClick={handleSaveRiskEmailTemplate}
-          >
-            {riskEmailSaving ? 'Saving…' : 'Save Template'}
-          </button>
-        </div>
-      )}
 
       {/* ── Section 3: Preferences ──────────────────────────────── */}
       <div style={s.card}>

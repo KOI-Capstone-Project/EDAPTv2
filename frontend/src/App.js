@@ -20,6 +20,7 @@ import ApiConsole         from './pages/ApiConsole';
 import PredictorView      from './pages/PredictorView';
 import StudentsAtRisk     from './pages/StudentsAtRisk';
 import SettingsView       from './pages/SettingsView';
+import RiskEmailTemplateView from './pages/RiskEmailTemplateView';
 
 // Auth utilities
 import { getToken, getUser } from './utils/auth';
@@ -118,6 +119,9 @@ export default function App() {
       <Route path="/predictive-reports" element={<AdminProtected><PredictorView isAdmin={true} /></AdminProtected>} />
       <Route path="/users"              element={<HoTOnlyProtected><UserManagement /></HoTOnlyProtected>} />
       <Route path="/api-console"        element={<HoTOnlyProtected><ApiConsole /></HoTOnlyProtected>} />
+      {/* Admin only (HoT or HoS) — matches the backend's require_head_of_school
+          gate on GET/PUT /api/risk-email-template. */}
+      <Route path="/risk-email-template" element={<AdminProtected><RiskEmailTemplateView /></AdminProtected>} />
 
       {/* Shared settings (role-aware) */}
       <Route path="/settings" element={<Protected><SettingsPage /></Protected>} />

@@ -1,6 +1,6 @@
 // Role-aware navigation sidebar with user avatar, nav links, and logout button.
 import { useState, useEffect, useCallback } from 'react';
-import { NavLink } from 'react-router-dom';
+import { NavLink, useLocation } from 'react-router-dom';
 import { getUser, getUserName, getUserInitials } from '../utils/auth';
 import { INGEST_LAST_SEEN_KEY, INGEST_JOBS_SEEN_EVENT } from '../utils/ingestNotifications';
 import api from '../services/api';
@@ -111,6 +111,16 @@ const I = {
       <path d="M21 2l-9.6 9.6"/><path d="M15.5 7.5l3 3L22 7l-3-3"/>
     </svg>
   ),
+  Report: () => (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/>
+    </svg>
+  ),
+  ChevronDown: () => (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+      <polyline points="6 9 12 15 18 9"/>
+    </svg>
+  ),
   Logout: () => (
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
@@ -121,54 +131,101 @@ const I = {
 
 // ── Nav items per role ────────────────────────────────────────────────────────
 
+// Reporting/Settings sub-items are shared across roles (built dynamically
+// per-user in the component below, since which ones are visible depends on
+// role/ACL) — these arrays hold each role's top-level items plus a
+// placeholder `{ group: 'reporting' | 'settings' }` marker that gets
+// expanded into the right children at render time.
+
 const LECTURER_NAV = [
-  { label: 'Dashboard',        icon: <I.Dashboard />,     to: '/dashboard/lecturer' },
-  { label: 'Explorer',         icon: <I.Explorer />,      to: '/explorer'           },
-  { label: 'Predictor',        icon: <I.Predictor />,     to: '/predictor'          },
-  { label: 'Students at Risk', icon: <I.AlertTriangle />, to: '/students-at-risk'   },
-  { label: 'Settings',         icon: <I.Settings />,      to: '/settings'           },
+  { label: 'Dashboard', icon: <I.Dashboard />, to: '/dashboard/lecturer' },
+  { label: 'Explorer',  icon: <I.Explorer />,  to: '/explorer'           },
+  { label: 'Predictor', icon: <I.Predictor />, to: '/predictor'          },
+  { group: 'reporting' },
+  { group: 'settings'  },
 ];
 
 const HOS_NAV = [
-  { label: 'Dashboard',          icon: <I.Dashboard />,     to: '/dashboard/admin'    },
-  { label: 'Subject Analytics',  icon: <I.Explorer />,      to: '/subject-analytics'  },
-  { label: 'Model Health',       icon: <I.Explorer />,      to: '/model-health'       },
-  { label: 'Student Analytics',  icon: <I.Explorer />,      to: '/student-analytics'  },
-  { label: 'Predictive Reports', icon: <I.Predictor />,     to: '/predictive-reports' },
-  { label: 'Students at Risk',   icon: <I.AlertTriangle />, to: '/students-at-risk'   },
-  { label: 'Data Ingestion',     icon: <I.Ingestion />,     to: '/data-ingestion'     },
-  { label: 'Settings',           icon: <I.Settings />,      to: '/settings'           },
+  { label: 'Dashboard',      icon: <I.Dashboard />, to: '/dashboard/admin' },
+  { group: 'reporting' },
+  { label: 'Model Health',   icon: <I.Explorer />,  to: '/model-health'    },
+  { label: 'Data Ingestion', icon: <I.Ingestion />, to: '/data-ingestion'  },
+  { group: 'settings'  },
 ];
 
 const ADMIN_NAV_BASE = [
-  { label: 'Dashboard',          icon: <I.Dashboard />,     to: '/dashboard/admin'       },
-  { label: 'Subject Analytics',  icon: <I.Explorer />,      to: '/subject-analytics'     },
-  { label: 'Model Health',       icon: <I.Explorer />,      to: '/model-health'          },
-  { label: 'Student Analytics',  icon: <I.Explorer />,      to: '/student-analytics'     },
-  { label: 'Predictive Reports', icon: <I.Predictor />,     to: '/predictive-reports'    },
-  { label: 'Students at Risk',   icon: <I.AlertTriangle />, to: '/students-at-risk'      },
-  { label: 'Data Ingestion',     icon: <I.Ingestion />,     to: '/data-ingestion'        },
-  { label: 'API Console',        icon: <I.ApiKey />,        to: '/api-console'          },
+  { label: 'Dashboard',      icon: <I.Dashboard />, to: '/dashboard/admin' },
+  { group: 'reporting' },
+  { label: 'Model Health',   icon: <I.Explorer />,  to: '/model-health'    },
+  { label: 'Data Ingestion', icon: <I.Ingestion />, to: '/data-ingestion'  },
+  { group: 'settings'  },
 ];
-const ADMIN_NAV_SUPER = [
-  { label: 'Audit Log',      icon: <I.AuditLog />, to: '/audit-log' },
-  { label: 'User Management', icon: <I.Users />,   to: '/users'     },
+
+// Full reporting children — each role's ACL (route guard) is unchanged,
+// this list is filtered to what that role could already reach.
+const REPORTING_CHILDREN = [
+  { label: 'Subject Analytics',  icon: <I.Explorer />,      to: '/subject-analytics',  roles: ['admin', 'hos']            },
+  { label: 'Student Analytics',  icon: <I.Explorer />,      to: '/student-analytics',  roles: ['admin', 'hos']            },
+  { label: 'Predictive Reports', icon: <I.Predictor />,     to: '/predictive-reports', roles: ['admin', 'hos']            },
+  { label: 'Students at Risk',   icon: <I.AlertTriangle />, to: '/students-at-risk',   roles: ['admin', 'hos', 'lecturer'] },
 ];
-const ADMIN_NAV_SETTINGS = { label: 'Settings', icon: <I.Settings />, to: '/settings' };
 
 // ── Component ─────────────────────────────────────────────────────────────────
 
 export default function Sidebar() {
   const [collapsed, setCollapsed] = useState(false);
+  const location   = useLocation();
   const user       = getUser();
   const isAdmin      = user?.role === 'Head of Technology';
   const isHoS        = user?.role === 'Head of School';
   const isSuperAdmin = user?.email === 'admin';
-  const navItems     = isAdmin
-    ? [...ADMIN_NAV_BASE, ...(isSuperAdmin ? ADMIN_NAV_SUPER : []), ADMIN_NAV_SETTINGS]
-    : isHoS
-      ? HOS_NAV
-      : LECTURER_NAV;
+  const roleKey      = isAdmin ? 'admin' : isHoS ? 'hos' : 'lecturer';
+
+  // Same ACL as before per item — this only changes where each link lives
+  // in the tree, not who can reach it (route guards in App.js are untouched).
+  const reportingChildren = REPORTING_CHILDREN.filter(c => c.roles.includes(roleKey));
+  const settingsChildren  = [
+    { label: 'My Profile', icon: <I.Settings />, to: '/settings' },
+    ...(isAdmin || isHoS ? [{ label: 'Risk Email Template', icon: <I.AlertTriangle />, to: '/risk-email-template' }] : []),
+    ...(isAdmin ? [{ label: 'API Console', icon: <I.ApiKey />, to: '/api-console' }] : []),
+    ...(isAdmin && isSuperAdmin ? [
+      { label: 'User Management', icon: <I.Users />,    to: '/users'     },
+      { label: 'Audit Logs',      icon: <I.AuditLog />, to: '/audit-log' },
+    ] : []),
+  ];
+
+  const rawNav = isAdmin ? ADMIN_NAV_BASE : isHoS ? HOS_NAV : LECTURER_NAV;
+  const navItems = rawNav.map(item => {
+    if (item.group === 'reporting') return { label: 'Reporting', icon: <I.Report />, children: reportingChildren };
+    if (item.group === 'settings')  return { label: 'Settings',  icon: <I.Settings />, children: settingsChildren };
+    return item;
+  });
+
+  const isChildActive = children => children.some(c => location.pathname === c.to);
+
+  const [openGroups, setOpenGroups] = useState(() => {
+    const init = {};
+    navItems.forEach(item => { if (item.children) init[item.label] = isChildActive(item.children); });
+    return init;
+  });
+
+  // Auto-expand whichever group contains the route just navigated to,
+  // without forcing shut a group the user opened manually.
+  useEffect(() => {
+    setOpenGroups(prev => {
+      const next = { ...prev };
+      navItems.forEach(item => {
+        if (item.children && isChildActive(item.children)) next[item.label] = true;
+      });
+      return next;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [location.pathname]);
+
+  const toggleGroup = label => {
+    if (collapsed) { setCollapsed(false); setOpenGroups(prev => ({ ...prev, [label]: true })); return; }
+    setOpenGroups(prev => ({ ...prev, [label]: !prev[label] }));
+  };
 
   // Only these two roles can reach Data Ingestion at all (require_head_of_school).
   const ingestBadge = useIngestBadge(isAdmin || isHoS);
@@ -207,7 +264,53 @@ export default function Sidebar() {
 
       {/* ── Navigation ─────────────────────────────────────────────── */}
       <nav style={s.nav}>
-        {navItems.map(({ label, icon, to }) => {
+        {navItems.map(item => {
+          if (item.children) {
+            const isOpen = !!openGroups[item.label];
+            const groupActive = isChildActive(item.children);
+            return (
+              <div key={item.label}>
+                <button
+                  type="button"
+                  onClick={() => toggleGroup(item.label)}
+                  style={{
+                    ...s.item, ...s.groupHeader,
+                    ...(groupActive && !isOpen ? s.itemActive : {}),
+                    justifyContent: collapsed ? 'center' : 'flex-start',
+                    padding: collapsed ? '10px 0' : '12px 20px',
+                  }}
+                  title={collapsed ? item.label : undefined}
+                >
+                  <span style={s.icon}>{item.icon}</span>
+                  {!collapsed && <span style={{ flex: 1, textAlign: 'left' }}>{item.label}</span>}
+                  {!collapsed && (
+                    <span style={{ display: 'flex', transition: 'transform 0.15s', transform: isOpen ? 'rotate(0deg)' : 'rotate(-90deg)' }}>
+                      <I.ChevronDown />
+                    </span>
+                  )}
+                </button>
+                {!collapsed && isOpen && (
+                  <div style={s.subNav}>
+                    {item.children.map(child => (
+                      <NavLink
+                        key={child.to}
+                        to={child.to}
+                        style={({ isActive }) => ({
+                          ...s.item, ...s.subItem,
+                          ...(isActive ? s.itemActive : {}),
+                        })}
+                      >
+                        <span style={s.icon}>{child.icon}</span>
+                        {child.label}
+                      </NavLink>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          }
+
+          const { label, icon, to } = item;
           const showBadge = to === '/data-ingestion' && ingestBadge.count > 0;
           return (
             <NavLink
@@ -312,6 +415,12 @@ const s = {
   },
   itemActive: { background: '#2E6E8E', color: '#fff' },
   icon: { display: 'flex', alignItems: 'center', flexShrink: 0 },
+  groupHeader: {
+    width: '100%', border: 'none', background: 'none', cursor: 'pointer',
+    font: 'inherit',
+  },
+  subNav: { display: 'flex', flexDirection: 'column', gap: 2, margin: '2px 0 2px 20px' },
+  subItem: { padding: '9px 16px', fontSize: 12.5 },
   navBadge: {
     marginLeft: 'auto', display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
     minWidth: 18, height: 18, padding: '0 5px', borderRadius: 999,
