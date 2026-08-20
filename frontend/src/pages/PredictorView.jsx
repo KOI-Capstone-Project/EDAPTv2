@@ -5,7 +5,7 @@ import { useState, useEffect } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { getUser } from '../utils/auth';
 import api from '../services/api';
-import { RiskBadge, MidTermTag } from '../components/RiskBadge';
+import { RiskBadge, MidTermTag, resolveSafeFloor } from '../components/RiskBadge';
 
 // ── Sub-components ─────────────────────────────────────────────────────────────
 
@@ -309,7 +309,7 @@ export function PredictionResultPanel({ result, geminiLoading, geminiInsight }) 
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           {isMidTerm && <MidTermTag />}
-          <RiskBadge band={result.risk_band} insufficientData={isInsufficientData} />
+          <RiskBadge band={result.risk_band} insufficientData={isInsufficientData} probability={result.probability} safeFloor={safeFloor} />
         </div>
       </div>
 
@@ -1007,7 +1007,12 @@ export default function PredictorView({ isAdmin }) {
                         <td style={s.td}>
                           <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                             {r.estimate_type === 'mid-term estimate' && <MidTermTag />}
-                            <RiskBadge band={r.risk_band} insufficientData={r.coverage_status === 'insufficient_data'} />
+                            <RiskBadge
+                              band={r.risk_band}
+                              insufficientData={r.coverage_status === 'insufficient_data'}
+                              probability={r.probability}
+                              safeFloor={resolveSafeFloor(r)}
+                            />
                           </div>
                         </td>
                       </tr>

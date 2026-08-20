@@ -10,7 +10,7 @@ import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { isAdmin as checkIsAdmin } from '../utils/auth';
 import api from '../services/api';
-import { RiskBadge, MidTermTag } from '../components/RiskBadge';
+import { RiskBadge, MidTermTag, resolveSafeFloor } from '../components/RiskBadge';
 
 const TABS = [
   { key: 'at_risk', label: 'At Risk' },
@@ -259,7 +259,12 @@ export default function StudentsAtRisk() {
                     <td style={s.td}>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                         {r.estimate_type === 'mid-term estimate' && <MidTermTag />}
-                        <RiskBadge band={r.risk_band} insufficientData={r.coverage_status === 'insufficient_data'} />
+                        <RiskBadge
+                          band={r.risk_band}
+                          insufficientData={r.coverage_status === 'insufficient_data'}
+                          probability={r.probability}
+                          safeFloor={resolveSafeFloor(r)}
+                        />
                       </div>
                     </td>
                   </tr>
