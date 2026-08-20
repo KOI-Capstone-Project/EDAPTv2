@@ -65,15 +65,22 @@ function DatasetStatusBadge({ summary, runningJob, nowMs }) {
 
 function UploadCard({ kind, title, hint, maxSizeMB, analyzeUrl, onJobStarted, onCleared, analysis, restored, activeJob, datasetSummary, runningJob, nowMs }) {
   const fileRef = useRef(null);
-  const [dragging, setDragging] = useState(false);
-  const [file,     setFile]     = useState(null);
-  const [error,    setError]    = useState(null); // immediate, synchronous rejection only (bad type/size, or the upload request itself failing)
+  const [dragging,  setDragging]  = useState(false);
+  const [file,      setFile]      = useState(null);
+  const [error,     setError]     = useState(null); // immediate, synchronous rejection only (bad type/size, or the upload request itself failing)
+  // True only while the multipart POST itself is in flight — the one
+  // window activeJob can't cover, since the server hasn't accepted the
+  // upload (and so hasn't handed back a job id to poll) yet. Without this,
+  // picking a large file showed nothing at all until the browser finished
+  // sending it, which for a real 327k-row / tens-of-MB file is long enough
+  // that it looked like nothing was happening.
+  const [uploading, setUploading] = useState(false);
 
   // activeJob comes from the parent — it's the SAME state whether this
   // analyze was just started in this browser tab or discovered still
   // running (or freshly failed) after a page refresh via
   // GET /api/ingest/{kind}/analyze-status, so both cases render identically.
-  const isAnalyzing = activeJob?.status === 'running';
+  const isAnalyzing = uploading || activeJob?.status === 'running';
   const jobError     = activeJob?.status === 'failed' ? activeJob.error_detail : null;
 
   const fmtSize = bytes => {
@@ -84,6 +91,7 @@ function UploadCard({ kind, title, hint, maxSizeMB, analyzeUrl, onJobStarted, on
 
   const analyze = useCallback(async (f) => {
     setError(null);
+    setUploading(true);
     try {
       const form = new FormData();
       form.append('file', f);
@@ -111,6 +119,8 @@ function UploadCard({ kind, title, hint, maxSizeMB, analyzeUrl, onJobStarted, on
     } catch (err) {
       setError(err.response?.data?.detail || 'Analysis failed. Please try again.');
       setFile(null);
+    } finally {
+      setUploading(false);
     }
   }, [analyzeUrl, kind, onJobStarted]);
 
@@ -167,7 +177,7 @@ function UploadCard({ kind, title, hint, maxSizeMB, analyzeUrl, onJobStarted, on
         )}
       </div>
 
-      {isAnalyzing && <p style={s.statusLine}><Spinner label="Analyzing…" /></p>}
+      {isAnalyzing && <p style={s.statusLine}><Spinner label={uploading ? 'Uploading…' : 'Analyzing…'} /></p>}
       {(error || jobError) && <p style={s.errorLine}>⚠ {error || jobError}</p>}
       {!isAnalyzing && analysis && !restored && (
         <div style={s.analyzedRow}>
@@ -567,9 +577,23 @@ export default function DataIngestion() {
   const [analyzeJobs, setAnalyzeJobs] = useState({ capstone: null, attendance: null });
   const analyzePollTimers = useRef({ capstone: null, attendance: null });
   const mountedRef = useRef(true);
-  useEffect(() => () => {
-    mountedRef.current = false;
-    Object.values(analyzePollTimers.current).forEach(t => t && clearTimeout(t));
+  useEffect(() => {
+    // Must reset to true in the effect body, not just as useRef's initial
+    // value — React 18 StrictMode (see index.js) deliberately double-fires
+    // effects in dev (mount -> cleanup -> mount) to catch exactly this bug:
+    // without this line, the first simulated cleanup below sets this false
+    // permanently, and every `if (!mountedRef.current) return` guard in
+    // pollAnalyzeJob/checkResume silently no-ops for the rest of the page's
+    // real life — analyze jobs finish successfully server-side, but the
+    // result never reaches capstoneAnalysis/restoredCapstone, so Confirm
+    // never becomes available. Was a real, confirmed bug, not just a
+    // hypothetical one.
+    mountedRef.current = true;
+    const timers = analyzePollTimers.current; // same object reference — mutated in place elsewhere, so this stays current
+    return () => {
+      mountedRef.current = false;
+      Object.values(timers).forEach(t => t && clearTimeout(t));
+    };
   }, []);
 
   const kindSetters = (kind) => ({
