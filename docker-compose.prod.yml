@@ -1,7 +1,8 @@
 ###############################################################################
 # EDAPT v2 — docker-compose.prod.yml  (PRODUCTION)
 #
-# Services:  db · backend (gunicorn) · frontend (nginx-served build) · nginx
+# Services:  db · backend (gunicorn) · scheduler (retrain sidecar) ·
+#            frontend (nginx-served build) · nginx
 # Usage:     docker compose -f docker-compose.prod.yml up --build -d
 ###############################################################################
 
@@ -40,7 +41,16 @@ services:
     environment:
       DATABASE_URL: ${DATABASE_URL}
       ENVIRONMENT:  production
+      # Shared with the scheduler service below via the ingested_data_prod
+      # named volume, so a capstone CSV ingested through this container's
+      # /api/ingest/capstone/confirm is actually visible to the scheduler's
+      # separate process — prod's backend and scheduler don't otherwise
+      # share a filesystem (no ./backend bind mount in prod, unlike dev).
+      # See train_model.py's INGESTED_DATA_DIR docstring for the full story.
+      INGESTED_DATA_DIR: /shared_data
     # Source NOT mounted — image is the source of truth in prod
+    volumes:
+      - ingested_data_prod:/shared_data
     depends_on:
       db:
         condition: service_healthy
@@ -51,6 +61,48 @@ services:
         --bind 0.0.0.0:8000
         --timeout 120
         --log-level ${LOG_LEVEL:-warning}
+    # Readiness, not liveness — see docker-compose.yml for the rationale.
+    # It matters more here: with 4 gunicorn workers behind a load balancer, an
+    # instance that came up without a model needs to be taken out of rotation
+    # rather than left serving errors.
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 180s
+
+  # ── Scheduled-retrain sidecar ───────────────────────────────────────────────
+  # Reuses the backend image; overrides the entrypoint to run
+  # scripts/retrain_loop.sh (scheduled_retrain.py -> sleep 24h -> repeat)
+  # instead of serving requests. Isolated from the backend service so a hung
+  # or slow retrain can't affect API uptime. Needs its own ./data mount —
+  # unlike the backend service above, this is the only prod service that
+  # reads the raw training CSV directly (train_model.py's DATA_PATH).
+  #
+  # Also mounts ingested_data_prod (same named volume as backend, above) so
+  # a capstone file ingested through the API is actually picked up by this
+  # container's own DATA_PATH resolution on its next 24h cycle — previously
+  # a real, documented gap: this container had no way to see anything
+  # ingested through the backend container at all.
+  scheduler:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.prod
+    container_name: edaptv2_scheduler_prod
+    restart: always
+    env_file: .env
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      ENVIRONMENT:  production
+      INGESTED_DATA_DIR: /shared_data
+    volumes:
+      - ./data:/data:ro
+      - ingested_data_prod:/shared_data
+    depends_on:
+      db:
+        condition: service_healthy
+    entrypoint: ["sh", "/app/scripts/retrain_loop.sh"]
 
   # ── React frontend (pre-built static files served by nginx) ───────────────
   frontend:
@@ -78,3 +130,8 @@ services:
 
 volumes:
   postgres_data_prod:
+  # Shared between backend and scheduler only — holds ingested_capstone.csv,
+  # written by POST /api/ingest/capstone/confirm, read by both containers'
+  # own DATA_PATH resolution (train_model.py). See backend/main.py's
+  # ingest_capstone_confirm() and train_model.py's INGESTED_DATA_DIR.
+  ingested_data_prod:

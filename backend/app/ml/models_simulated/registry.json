@@ -1,0 +1,121 @@
+{
+  "live_version": "20260808_113534",
+  "versions": [
+    {
+      "version": "20260808_030637",
+      "file": "model_20260808_030637.pkl",
+      "trained_at": "2026-08-08T03:06:37.379351+00:00",
+      "accuracy": 0.8037,
+      "decision_threshold": 0.3,
+      "classification_report": {
+        "Pass": {
+          "precision": 0.9722566956243245,
+          "recall": 0.8024450685610441,
+          "f1-score": 0.8792267033524003,
+          "support": 30265.0
+        },
+        "Fail": {
+          "precision": 0.3364776384419043,
+          "recall": 0.8139597315436241,
+          "f1-score": 0.47613065326633164,
+          "support": 3725.0
+        },
+        "accuracy": 0.8037069726390115,
+        "macro avg": {
+          "precision": 0.6543671670331144,
+          "recall": 0.8082024000523341,
+          "f1-score": 0.677678678309366,
+          "support": 33990.0
+        },
+        "weighted avg": {
+          "precision": 0.9025809972423146,
+          "recall": 0.8037069726390115,
+          "f1-score": 0.8350509814762423,
+          "support": 33990.0
+        }
+      },
+      "train_row_count": null,
+      "trained_on": "23.2 to 25.2 excluding 23.1 pilot period (simulated multi-snapshot progress)",
+      "validated_on": "25.3",
+      "model_name": "XGBoost + Random Forest Ensemble (simulated progress)",
+      "features": [
+        "ASSESS1_MARK",
+        "ASSESS1_WEIGHT",
+        "ASSESS1_CONTRIBUTION",
+        "ASSESS2_MARK",
+        "ASSESS2_WEIGHT",
+        "ASSESS2_CONTRIBUTION",
+        "PARTIAL_WEIGHTED_SCORE",
+        "PARTIAL_WEIGHT_COVERAGE",
+        "SUBJECT_DIFFICULTY",
+        "TRIMESTER_NUM"
+      ],
+      "recovered_from": "edaptv2-prod-backend:latest Docker image layer (built 2026-08-08T03:29:26Z) \u2014 no on-disk backup existed; this file was never git-tracked (gitignored) and had been overwritten in place by the attendance retrain before this gap was noticed."
+    },
+    {
+      "version": "20260808_113534",
+      "file": "model_20260808_113534.pkl",
+      "trained_at": "2026-08-08T11:35:34.864001+00:00",
+      "accuracy": 0.805,
+      "decision_threshold": 0.3,
+      "classification_report": {
+        "Pass": {
+          "precision": 0.9732511112000961,
+          "recall": 0.8030728564348257,
+          "f1-score": 0.8800101379485137,
+          "support": 30265.0
+        },
+        "Fail": {
+          "precision": 0.33902628368637017,
+          "recall": 0.8206711409395974,
+          "f1-score": 0.4798304818709779,
+          "support": 3725.0
+        },
+        "accuracy": 0.8050014710208885,
+        "macro avg": {
+          "precision": 0.6561386974432332,
+          "recall": 0.8118719986872116,
+          "f1-score": 0.6799203099097457,
+          "support": 33990.0
+        },
+        "weighted avg": {
+          "precision": 0.9037457424890449,
+          "recall": 0.8050014710208885,
+          "f1-score": 0.8361540267720258,
+          "support": 33990.0
+        }
+      },
+      "train_row_count": null,
+      "trained_on": "23.2 to 25.2 excluding 23.1 pilot period (simulated multi-snapshot progress)",
+      "validated_on": "25.3",
+      "model_name": "XGBoost + Random Forest Ensemble (simulated progress)",
+      "features": [
+        "ASSESS1_MARK",
+        "ASSESS1_WEIGHT",
+        "ASSESS1_CONTRIBUTION",
+        "ASSESS2_MARK",
+        "ASSESS2_WEIGHT",
+        "ASSESS2_CONTRIBUTION",
+        "PARTIAL_WEIGHTED_SCORE",
+        "PARTIAL_WEIGHT_COVERAGE",
+        "SUBJECT_DIFFICULTY",
+        "TRIMESTER_NUM",
+        "ATTENDANCE_RATE"
+      ]
+    }
+  ],
+  "promotion_history": [
+    {
+      "version": "20260808_030637",
+      "previous": null,
+      "promoted_at": "2026-08-08T11:55:04.794106+00:00",
+      "reason": "Backfilled as the version actually live before this session's attendance retrain overwrote best_model_simulated_progress.pkl directly (no promotion gate existed at that time)."
+    },
+    {
+      "version": "20260808_113534",
+      "previous": "20260808_030637",
+      "promoted_at": "2026-08-08T12:02:13.265689+00:00",
+      "reason": "Compared against 20260808_030637: not_meaningfully_worse"
+    }
+  ]
+}

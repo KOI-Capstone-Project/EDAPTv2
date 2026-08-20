@@ -1,8 +1,11 @@
 ###############################################################################
 # EDAPT v2 — docker-compose.yml  (DEVELOPMENT)
 #
-# Services:  db · backend · frontend · pgadmin
+# Services:  db · backend · frontend · pgadmin · scheduler (opt-in)
 # Usage:     docker compose up --build
+#            docker compose --profile scheduler up --build   (also starts the
+#            retrain sidecar — off by default so a plain `up` doesn't add an
+#            extra long-running container to everyday dev)
 ###############################################################################
 
 name: edaptv2-dev
@@ -31,6 +34,7 @@ services:
       timeout: 5s
       retries: 5
 
+
   # ── FastAPI backend ────────────────────────────────────────────────────────
   backend:
     build:
@@ -40,10 +44,13 @@ services:
     restart: unless-stopped
     env_file: .env
     environment:
-      DATABASE_URL: ${DATABASE_URL}
-      ENVIRONMENT:  development
+      DATABASE_URL:      ${DATABASE_URL}
+      ENVIRONMENT:       development
+      GEMINI_API_KEY:    ${GEMINI_API_KEY}
+      PYTHONUNBUFFERED:  "1"
     volumes:
       - ./backend:/app          # hot-reload: source mounted into container
+      - ./data:/data:ro         # CSV datasets for startup auto-load
     ports:
       - "8000:8000"
     depends_on:
@@ -55,6 +62,17 @@ services:
         --port 8000
         --reload
         --log-level ${LOG_LEVEL:-info}
+    # Readiness, not liveness: /api/health returns 503 unless the database,
+    # both datasets and a live model for BOTH families are actually available.
+    # urllib raises on a 503, which exits non-zero and marks the container
+    # unhealthy. There is no curl in the image, so python makes the request.
+    # start_period is generous because startup parses 2.5M attendance rows.
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 180s
 
   # ── React frontend ─────────────────────────────────────────────────────────
   frontend:
@@ -75,15 +93,54 @@ services:
     depends_on:
       - backend
 
+  # ── Scheduled-retrain sidecar (opt-in — see docker compose --profile above) ─
+  # Reuses the backend image; runs scheduled_retrain.py in a loop instead of
+  # serving requests. Isolated from the backend service on purpose — a hung
+  # or slow retrain can't take the API down with it. See
+  # backend/scripts/retrain_loop.sh for the loop itself and
+  # backend/app/ml/scheduled_retrain.py for why the no-op-when-nothing-new
+  # check makes daily polling safe regardless of exact timing.
+  scheduler:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.dev
+    container_name: edaptv2_scheduler
+    restart: unless-stopped
+    profiles: ["scheduler"]
+    env_file: .env
+    environment:
+      DATABASE_URL:      ${DATABASE_URL}
+      ENVIRONMENT:       development
+      PYTHONUNBUFFERED:  "1"
+    volumes:
+      - ./backend:/app
+      - ./data:/data:ro
+    depends_on:
+      db:
+        condition: service_healthy
+    entrypoint: ["sh", "/app/scripts/retrain_loop.sh"]
+
   # ── pgAdmin ────────────────────────────────────────────────────────────────
   pgadmin:
-    image: dpage/pgadmin4:latest
+    # Pinned, not `latest`. This service was crash-looping on startup because
+    # `latest` had silently moved to a pgAdmin release that rejects reserved
+    # domains in PGADMIN_DEFAULT_EMAIL — nothing in this repo changed, the
+    # upstream tag did. Exactly the drift this project's pinning practice
+    # exists to prevent (see README, "Dependency pinning is a standing
+    # practice"). 9.14 is the version `latest` resolved to when this was pinned.
+    image: dpage/pgadmin4:9.14
     container_name: edaptv2_pgadmin
     restart: unless-stopped
     env_file: .env
     environment:
       PGADMIN_DEFAULT_EMAIL:    ${PGADMIN_DEFAULT_EMAIL}
       PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_DEFAULT_PASSWORD}
+      # pgAdmin 9.x validates the login email and rejects special-use domains,
+      # so a local-only address like admin@edapt.local aborts startup. This is
+      # a dev-only convenience container behind localhost, and the address is
+      # never emailed — allowing the domain is correct here rather than forcing
+      # every developer to invent a deliverable address.
+      PGADMIN_CONFIG_ALLOW_SPECIAL_EMAIL_DOMAINS: "['local','localhost','internal','test']"
     volumes:
       - pgadmin_data:/var/lib/pgadmin
     ports:

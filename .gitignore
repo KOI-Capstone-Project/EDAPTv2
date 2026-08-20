@@ -47,6 +47,34 @@ yarn-error.log*
 *.joblib
 *.h5
 ml_models/
+backend/app/ml/model_backups/
+
+# The CURRENTLY-LIVE model of each family is tracked, and nothing else.
+# Two reasons, both from real incidents:
+#   1. A fresh clone had 0 .pkl and 0 registry.json — verified by actually
+#      cloning the repo and counting — so CI could not run the model-dependent
+#      tests at all.
+#   2. This project already lost a live model once: the pre-attendance mid-term
+#      version had no backup anywhere (never tracked, direct-overwrite pattern)
+#      and was recovered only by chance from an unrelated Docker image. See
+#      README, "Mid-semester (partial-progress) prediction".
+# Experimental/superseded versions stay ignored (~27MB of them) — reproducible
+# from train_model.py, and needed neither to serve nor to test.
+# NOTE: these ignore directory *contents* (`dir/*`) rather than the directory
+# itself, because git cannot un-ignore a file inside an ignored directory.
+backend/app/ml/models/*
+!backend/app/ml/models/registry.json
+!backend/app/ml/models/model_20260808_110630.pkl
+backend/app/ml/models_simulated/*
+!backend/app/ml/models_simulated/registry.json
+!backend/app/ml/models_simulated/model_20260808_113534.pkl
+# SHAP background caches — ~9KB each, required by explain.py at import time.
+!backend/app/ml/shap_background_main.pkl
+!backend/app/ml/shap_background_simulated.pkl
+backend/app/ml/attendance_features.csv
+backend/app/ml/column_review_decisions.json
+backend/app/ml/ingested_capstone.csv
+backend/app/ml/.ingest.lock
 
 # ── OS ───────────────────────────────────────────────────
 .DS_Store
@@ -56,3 +84,25 @@ Thumbs.db
 .idea/
 .vscode/
 *.swp
+.env-working-saved
+
+# ── Real student data — NEVER COMMIT ─────────────────────
+# These files were scrubbed from git history with git-filter-repo on
+# 2026-08-13 because the repository was public and they contain real
+# pseudonymised records for 7,926 students (assessment marks, outcomes,
+# demographics, 2.5M attendance sessions). They must live on disk / in
+# private storage only. Re-committing them would undo that remediation
+# silently, which is exactly what these rules exist to prevent.
+#
+# The aggregate reports that remain tracked (subject_reliability*.csv,
+# clean_subjects.csv, weighting_anomaly_report.csv, anomaly_report_for_ken.csv)
+# were each checked and contain NO student identifier column — they are
+# subject-level summaries, not per-student rows.
+data/Capstone_data_*.csv
+data/masked_attendance.csv
+data/masked_attendance.csv.gz
+data/archive/
+
+# Historical: a tracked env file that leaked non-production DB credentials
+# (the role no longer exists). Scrubbed from history the same day.
+.env-working-saved

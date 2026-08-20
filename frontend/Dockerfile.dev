@@ -6,7 +6,12 @@ FROM node:20-alpine
 
 WORKDIR /app
 
-# Install deps separately so layer is cached on package.json changes only
+# Install deps separately so layer is cached on package.json changes only.
+# `npm ci`, not `npm install`: ci installs exactly what package-lock.json says
+# and fails if the lock and package.json disagree, whereas `npm install` can
+# silently resolve a newer version and rewrite the lock during an image build.
+# That is the same class of problem as the shap container-drift incident — an
+# environment quietly diverging from its own committed source of truth.
 COPY package.json package-lock.json* ./
 RUN npm ci
 

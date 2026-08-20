@@ -1,0 +1,150 @@
+name: CI
+
+# Every push and every PR. The point of this pipeline is to make the checks
+# this project previously relied on a person remembering to run happen
+# automatically — see README "Container drift" and "Testing Practices".
+on:
+  push:
+  pull_request:
+
+concurrency:
+  # A newer push to the same branch cancels the older run.
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ── Python lint ────────────────────────────────────────────────────────────
+  # Separate job so a lint failure is legible on its own rather than buried in
+  # test output, and so it reports in seconds instead of after the suite.
+  backend-lint:
+    name: Backend lint (ruff)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # Pinned exactly, same rule as every other dependency in this project —
+      # an unpinned linter silently changes what CI enforces.
+      - run: pip install ruff==0.14.2
+      - run: ruff check backend/app backend/tests scripts
+
+  # ── Backend tests ──────────────────────────────────────────────────────────
+  backend-tests:
+    name: Backend tests (fresh image)
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: edapt_user
+          POSTGRES_PASSWORD: ci_password
+          POSTGRES_DB: edapt_v2
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U edapt_user -d edapt_v2"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # --no-cache is the whole point of this step, not a detail. This project
+      # ran a full session of green tests inside a long-lived container that had
+      # `shap` hand-installed and absent from the image built from
+      # requirements.txt. Building fresh every run means CI can only ever pass
+      # against what requirements.txt actually specifies.
+      - name: Build backend image with no cache
+        run: docker build --no-cache -f backend/Dockerfile.dev -t edapt-backend-ci ./backend
+
+      # Asserts every pinned requirement is actually installed at exactly the
+      # pinned version. `pip install --dry-run` is NOT usable for this — it
+      # exits 0 and merely reports "Would install X" when a package is absent,
+      # so it would have passed straight through the shap incident.
+      - name: Verify installed packages match requirements.txt exactly
+        run: |
+          docker run --rm -v "$PWD/backend/requirements.txt":/tmp/req.txt:ro \
+            edapt-backend-ci python - <<'PY'
+          import re, sys
+          from importlib.metadata import version, PackageNotFoundError
+
+          problems = []
+          for raw in open("/tmp/req.txt"):
+              line = raw.split("#")[0].strip()
+              if not line or "==" not in line:
+                  continue
+              name, want = line.split("==", 1)
+              name = re.sub(r"\[.*\]", "", name).strip()
+              want = want.strip()
+              try:
+                  got = version(name)
+              except PackageNotFoundError:
+                  problems.append(f"{name}: NOT INSTALLED (requirements.txt pins {want})")
+                  continue
+              if got != want:
+                  problems.append(f"{name}: image has {got}, requirements.txt pins {want}")
+
+          if problems:
+              print("Image does NOT match requirements.txt:")
+              for p in problems:
+                  print("  -", p)
+              sys.exit(1)
+          print("every pinned requirement is installed at its exact pinned version")
+          PY
+
+      # The real extracts are NOT in git — they hold real pseudonymised records
+      # for 7,926 students and were scrubbed from history on 2026-08-13. CI
+      # generates a structurally identical, entirely fabricated dataset instead.
+      # Deterministic (fixed seed), so a green run today cannot go red tomorrow
+      # because the data came out differently.
+      - name: Generate synthetic dataset (no real student data in this repo)
+        run: |
+          python3 scripts/generate_synthetic_data.py --out data
+          ls -la data/
+
+      # The volume layout mirrors docker-compose.yml exactly: source at /app,
+      # datasets read-only at /data. --network host lets the container reach the
+      # postgres service published on the runner's localhost.
+      - name: Run backend test suite inside the freshly-built image
+        run: |
+          docker run --rm --network host \
+            -v "$PWD/backend":/app \
+            -v "$PWD/data":/data:ro \
+            -e DATABASE_URL="postgresql+asyncpg://edapt_user:ci_password@localhost:5432/edapt_v2" \
+            -e SECRET_KEY="ci-only-secret-not-used-outside-ci" \
+            -e ENVIRONMENT=ci \
+            -w /app \
+            edapt-backend-ci \
+            python -m pytest tests/ -q
+
+  # ── Frontend ───────────────────────────────────────────────────────────────
+  frontend:
+    name: Frontend lint + tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      # `npm ci`, never `npm install`: ci fails if package.json and the lock
+      # disagree, instead of quietly resolving something new. The lock was
+      # genuinely out of sync when this pipeline was written (a transitive
+      # `yaml` entry was missing) and `npm ci` is what caught it.
+      - run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Tests
+        run: npm test -- --watchAll=false
+        env:
+          CI: true
