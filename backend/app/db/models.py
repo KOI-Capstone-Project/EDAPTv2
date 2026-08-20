@@ -363,6 +363,52 @@ class PendingIngest(Base):
     created_at: datetime = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
 
+class IngestJob(Base):
+    """
+    Tracks one confirm-time ingestion run so it can happen in the background.
+
+    Confirm used to block the HTTP request for as long as the actual
+    parse/feature-build/merge/commit took — a real problem on a 200MB /
+    2.5M-row attendance file, where that work can run well past any
+    reasonable client timeout. Confirm now returns immediately with a job
+    id, the real work runs after the response via FastAPI BackgroundTasks,
+    and progress is exposed by polling this table instead of by holding the
+    request open.
+
+    A real table, not an in-memory dict — this project already learned that
+    lesson once with PendingIngest: prod runs 4 gunicorn workers, so a status
+    poll needs to see this row regardless of which worker actually ran the
+    background task.
+    """
+
+    __tablename__ = "ingest_jobs"
+
+    id: int = Column(Integer, primary_key=True, autoincrement=True)
+
+    kind: str = Column(String(20), nullable=False, comment="'capstone' or 'attendance'")
+
+    status: str = Column(
+        String(20), nullable=False, default="running", server_default="running",
+        comment="running | success | failed",
+    )
+
+    filename: str | None = Column(String(255), nullable=True)
+
+    started_by: str = Column(
+        String(254), nullable=False,
+        comment="Email/uid of the admin who confirmed this ingestion",
+    )
+
+    started_at: datetime = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    finished_at: datetime | None = Column(DateTime(timezone=True), nullable=True)
+
+    result: dict | None = Column(
+        JSON, nullable=True,
+        comment="Same payload the old synchronous confirm endpoint returned, once finished successfully",
+    )
+    error_detail: str | None = Column(Text, nullable=True)
+
+
 class AuditLog(Base):
     """
     Persistent audit trail for all significant system events.
@@ -407,3 +453,63 @@ class AuditLog(Base):
         nullable=True,
         comment="Human-readable description of the event",
     )
+
+
+# ===========================================================================
+# API KEY TABLE
+# ===========================================================================
+
+
+class ApiKey(AuditMixin, Base):
+    """
+    Admin-issued credential for the external prediction endpoint
+    (/api/v1/predict). Only a salted hash is ever stored — the raw key is
+    returned once at creation time and cannot be recovered afterwards,
+    mirroring User.hashed_password's "never store plaintext" convention.
+    """
+
+    __tablename__ = "api_keys"
+
+    id: int = Column(Integer, primary_key=True, autoincrement=True)
+
+    name: str = Column(
+        String(120),
+        nullable=False,
+        comment="Admin-chosen label identifying what this key is for",
+    )
+
+    key_prefix: str = Column(
+        String(20),
+        nullable=False,
+        comment="First few characters of the raw key, for display in the key list only",
+    )
+
+    hashed_key: str = Column(
+        String(64),
+        unique=True,
+        nullable=False,
+        index=True,
+        comment="sha256 hex digest of the raw key. Plain-text is never stored.",
+    )
+
+    created_by: str = Column(
+        String(254),
+        nullable=False,
+        comment="Email of the Head of Technology admin who generated this key",
+    )
+
+    last_used_at: datetime | None = Column(
+        DateTime(timezone=True),
+        nullable=True,
+        comment="Updated on every successful /api/v1/predict call using this key",
+    )
+
+    revoked: bool = Column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default="false",
+        comment="Soft-revoke flag — revoked keys are kept for audit history, not deleted",
+    )
+
+    revoked_at: datetime | None = Column(DateTime(timezone=True), nullable=True)

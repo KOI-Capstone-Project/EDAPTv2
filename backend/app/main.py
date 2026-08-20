@@ -12,6 +12,7 @@ Dashboard: 8 endpoints that slice _DATA by role + query filters.
 import asyncio
 from datetime import datetime, timedelta, timezone
 from email.mime.text import MIMEText
+import hashlib
 import io
 import json
 import logging
@@ -21,17 +22,16 @@ from pathlib import Path
 
 import secrets
 import smtplib
-import tempfile
 import uuid
 from typing import Annotated, Optional
 
 import joblib
 import pandas as pd
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, File, HTTPException, Query, Response, UploadFile, status
+from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, Query, Response, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from fastapi.security import OAuth2PasswordBearer
+from fastapi.security import APIKeyHeader, OAuth2PasswordBearer
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 from pydantic import BaseModel, Field, StringConstraints, field_validator
@@ -40,7 +40,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
-from app.db.models import AuditLog, Base, Intervention, PendingIngest, Prediction, User as UserModel
+from app.db.models import ApiKey, AuditLog, Base, IngestJob, Intervention, PendingIngest, Prediction, User as UserModel
 # Light module — pure functions over an already-computed SHAP dict, no model
 # loading, so it is safe to import at module scope unlike app.ml.predictor.
 from app.ml.actionable import excluded_factor_summary, top_actionable_factor
@@ -727,6 +727,29 @@ class PredictRequest(BaseModel):
     attendance_rate:         Optional[float] = Field(None, ge=0.0, le=1.0)
 
 
+class CreateApiKeyRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=120)
+
+
+class ApiPredictAssessment(BaseModel):
+    type:         str   = Field(..., max_length=60)
+    mark_percent: float = Field(..., ge=0.0, le=100.0)
+    weighting:    float = Field(..., ge=0.0, le=100.0)
+
+
+class ApiPredictRequest(BaseModel):
+    # Public contract for the external /api/v1/predict endpoint. Deliberately
+    # separate from PredictRequest above: an external caller has no reason to
+    # know this project's internal "top-2-by-weight" convention, so this model
+    # only accepts the raw assessment list and attendance percentage — the
+    # handler derives assess1/assess2 itself via predictor._top2_by_weight.
+    subject:               str   = Field(..., min_length=1, max_length=20)
+    study_period:          str   = Field(..., min_length=1, max_length=10)
+    trimester_num:         float
+    assessments:           list[ApiPredictAssessment] = Field(..., min_length=1)
+    attendance_percentage: float = Field(..., ge=0.0, le=100.0)
+
+
 class GeminiAlertRequest(BaseModel):
     subject:   Optional[str] = Field(None, max_length=20)
     trimester: Optional[str] = Field(None, max_length=10)
@@ -863,6 +886,31 @@ async def require_super_admin(user: dict = Depends(get_current_user)) -> dict:
     if user.get("is_super_admin") is not True:
         raise HTTPException(403, "Only the system administrator can access this feature.")
     return user
+
+
+_api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+
+async def require_api_key(
+    raw_key: Optional[str] = Depends(_api_key_header),
+    db:      AsyncSession  = Depends(get_db),
+) -> ApiKey:
+    """Authenticate an external caller of /api/v1/predict via API key.
+
+    A separate credential type from the session JWT above: API keys are
+    long-lived and issued by an admin for a third-party system, not a
+    logged-in human, so they get their own header and their own DB-backed
+    lookup rather than being minted as another JWT.
+    """
+    if not raw_key:
+        raise HTTPException(401, "Missing X-API-Key header.")
+    key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
+    row = (await db.execute(select(ApiKey).where(ApiKey.hashed_key == key_hash))).scalar_one_or_none()
+    if row is None or row.revoked:
+        raise HTTPException(401, "Invalid or revoked API key.")
+    row.last_used_at = datetime.now(timezone.utc)
+    await db.commit()
+    return row
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Auth Routes
@@ -1254,6 +1302,101 @@ def _reject_upload_common(content: bytes, max_bytes: int) -> Optional[str]:
     return None
 
 
+def _capstone_analysis_from_bytes(content: bytes, filename: Optional[str]) -> dict:
+    """Parse + classify capstone CSV bytes into the analyze()-shaped payload.
+
+    Shared by the upload-time analyze endpoint and the status endpoint (which
+    reclassifies the same bytes already sitting in PendingIngest) so the two
+    can never drift into returning different shapes for the same upload.
+    """
+    from app.ml.column_classification import CAPSTONE_KEEP, classify_columns
+
+    df = pd.read_csv(io.BytesIO(content))
+    df.columns = [c.strip() for c in df.columns]
+
+    missing_keep = [c for c in CAPSTONE_KEEP if c not in df.columns]
+    if missing_keep:
+        raise HTTPException(400, f"Missing required column: {missing_keep[0]}")
+
+    classification = classify_columns(df.columns.tolist(), "capstone")
+    periods = (
+        sorted(df["STUDYPERIOD"].dropna().apply(lambda x: round(float(x), 1)).unique().tolist())
+        if "STUDYPERIOD" in df.columns else []
+    )
+    return {
+        "row_count": len(df),
+        "subjects":  int(df["SUBJECTCODE"].nunique()) if "SUBJECTCODE" in df.columns else 0,
+        "periods":   periods,
+        "columns":   classification,
+        "filename":  filename,
+    }
+
+
+def _attendance_analysis_from_bytes(content: bytes, filename: Optional[str]) -> dict:
+    """Parse + classify attendance CSV bytes into the analyze()-shaped payload. See
+    _capstone_analysis_from_bytes for why this is shared with the status endpoint."""
+    from app.ml.column_classification import classify_columns
+
+    df = pd.read_csv(io.BytesIO(content))
+    df.columns = [c.strip() for c in df.columns]
+
+    required = ["STUDENTID_MASKED", "course", "study_period_code", "year", "attendance_code"]
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise HTTPException(400, f"Missing required column: {missing[0]}")
+
+    classification = classify_columns(df.columns.tolist(), "attendance")
+    return {
+        "row_count": len(df),
+        "columns":   classification,
+        "filename":  filename,
+    }
+
+
+@app.get("/api/ingest/{kind}/status", tags=["Ingest"])
+async def ingest_status(
+    kind: str,
+    user: dict = Depends(require_head_of_school),
+    db:   AsyncSession = Depends(get_db),
+):
+    """
+    Report whether an already-analyzed-but-not-yet-confirmed upload is still
+    sitting server-side for this kind (see PendingIngest / PENDING_INGEST_TTL_MINUTES
+    above), so the frontend can resume review/confirm after a page refresh
+    instead of asking the user to re-pick and re-upload a file that can be
+    up to 200MB just to get back to where they were.
+    """
+    if kind not in ("capstone", "attendance"):
+        raise HTTPException(400, "kind must be 'capstone' or 'attendance'")
+
+    result = await db.execute(select(PendingIngest).where(PendingIngest.kind == kind))
+    row = result.scalar_one_or_none()
+    if row is None:
+        return {"pending": False}
+
+    age_seconds = (datetime.now(timezone.utc) - row.created_at).total_seconds()
+    if age_seconds > PENDING_INGEST_TTL_MINUTES * 60:
+        return {"pending": False}
+
+    try:
+        analysis = (
+            _capstone_analysis_from_bytes(row.csv_bytes, row.filename) if kind == "capstone"
+            else _attendance_analysis_from_bytes(row.csv_bytes, row.filename)
+        )
+    except HTTPException:
+        # Stored bytes no longer classify cleanly (e.g. a column decision
+        # changed since analyze) — treat as nothing-to-resume rather than
+        # surfacing a confusing error on page load.
+        return {"pending": False}
+
+    return {
+        "pending":            True,
+        "token":              row.token,
+        "expires_in_seconds": int(PENDING_INGEST_TTL_MINUTES * 60 - age_seconds),
+        **analysis,
+    }
+
+
 @app.post("/api/ingest/capstone/analyze", tags=["Ingest"])
 async def ingest_capstone_analyze(
     file: UploadFile = File(...),
@@ -1265,8 +1408,6 @@ async def ingest_capstone_analyze(
     committing it to the live dataset. Returns a token; call
     POST /api/ingest/capstone/confirm with it to actually commit.
     """
-    from app.ml.column_classification import classify_columns
-
     ext = (file.filename or "").rsplit(".", 1)[-1].lower()
     if ext != "csv":
         raise HTTPException(400, "Unsupported file type. Only .csv files are accepted.")
@@ -1279,62 +1420,97 @@ async def ingest_capstone_analyze(
         raise HTTPException(400, err)
 
     try:
-        df = pd.read_csv(io.BytesIO(content))
+        analysis = _capstone_analysis_from_bytes(content, file.filename)
+    except HTTPException as exc:
+        status_label = "Error" if exc.status_code == 422 else "Alert"
+        await _append_audit_db(db, user_uid=user["sub"], action_type="Data Upload",
+                               status=status_label, detail=f"Rejected capstone upload: {exc.detail}")
+        raise
     except Exception as exc:
         await _append_audit_db(db, user_uid=user["sub"], action_type="Data Upload",
                                status="Error", detail=f"Failed to parse capstone CSV: {exc}")
         raise HTTPException(422, "The uploaded file could not be parsed as a valid CSV.") from exc
-    df.columns = [c.strip() for c in df.columns]
 
-    from app.ml.column_classification import CAPSTONE_KEEP
-    missing_keep = [c for c in CAPSTONE_KEEP if c not in df.columns]
-    if missing_keep:
-        await _append_audit_db(db, user_uid=user["sub"], action_type="Data Upload",
-                               status="Alert",
-                               detail=f"Rejected capstone upload: missing required column '{missing_keep[0]}'")
-        raise HTTPException(400, f"Missing required column: {missing_keep[0]}")
-
-    classification = classify_columns(df.columns.tolist(), "capstone")
-
-    periods = (
-        sorted(df["STUDYPERIOD"].dropna().apply(lambda x: round(float(x), 1)).unique().tolist())
-        if "STUDYPERIOD" in df.columns else []
-    )
     token = str(uuid.uuid4())
     await _save_pending_ingest(db, "capstone", token, file.filename, content)
-    return {
-        "token":         token,
-        "row_count":     len(df),
-        "subjects":      int(df["SUBJECTCODE"].nunique()) if "SUBJECTCODE" in df.columns else 0,
-        "periods":       periods,
-        "columns":       classification,
-        "filename":      file.filename,
-    }
+    return {"token": token, **analysis}
 
 
-@app.post("/api/ingest/capstone/confirm", tags=["Ingest"])
-async def ingest_capstone_confirm(
-    payload: dict,
-    user: dict = Depends(require_head_of_school),
-    db:   AsyncSession = Depends(get_db),
-):
+async def _run_capstone_confirm_job(
+    job_id: int, csv_bytes: bytes, filename: Optional[str], user_email: str, mode: str,
+) -> None:
     """
-    Commit a previously-analyzed capstone upload (by token) to the live
-    dataset. Runs the SAME collapse_attempts_to_latest_per_type() logic
-    training uses — no attempt-1-only path anywhere in this flow. Writes
-    the file to DATA_PATH on disk (required for check_new_period.py /
-    train_model.py, both disk-based, to see the new data) and checks
-    for a genuinely new study period, registering a retrain candidate
-    if so — never auto-promoting.
+    Background body of capstone confirm — runs after the HTTP response is
+    already sent (see ingest_capstone_confirm below). Opens its own DB
+    session: the request's session is closed by the time this runs, and in
+    a multi-worker deployment this task and a later GET /api/ingest/jobs
+    poll may not even be the same process.
+
+    Runs the SAME collapse_attempts_to_latest_per_type() logic training
+    uses — no attempt-1-only path anywhere in this flow. Writes the file to
+    DATA_PATH on disk (required for check_new_period.py / train_model.py,
+    both disk-based, to see the new data) and checks for a genuinely new
+    study period, registering a retrain candidate if so — never
+    auto-promoting.
+
+    mode is "override" (replace the live dataset wholesale — the original,
+    only behavior) or "incremental" (merge new rows into the current _DATA
+    via app.ml.incremental_merge — see _do_capstone_confirm).
     """
     global _DATA, _ATTENDANCE
 
-    token = payload.get("token")
-    pending_row = await _load_pending_ingest(db, "capstone", token)
-    if pending_row is None:
-        raise HTTPException(404, "No matching pending capstone upload (or it expired). Analyze the file again.")
-    pending_df = pd.read_csv(io.BytesIO(pending_row.csv_bytes))
-    pending_filename = pending_row.filename
+    async with _AsyncSession() as db:
+        job = await db.get(IngestJob, job_id)
+
+        try:
+            pending_df = pd.read_csv(io.BytesIO(csv_bytes))
+            result = await _do_capstone_confirm(pending_df, mode)
+        except Exception as exc:
+            job.status = "failed"
+            job.error_detail = str(exc)
+            job.finished_at = datetime.now(timezone.utc)
+            await _append_audit_db(
+                db, user_uid=user_email, action_type="Data Upload", status="Error",
+                detail=f"Capstone ingestion failed for {filename}: {exc}",
+            )
+            await db.commit()
+            return
+
+        job.status = "success"
+        job.result = result
+        job.finished_at = datetime.now(timezone.utc)
+        merge_detail = ""
+        if result.get("merge_stats"):
+            ms = result["merge_stats"]
+            merge_detail = (
+                f", incremental merge — {ms['new_rows']:,} new, {ms['updated_rows']:,} updated, "
+                f"{ms['redundant_rows']:,} redundant/skipped"
+            )
+        await _append_audit_db(
+            db, user_uid=user_email, action_type="Data Upload", status="Success",
+            detail=f"{result['row_count']:,} rows ingested from {filename} "
+                   f"(subjects reclassified: {result['subjects_reclassified']}, "
+                   f"retrain triggered: {result['retrain']['triggered']}{merge_detail})",
+        )
+        await db.commit()
+
+
+CAPSTONE_MERGE_KEY_COLS = ["STUDENTID_MASKED", "SUBJECTCODE", "STUDYPERIOD", "ASSESSMENTTYPECODE", "ATTEMPTNUMBER"]
+
+
+async def _do_capstone_confirm(pending_df: pd.DataFrame, mode: str = "override") -> dict:
+    """The actual parse/feature/retrain-check/commit work, shared by nothing
+    else — split out of _run_capstone_confirm_job purely so that function's
+    try/except stays about job bookkeeping, not this logic.
+
+    mode="incremental" merges pending_df's rows into the current _DATA (see
+    CAPSTONE_MERGE_KEY_COLS / app.ml.incremental_merge) instead of replacing
+    it outright — an exact-duplicate row (by that key) is skipped, a
+    same-key row with any different value is treated as a correction and
+    replaces the old one, and a new key is appended. Falls back to the plain
+    override behavior if there's no existing data to merge into yet.
+    """
+    global _DATA, _ATTENDANCE
 
     df = pending_df.copy()
     if "STUDYPERIOD" in df.columns:
@@ -1343,6 +1519,17 @@ async def ingest_capstone_confirm(
         )
     if "MARKPERCENT" in df.columns:
         df["MARKPERCENT"] = pd.to_numeric(df["MARKPERCENT"], errors="coerce")
+    # Computed here (before any merge) rather than at its original spot
+    # further down, so it's a column on BOTH sides of the incremental merge
+    # below — _DATA (from a prior confirm) already carries it, and without
+    # this it would be silently dropped from merged_df (merge_incremental
+    # only keeps columns present in both dataframes).
+    df["PASSED"] = df["MARKPERCENT"] >= 50
+
+    merge_stats = None
+    if mode == "incremental" and _DATA is not None and not _DATA.empty:
+        from app.ml.incremental_merge import merge_incremental
+        df, merge_stats = merge_incremental(_DATA, df, key_cols=CAPSTONE_MERGE_KEY_COLS)
 
     from app.ml.train_model import collapse_attempts_to_latest_per_type, build_target, RELIABILITY_PATH
 
@@ -1403,8 +1590,6 @@ async def ingest_capstone_confirm(
     train_model_mod.INGESTED_DATA_DIR.mkdir(parents=True, exist_ok=True)
     INGESTED_CAPSTONE_PATH = train_model_mod.INGESTED_DATA_DIR / "ingested_capstone.csv"
 
-    df["PASSED"] = df["MARKPERCENT"] >= 50
-
     # Refresh the PASS target merged into _ATTENDANCE, if attendance data
     # is already loaded, so it stays consistent with the new capstone data.
     new_attendance = _ATTENDANCE
@@ -1428,7 +1613,21 @@ async def ingest_capstone_confirm(
 
     _acquire_ingest_lock()
     try:
-        pending_df.to_csv(INGESTED_CAPSTONE_PATH, index=False)
+        if merge_stats is not None:
+            # An incremental merge: the on-disk file (what check_new_period.py
+            # / train_model.py actually read for retraining) must reflect the
+            # FULL merged dataset, not just this upload's new rows — written
+            # back in the same raw shape pending_df originally had (no
+            # derived PASSED column, STUDYPERIOD as a plain float) so it
+            # round-trips identically to a normal override's raw upload.
+            disk_df = df.drop(columns=["PASSED"])
+            # coerce, not astype — a blank STUDYPERIOD normalizes to "" above
+            # (pd.notna(x) is False), and .astype(float) would raise on that
+            # rather than round-trip it back to NaN like the source CSV had.
+            disk_df["STUDYPERIOD"] = pd.to_numeric(disk_df["STUDYPERIOD"], errors="coerce")
+            disk_df.to_csv(INGESTED_CAPSTONE_PATH, index=False)
+        else:
+            pending_df.to_csv(INGESTED_CAPSTONE_PATH, index=False)
         _DATA = df
         _ATTENDANCE = new_attendance
 
@@ -1462,20 +1661,64 @@ async def ingest_capstone_confirm(
     finally:
         _release_ingest_lock()
 
-    await _delete_pending_ingest(db, "capstone")
-
-    await _append_audit_db(
-        db, user_uid=user["sub"], action_type="Data Upload", status="Success",
-        detail=f"{len(df):,} rows ingested from {pending_filename} "
-               f"(subjects reclassified: {subjects_reclassified}, retrain triggered: {retrain_info['triggered']})",
-    )
     return {
         "row_count":              len(df),
         "columns":                list(df.columns),
         "subjects_reclassified":  subjects_reclassified,
         "retrain":                retrain_info,
         "promotion_note":         "Model promotion stays manual",
+        "merge_stats":            merge_stats,
         "message":                f"{len(df):,} rows successfully loaded",
+    }
+
+
+@app.post("/api/ingest/capstone/confirm", status_code=202, tags=["Ingest"])
+async def ingest_capstone_confirm(
+    payload: dict,
+    background_tasks: BackgroundTasks,
+    user: dict = Depends(require_head_of_school),
+    db:   AsyncSession = Depends(get_db),
+):
+    """
+    Accept a previously-analyzed capstone upload (by token) for ingestion and
+    return immediately — the actual parse/retrain-check/commit work (which
+    can run past any reasonable request timeout on a large file, see
+    build_attendance_features's confirm counterpart) happens in the
+    background. Poll GET /api/ingest/jobs/{job_id} (or GET /api/ingest/jobs
+    for the full recent list) to see when it finishes.
+
+    payload.mode: "override" (default — replace the live dataset wholesale)
+    or "incremental" (merge into the current data; see _do_capstone_confirm
+    / app.ml.incremental_merge). The frontend only offers a real choice
+    when GET /api/ingest/dataset-summary reports existing data for this
+    kind — with nothing to merge into, "incremental" and "override" behave
+    identically anyway.
+    """
+    mode = payload.get("mode", "override")
+    if mode not in ("override", "incremental"):
+        raise HTTPException(400, "mode must be 'override' or 'incremental'")
+
+    token = payload.get("token")
+    pending_row = await _load_pending_ingest(db, "capstone", token)
+    if pending_row is None:
+        raise HTTPException(404, "No matching pending capstone upload (or it expired). Analyze the file again.")
+
+    # Delete the pending row now, not after the background job finishes —
+    # this token is spent the moment ingestion is accepted, same as the old
+    # synchronous confirm, so a duplicate click can't resubmit it.
+    csv_bytes, filename = pending_row.csv_bytes, pending_row.filename
+    await _delete_pending_ingest(db, "capstone")
+
+    job = IngestJob(kind="capstone", filename=filename, started_by=user["sub"])
+    db.add(job)
+    await db.commit()
+    await db.refresh(job)
+
+    background_tasks.add_task(_run_capstone_confirm_job, job.id, csv_bytes, filename, user["sub"], mode)
+    return {
+        "job_id":  job.id,
+        "status":  "running",
+        "message": "Capstone ingestion started in the background — you'll be notified here once it finishes.",
     }
 
 
@@ -1519,8 +1762,6 @@ async def ingest_attendance_analyze(
     Returns a token; call POST /api/ingest/attendance/confirm with it to
     actually commit.
     """
-    from app.ml.column_classification import classify_columns
-
     ext = (file.filename or "").rsplit(".", 1)[-1].lower()
     if ext != "csv":
         raise HTTPException(400, "Unsupported file type. Only .csv files are accepted.")
@@ -1533,60 +1774,110 @@ async def ingest_attendance_analyze(
         raise HTTPException(400, err)
 
     try:
-        df = pd.read_csv(io.BytesIO(content))
+        analysis = _attendance_analysis_from_bytes(content, file.filename)
+    except HTTPException as exc:
+        status_label = "Error" if exc.status_code == 422 else "Alert"
+        await _append_audit_db(db, user_uid=user["sub"], action_type="Data Upload",
+                               status=status_label, detail=f"Rejected attendance upload: {exc.detail}")
+        raise
     except Exception as exc:
         await _append_audit_db(db, user_uid=user["sub"], action_type="Data Upload",
                                status="Error", detail=f"Failed to parse attendance CSV: {exc}")
         raise HTTPException(422, "The uploaded file could not be parsed as a valid CSV.") from exc
-    df.columns = [c.strip() for c in df.columns]
-
-    # Required for aggregation specifically (a functional subset of
-    # ATTENDANCE_KEEP — cls_session_no is in the locked KEEP schema but
-    # not needed for the student-subject-period aggregation this pipeline
-    # actually does).
-    required = ["STUDENTID_MASKED", "course", "study_period_code", "year", "attendance_code"]
-    missing = [c for c in required if c not in df.columns]
-    if missing:
-        await _append_audit_db(db, user_uid=user["sub"], action_type="Data Upload",
-                               status="Alert",
-                               detail=f"Rejected attendance upload: missing required column '{missing[0]}'")
-        raise HTTPException(400, f"Missing required column: {missing[0]}")
-
-    classification = classify_columns(df.columns.tolist(), "attendance")
 
     token = str(uuid.uuid4())
     await _save_pending_ingest(db, "attendance", token, file.filename, content)
-    return {
-        "token":     token,
-        "row_count": len(df),
-        "columns":   classification,
-        "filename":  file.filename,
-    }
+    return {"token": token, **analysis}
 
 
-@app.post("/api/ingest/attendance/confirm", tags=["Ingest"])
-async def ingest_attendance_confirm(
-    payload: dict,
-    user: dict = Depends(require_head_of_school),
-    db:   AsyncSession = Depends(get_db),
-):
-    """Commit a previously-analyzed attendance upload (by token) to the live _ATTENDANCE table."""
+ATTENDANCE_MERGE_KEY_COLS = ["STUDENTID_MASKED", "course", "study_period_code", "cls_session_no"]
+
+
+async def _run_attendance_confirm_job(
+    job_id: int, csv_bytes: bytes, filename: Optional[str], user_email: str, mode: str,
+) -> None:
+    """Background body of attendance confirm — see _run_capstone_confirm_job's
+    docstring for why this needs its own session and can't reuse the request's.
+
+    mode is "override" (replace the persisted raw attendance dataset
+    wholesale) or "incremental" (merge new session rows into it — see
+    ATTENDANCE_MERGE_KEY_COLS / _do_attendance_confirm)."""
     global _ATTENDANCE
 
-    token = payload.get("token")
-    pending_row = await _load_pending_ingest(db, "attendance", token)
-    if pending_row is None:
-        raise HTTPException(404, "No matching pending attendance upload (or it expired). Analyze the file again.")
+    async with _AsyncSession() as db:
+        job = await db.get(IngestJob, job_id)
 
-    from app.ml.train_model import collapse_attempts_to_latest_per_type, build_target
+        try:
+            result = await _do_attendance_confirm(csv_bytes, mode)
+        except Exception as exc:
+            job.status = "failed"
+            job.error_detail = str(exc)
+            job.finished_at = datetime.now(timezone.utc)
+            await _append_audit_db(
+                db, user_uid=user_email, action_type="Data Upload", status="Error",
+                detail=f"Attendance ingestion failed for {filename}: {exc}",
+            )
+            await db.commit()
+            return
+
+        job.status = "success"
+        job.result = result
+        job.finished_at = datetime.now(timezone.utc)
+        merge_detail = ""
+        if result.get("merge_stats"):
+            ms = result["merge_stats"]
+            merge_detail = (
+                f", incremental merge — {ms['new_rows']:,} new, {ms['updated_rows']:,} updated, "
+                f"{ms['redundant_rows']:,} redundant/skipped"
+            )
+        await _append_audit_db(
+            db, user_uid=user_email, action_type="Data Upload", status="Success",
+            detail=f"{result['row_count']:,} attendance enrolments ingested from {filename} "
+                   f"(match rate vs current capstone data: {result['match_rate']}%{merge_detail})",
+        )
+        await db.commit()
+
+
+async def _do_attendance_confirm(csv_bytes: bytes, mode: str = "override") -> dict:
+    """The actual feature-build/merge work, split out of _run_attendance_confirm_job
+    purely so that function's try/except stays about job bookkeeping, not this logic.
+
+    Persists the raw (pre-aggregation, per-class-session) attendance rows at
+    INGESTED_ATTENDANCE_RAW_PATH on every successful confirm, in BOTH modes
+    — that's what the NEXT incremental confirm merges new rows into (see
+    ATTENDANCE_MERGE_KEY_COLS). build_attendance_features() always
+    aggregates from that persisted file rather than straight from the raw
+    upload, so an override's result is identical to before either way, but
+    an incremental's reflects the full accumulated session history across
+    every upload, not just this one file.
+    """
+    global _ATTENDANCE
+
+    import app.ml.train_model as train_model_mod
     from app.ml.build_attendance_features import build_attendance_features
 
-    with tempfile.NamedTemporaryFile(suffix=".csv", delete=True) as tmp:
-        tmp.write(pending_row.csv_bytes)
-        tmp.flush()
-        att_features = build_attendance_features(
-            attendance_path=Path(tmp.name), capstone_path=_DATA_PATH,
+    train_model_mod.INGESTED_DATA_DIR.mkdir(parents=True, exist_ok=True)
+    ingested_attendance_raw_path = train_model_mod.INGESTED_DATA_DIR / "ingested_attendance_raw.csv"
+
+    new_raw_df = pd.read_csv(io.BytesIO(csv_bytes))
+
+    merge_stats = None
+    if mode == "incremental" and ingested_attendance_raw_path.exists():
+        from app.ml.incremental_merge import merge_incremental
+        existing_raw_df = pd.read_csv(ingested_attendance_raw_path)
+        merged_raw_df, merge_stats = merge_incremental(
+            existing_raw_df, new_raw_df, key_cols=ATTENDANCE_MERGE_KEY_COLS,
         )
+    else:
+        merged_raw_df = new_raw_df
+
+    merged_raw_df.to_csv(ingested_attendance_raw_path, index=False)
+
+    from app.ml.train_model import collapse_attempts_to_latest_per_type, build_target
+
+    att_features = build_attendance_features(
+        attendance_path=ingested_attendance_raw_path, capstone_path=_DATA_PATH,
+    )
 
     if not _DATA.empty:
         collapsed = collapse_attempts_to_latest_per_type(_DATA.copy())
@@ -1608,19 +1899,146 @@ async def ingest_attendance_confirm(
         match_rate = round(float((merged_check["_merge"] == "both").mean() * 100), 2)
 
     _ATTENDANCE = att_features
+    return {
+        "row_count":   len(att_features),
+        "columns":     list(att_features.columns),
+        "match_rate":  match_rate,
+        "merge_stats": merge_stats,
+        "message":     f"{len(att_features):,} attendance enrolments loaded, {match_rate}% match rate against current capstone data",
+    }
+
+
+@app.post("/api/ingest/attendance/confirm", status_code=202, tags=["Ingest"])
+async def ingest_attendance_confirm(
+    payload: dict,
+    background_tasks: BackgroundTasks,
+    user: dict = Depends(require_head_of_school),
+    db:   AsyncSession = Depends(get_db),
+):
+    """
+    Accept a previously-analyzed attendance upload (by token) for ingestion
+    and return immediately — build_attendance_features() over a 200MB /
+    2.5M-row file is real, non-trivial work that has no business blocking
+    the request. Poll GET /api/ingest/jobs/{job_id} (or GET /api/ingest/jobs)
+    to see when it finishes.
+
+    payload.mode: "override" (default) or "incremental" — see
+    _do_attendance_confirm's docstring. Same contract as the capstone
+    confirm endpoint above.
+    """
+    mode = payload.get("mode", "override")
+    if mode not in ("override", "incremental"):
+        raise HTTPException(400, "mode must be 'override' or 'incremental'")
+
+    token = payload.get("token")
+    pending_row = await _load_pending_ingest(db, "attendance", token)
+    if pending_row is None:
+        raise HTTPException(404, "No matching pending attendance upload (or it expired). Analyze the file again.")
+
+    csv_bytes, filename = pending_row.csv_bytes, pending_row.filename
     await _delete_pending_ingest(db, "attendance")
 
-    await _append_audit_db(
-        db, user_uid=user["sub"], action_type="Data Upload", status="Success",
-        detail=f"{len(att_features):,} attendance enrolments ingested from {pending_row.filename} "
-               f"(match rate vs current capstone data: {match_rate}%)",
-    )
+    job = IngestJob(kind="attendance", filename=filename, started_by=user["sub"])
+    db.add(job)
+    await db.commit()
+    await db.refresh(job)
+
+    background_tasks.add_task(_run_attendance_confirm_job, job.id, csv_bytes, filename, user["sub"], mode)
     return {
-        "row_count":  len(att_features),
-        "columns":    list(att_features.columns),
-        "match_rate": match_rate,
-        "message":    f"{len(att_features):,} attendance enrolments loaded, {match_rate}% match rate against current capstone data",
+        "job_id":  job.id,
+        "status":  "running",
+        "message": "Attendance ingestion started in the background — you'll be notified here once it finishes.",
     }
+
+
+@app.get("/api/ingest/jobs", tags=["Ingest"])
+async def ingest_jobs(
+    limit: int = Query(30, ge=1, le=200),
+    user: dict = Depends(require_head_of_school),
+    db:   AsyncSession = Depends(get_db),
+):
+    """
+    Recent ingestion jobs (both kinds), most recent first — backs the
+    frontend's notification badge (unseen finished jobs) and the ingestion
+    history view. Not scoped to the requesting user: ingestion affects the
+    one shared dataset, so every Head of School/Technology should see the
+    same in-flight and completed jobs regardless of who triggered them.
+    """
+    result = await db.execute(select(IngestJob).order_by(IngestJob.id.desc()).limit(limit))
+    jobs = result.scalars().all()
+    return {
+        "jobs": [
+            {
+                "id":           j.id,
+                "kind":         j.kind,
+                "status":       j.status,
+                "filename":     j.filename,
+                "started_by":   j.started_by,
+                "started_at":   j.started_at.isoformat() if j.started_at else None,
+                "finished_at":  j.finished_at.isoformat() if j.finished_at else None,
+                "result":       j.result,
+                "error_detail": j.error_detail,
+            }
+            for j in jobs
+        ]
+    }
+
+
+@app.get("/api/ingest/jobs/{job_id}", tags=["Ingest"])
+async def ingest_job_detail(
+    job_id: int,
+    user: dict = Depends(require_head_of_school),
+    db:   AsyncSession = Depends(get_db),
+):
+    """Poll a single ingestion job — used right after confirm to watch that
+    specific run without waiting for the next full jobs-list refresh."""
+    job = await db.get(IngestJob, job_id)
+    if job is None:
+        raise HTTPException(404, "No ingestion job with that id.")
+    return {
+        "id":           job.id,
+        "kind":         job.kind,
+        "status":       job.status,
+        "filename":     job.filename,
+        "started_by":   job.started_by,
+        "started_at":   job.started_at.isoformat() if job.started_at else None,
+        "finished_at":  job.finished_at.isoformat() if job.finished_at else None,
+        "result":       job.result,
+        "error_detail": job.error_detail,
+    }
+
+
+@app.get("/api/ingest/dataset-summary", tags=["Ingest"])
+async def ingest_dataset_summary(
+    user: dict = Depends(require_head_of_school),
+    db:   AsyncSession = Depends(get_db),
+):
+    """
+    Persistent, server-derived status per dataset kind (capstone,
+    attendance) — so the Data Ingestion page can show "Ingested — 327,501
+    rows, updated 2 days ago" (or "Not yet ingested") on every page load,
+    instead of looking blank until the admin triggers something new in this
+    browser tab. Also what the frontend checks before offering the
+    incremental-vs-override wizard: that choice only makes sense once
+    there's existing data to merge into or replace.
+    """
+    summary = {}
+    for kind, df in (("capstone", _DATA), ("attendance", _ATTENDANCE)):
+        result = await db.execute(
+            select(IngestJob).where(IngestJob.kind == kind).order_by(IngestJob.id.desc()).limit(1)
+        )
+        last_job = result.scalar_one_or_none()
+        summary[kind] = {
+            "has_data":  bool(df is not None and not df.empty),
+            "row_count": int(len(df)) if df is not None else 0,
+            "last_job_id":      last_job.id if last_job else None,
+            "last_status":      last_job.status if last_job else None,
+            "last_ingested_at": (
+                last_job.finished_at.isoformat()
+                if last_job and last_job.finished_at else None
+            ),
+        }
+    return summary
 
 
 @app.post("/api/ingest/columns/decide", tags=["Ingest"])
@@ -3455,6 +3873,246 @@ async def delete_user(
     await _append_audit_db(db, user_uid=user["sub"], action_type="User Modified",
                            status="Success", detail=f"Account deleted: {email}")
     return {"message": "Account deleted"}
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# API Console — admin-issued keys for the external /api/v1/predict endpoint
+# ═══════════════════════════════════════════════════════════════════════════
+# Gated by require_admin (any Head of Technology), not require_super_admin —
+# this is a role-based feature like /api/audit-logs, not restricted to the
+# single literal "admin" account the way /api/users is.
+
+@app.get("/api/api-keys", tags=["Admin"])
+async def list_api_keys(
+    user: dict = Depends(require_admin),
+    db:   AsyncSession = Depends(get_db),
+):
+    """List API keys, newest first. Never returns the raw key or its hash."""
+    result = await db.execute(select(ApiKey).order_by(desc(ApiKey.created_at)))
+    keys = result.scalars().all()
+    return [
+        {
+            "id":            k.id,
+            "name":          k.name,
+            "key_prefix":    k.key_prefix,
+            "created_by":    k.created_by,
+            "created_at":    k.created_at,
+            "last_used_at":  k.last_used_at,
+            "revoked":       k.revoked,
+        }
+        for k in keys
+    ]
+
+
+@app.post("/api/api-keys", status_code=201, tags=["Admin"])
+async def create_api_key(
+    payload: CreateApiKeyRequest,
+    user: dict = Depends(require_admin),
+    db:   AsyncSession = Depends(get_db),
+):
+    """Generate a new API key. The raw key is returned only in this response
+    — it is never recoverable again, only re-issuable via a new key."""
+    raw_key    = "edapt_" + secrets.token_urlsafe(32)
+    key_hash   = hashlib.sha256(raw_key.encode()).hexdigest()
+    key_prefix = raw_key[:14]
+
+    new_key = ApiKey(
+        name=payload.name.strip(),
+        key_prefix=key_prefix,
+        hashed_key=key_hash,
+        created_by=user["sub"],
+    )
+    db.add(new_key)
+    await db.flush()
+
+    await _append_audit_db(db, user_uid=user["sub"], action_type="API Key Created",
+                           status="Success", detail=f"API key created: {payload.name.strip()}")
+
+    return {
+        "id":         new_key.id,
+        "name":       new_key.name,
+        "api_key":    raw_key,
+        "key_prefix": new_key.key_prefix,
+        "created_at": new_key.created_at,
+    }
+
+
+@app.delete("/api/api-keys/{key_id}", tags=["Admin"])
+async def revoke_api_key(
+    key_id: int,
+    user: dict = Depends(require_admin),
+    db:   AsyncSession = Depends(get_db),
+):
+    """Soft-revoke an API key — kept for audit history, never hard-deleted."""
+    result = await db.execute(select(ApiKey).where(ApiKey.id == key_id))
+    key = result.scalar_one_or_none()
+    if not key:
+        raise HTTPException(404, "API key not found.")
+    if key.revoked:
+        raise HTTPException(400, "This API key is already revoked.")
+
+    key.revoked = True
+    key.revoked_at = datetime.now(timezone.utc)
+    await _append_audit_db(db, user_uid=user["sub"], action_type="API Key Revoked",
+                           status="Success", detail=f"API key revoked: {key.name}")
+    return {"message": "API key revoked"}
+
+
+@app.get("/api/api-keys/usage", tags=["Admin"])
+async def api_key_usage(
+    days: int = Query(30, ge=1, le=90),
+    user: dict = Depends(require_admin),
+    db:   AsyncSession = Depends(get_db),
+):
+    """Daily /api/v1/predict request-volume history for the API Console usage
+    chart. Built from the existing audit log rather than a new table — every
+    successful external prediction already writes an "External API Prediction"
+    row there (see predict_via_api_key), so this just aggregates what's already
+    recorded rather than tracking usage twice."""
+    cutoff_day = (datetime.now(timezone.utc) - timedelta(days=days - 1)).date()
+    result = await db.execute(
+        select(AuditLog.timestamp, AuditLog.user_uid)
+        .where(AuditLog.action_type == "External API Prediction")
+        .where(AuditLog.timestamp >= cutoff_day)
+    )
+    rows = result.all()
+
+    day_list  = [(cutoff_day + timedelta(days=i)).isoformat() for i in range(days)]
+    day_index = {d: i for i, d in enumerate(day_list)}
+
+    total_counts = [0] * days
+    per_key_counts: dict[str, list[int]] = {}
+    for ts, uid in rows:
+        idx = day_index.get(ts.date().isoformat())
+        if idx is None:
+            continue
+        total_counts[idx] += 1
+        key_name = uid[len("api-key:"):] if uid.startswith("api-key:") else uid
+        per_key_counts.setdefault(key_name, [0] * days)[idx] += 1
+
+    # Cap at the busiest 4 keys, matching the chart's 4-slot categorical
+    # palette — any remainder folds into "Other" rather than growing an
+    # unbounded number of series (see dataviz skill's categorical-palette rule).
+    ranked    = sorted(per_key_counts.items(), key=lambda kv: sum(kv[1]), reverse=True)
+    top, rest = ranked[:4], ranked[4:]
+    by_key = [{"name": name, "counts": counts} for name, counts in top]
+    if rest:
+        other_counts = [0] * days
+        for _, counts in rest:
+            for i, c in enumerate(counts):
+                other_counts[i] += c
+        by_key.append({"name": "Other", "counts": other_counts})
+
+    return {"days": day_list, "total": total_counts, "by_key": by_key}
+
+
+@app.post("/api/v1/predict", tags=["Public API"])
+async def predict_via_api_key(
+    req:     ApiPredictRequest,
+    key_row: ApiKey = Depends(require_api_key),
+    db:      AsyncSession = Depends(get_db),
+):
+    """External pass/fail prediction endpoint, authenticated by X-API-Key
+    instead of a session JWT. Mirrors /api/predict's coverage-gating and
+    safety behaviour exactly, but derives assess1/assess2 itself (via
+    predictor._top2_by_weight) rather than trusting a client-supplied top-2,
+    since an external caller has no reason to know that internal convention.
+    """
+    from app.ml.predictor import (
+        predict as ml_predict,
+        predict_partial as ml_predict_partial,
+        compute_partial_score,
+        classify_coverage,
+        _top2_by_weight,
+    )
+
+    reliability = _subject_reliability_category(req.subject)
+    if reliability == "unreliable":
+        return {
+            "prediction_available": False,
+            "message": (
+                "Prediction unavailable for this subject due to incomplete "
+                "assessment data. Contact your Head of Technology."
+            ),
+        }
+
+    assessments = [a.model_dump() for a in req.assessments]
+    cumulative_weighting = sum(a["weighting"] for a in assessments)
+    coverage_tier = classify_coverage(cumulative_weighting)
+
+    if coverage_tier == "insufficient":
+        return {
+            "prediction_available": False,
+            "coverage_status":      "insufficient_data",
+            "message": (
+                f"Not enough assessment data recorded yet to generate a prediction "
+                f"({cumulative_weighting:.0f}% of the term recorded)."
+            ),
+        }
+
+    attendance_rate = req.attendance_percentage / 100
+
+    if coverage_tier == "complete":
+        partial_weighted_score, partial_weight_coverage = compute_partial_score(assessments)
+        a1_mark, a1_weight, a1_contrib, a2_mark, a2_weight, a2_contrib = _top2_by_weight(assessments)
+        result = ml_predict(
+            subject=                 req.subject,
+            study_period=            req.study_period,
+            trimester_num=           req.trimester_num,
+            assess1_mark=            a1_mark,
+            assess1_weight=          a1_weight,
+            assess1_contribution=    a1_contrib,
+            assess2_mark=            a2_mark,
+            assess2_weight=          a2_weight,
+            assess2_contribution=    a2_contrib,
+            partial_weighted_score=  partial_weighted_score,
+            partial_weight_coverage= partial_weight_coverage,
+            num_assessments=         len(assessments),
+            total_weight_recorded=   cumulative_weighting,
+            weight_complete=         True,
+            assessments_used=        assessments,
+            attendance_rate=         attendance_rate,
+        )
+    else:  # "partial" — 50-99% coverage, genuinely mid-term
+        result = ml_predict_partial(
+            subject=          req.subject,
+            study_period=     req.study_period,
+            trimester_num=    req.trimester_num,
+            assessments_used= assessments,
+            attendance_rate=  attendance_rate,
+        )
+
+    if "error" in result:
+        error_text = str(result["error"])
+        if error_text.startswith("missing_required_feature"):
+            missing_feature = error_text.split(":", 1)[1].split(" is required")[0].strip()
+            return {
+                "prediction_available": False,
+                "data_status":          "missing_required_data",
+                "missing_feature":      missing_feature,
+                "message": (
+                    f"Not enough data to generate a prediction: this subject has no "
+                    f"{missing_feature.replace('_', ' ').lower()} recorded, which the "
+                    f"current model requires."
+                ),
+            }
+        raise HTTPException(503, "ML model is not loaded. Run train_model.py first.")
+
+    await _append_audit_db(db, user_uid=f"api-key:{key_row.name}", action_type="External API Prediction",
+                           status="Success",
+                           detail=f"Predicted {req.subject}: {result['probability']}% pass probability")
+
+    return {
+        "prediction_available": True,
+        "subject":              req.subject,
+        "study_period":         req.study_period,
+        "coverage_status":      coverage_tier,
+        "result":               result["prediction"],
+        "pass_percentage":      result["probability"],
+        "risk_band":            result["risk_band"],
+        "estimate_type":        result.get("estimate_type"),
+        "model_version":        result["model_version"],
+    }
 
 
 # ═══════════════════════════════════════════════════════════════════════════

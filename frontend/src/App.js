@@ -16,6 +16,7 @@ import ExplorerView       from './pages/ExplorerView';
 import SubjectAnalytics   from './pages/SubjectAnalytics';
 import ModelHealth       from './pages/ModelHealth';
 import UserManagement     from './pages/UserManagement';
+import ApiConsole         from './pages/ApiConsole';
 import PredictorView      from './pages/PredictorView';
 import SettingsView       from './pages/SettingsView';
 
@@ -110,6 +111,7 @@ export default function App() {
       <Route path="/student-analytics"  element={<AdminProtected><ExplorerView isLecturer={false} /></AdminProtected>} />
       <Route path="/predictive-reports" element={<AdminProtected><PredictorView isAdmin={true} /></AdminProtected>} />
       <Route path="/users"              element={<HoTOnlyProtected><UserManagement /></HoTOnlyProtected>} />
+      <Route path="/api-console"        element={<HoTOnlyProtected><ApiConsole /></HoTOnlyProtected>} />
 
       {/* Shared settings (role-aware) */}
       <Route path="/settings" element={<Protected><SettingsPage /></Protected>} />

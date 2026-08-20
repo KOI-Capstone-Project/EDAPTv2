@@ -1,8 +1,42 @@
 // Role-aware navigation sidebar with user avatar, nav links, and logout button.
-import { useState } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { NavLink } from 'react-router-dom';
 import { getUser, getUserName, getUserInitials } from '../utils/auth';
+import { INGEST_LAST_SEEN_KEY, INGEST_JOBS_SEEN_EVENT } from '../utils/ingestNotifications';
 import api from '../services/api';
+
+// Ingestion now runs in the background (see DataIngestion.jsx) — confirm
+// returns immediately and the actual work finishes later. This is how the
+// sidebar surfaces "it's done" without the admin needing to sit on that
+// page: poll the shared job list, and badge any job the admin hasn't seen yet.
+const INGEST_POLL_INTERVAL_MS = 20000;
+
+function useIngestBadge(enabled) {
+  const [badge, setBadge] = useState({ count: 0, hasFailure: false });
+
+  const refresh = useCallback(async () => {
+    if (!enabled) return;
+    try {
+      const res = await api.get('/api/ingest/jobs', { params: { limit: 50 } });
+      const lastSeen = Number(localStorage.getItem(INGEST_LAST_SEEN_KEY) || 0);
+      const unseen = res.data.jobs.filter(j => j.id > lastSeen && j.status !== 'running');
+      setBadge({ count: unseen.length, hasFailure: unseen.some(j => j.status === 'failed') });
+    } catch { /* sidebar badge is best-effort — a failed poll just skips this tick */ }
+  }, [enabled]);
+
+  useEffect(() => {
+    if (!enabled) return;
+    refresh();
+    const timer = setInterval(refresh, INGEST_POLL_INTERVAL_MS);
+    window.addEventListener(INGEST_JOBS_SEEN_EVENT, refresh);
+    return () => {
+      clearInterval(timer);
+      window.removeEventListener(INGEST_JOBS_SEEN_EVENT, refresh);
+    };
+  }, [enabled, refresh]);
+
+  return badge;
+}
 
 // ── Icons ─────────────────────────────────────────────────────────────────────
 
@@ -65,6 +99,12 @@ const I = {
       <path d="M12 2l2.4 7.4H22l-6.2 4.5 2.4 7.4L12 17l-6.2 4.3 2.4-7.4L2 9.4h7.6z"/>
     </svg>
   ),
+  ApiKey: () => (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="7.5" cy="15.5" r="5.5"/>
+      <path d="M21 2l-9.6 9.6"/><path d="M15.5 7.5l3 3L22 7l-3-3"/>
+    </svg>
+  ),
   Logout: () => (
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
@@ -99,6 +139,7 @@ const ADMIN_NAV_BASE = [
   { label: 'Student Analytics',  icon: <I.Explorer />,   to: '/student-analytics'     },
   { label: 'Predictive Reports', icon: <I.Predictor />,  to: '/predictive-reports'    },
   { label: 'Data Ingestion',     icon: <I.Ingestion />,  to: '/data-ingestion'        },
+  { label: 'API Console',        icon: <I.ApiKey />,     to: '/api-console'          },
 ];
 const ADMIN_NAV_SUPER = [
   { label: 'Audit Log',      icon: <I.AuditLog />, to: '/audit-log' },
@@ -119,6 +160,9 @@ export default function Sidebar() {
     : isHoS
       ? HOS_NAV
       : LECTURER_NAV;
+
+  // Only these two roles can reach Data Ingestion at all (require_head_of_school).
+  const ingestBadge = useIngestBadge(isAdmin || isHoS);
 
   const handleLogout = () => {
     api.post('/api/auth/logout').catch(() => {});
@@ -154,22 +198,36 @@ export default function Sidebar() {
 
       {/* ── Navigation ─────────────────────────────────────────────── */}
       <nav style={s.nav}>
-        {navItems.map(({ label, icon, to }) => (
-          <NavLink
-            key={to}
-            to={to}
-            style={({ isActive }) => ({
-              ...s.item,
-              ...(isActive ? s.itemActive : {}),
-              justifyContent: collapsed ? 'center' : 'flex-start',
-              padding: collapsed ? '10px 0' : '12px 20px',
-            })}
-            title={collapsed ? label : undefined}
-          >
-            <span style={s.icon}>{icon}</span>
-            {!collapsed && label}
-          </NavLink>
-        ))}
+        {navItems.map(({ label, icon, to }) => {
+          const showBadge = to === '/data-ingestion' && ingestBadge.count > 0;
+          return (
+            <NavLink
+              key={to}
+              to={to}
+              style={({ isActive }) => ({
+                ...s.item,
+                ...(isActive ? s.itemActive : {}),
+                justifyContent: collapsed ? 'center' : 'flex-start',
+                padding: collapsed ? '10px 0' : '12px 20px',
+                position: 'relative',
+              })}
+              title={collapsed ? `${label} (${ingestBadge.count} new)` : undefined}
+            >
+              <span style={{ ...s.icon, position: 'relative' }}>
+                {icon}
+                {showBadge && collapsed && (
+                  <span style={{ ...s.navBadge, ...s.navBadgeCollapsed, ...(ingestBadge.hasFailure ? s.navBadgeFailure : {}) }} />
+                )}
+              </span>
+              {!collapsed && label}
+              {!collapsed && showBadge && (
+                <span style={{ ...s.navBadge, ...(ingestBadge.hasFailure ? s.navBadgeFailure : {}) }}>
+                  {ingestBadge.count}
+                </span>
+              )}
+            </NavLink>
+          );
+        })}
       </nav>
 
       {/* ── User info + Sign Out ────────────────────────────────────── */}
@@ -245,6 +303,15 @@ const s = {
   },
   itemActive: { background: '#2E6E8E', color: '#fff' },
   icon: { display: 'flex', alignItems: 'center', flexShrink: 0 },
+  navBadge: {
+    marginLeft: 'auto', display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+    minWidth: 18, height: 18, padding: '0 5px', borderRadius: 999,
+    background: '#2E6E8E', color: '#fff', fontSize: 10.5, fontWeight: 700, lineHeight: 1,
+  },
+  navBadgeFailure: { background: '#DC2626' },
+  navBadgeCollapsed: {
+    position: 'absolute', top: -4, right: -6, minWidth: 8, width: 8, height: 8, padding: 0,
+  },
 
   bottomSection: {
     display: 'flex', flexDirection: 'column',

@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(docker compose *)",
+      "Bash(python -c ' *)",
+      "Bash(curl -s -w '\\\\nHTTP %{http_code}\\\\n' -X POST http://localhost:8000/api/v1/predict -H 'X-API-Key: edapt_Mikn9eBZMn6SUFLffuSHpis1Sl8mklHg7ZFcdppldK0' -H 'Content-Type: application/json' -d '{ *)",
+      "Bash(npx --no-install playwright --version)",
+      "Bash(node scripts/validate_palette.js \"#2E6E8E,#534AB7,#EF9F27,#185FA5\" --mode light --surface \"#ffffff\")",
+      "PowerShell(Get-Command node -ErrorAction SilentlyContinue)",
+      "PowerShell(node --version 2>&1)",
+      "Bash(docker cp *)",
+      "Bash(docker exec *)",
+      "Bash(MSYS_NO_PATHCONV=1 docker exec edaptv2_frontend node /app/tmp_validate_palette.mjs \"#2E6E8E,#534AB7,#EF9F27,#185FA5\" --mode light --surface \"#ffffff\")",
+      "Bash(MSYS_NO_PATHCONV=1 docker exec edaptv2_frontend node /app/tmp_validate_palette.mjs \"#185FA5,#4a3aa7,#eb6834\" --mode light --surface \"#ffffff\")",
+      "Bash(MSYS_NO_PATHCONV=1 docker exec edaptv2_frontend node /app/tmp_validate_palette.mjs \"#185FA5,#4a3aa7,#eb6834,#e87ba4\" --mode light --surface \"#ffffff\")",
+      "Bash(MSYS_NO_PATHCONV=1 docker exec edaptv2_frontend node /app/tmp_validate_palette.mjs \"#2a78d6,#eb6834,#1baf7a,#eda100\" --mode light --surface \"#ffffff\")"
+    ]
+  }
+}
