@@ -111,9 +111,6 @@ services:
       dockerfile: Dockerfile.prod
       args:
         REACT_APP_API_BASE_URL: ${REACT_APP_API_BASE_URL:-}
-        REACT_APP_GOOGLE_CLIENT_ID: ${REACT_APP_GOOGLE_CLIENT_ID:-}
-        REACT_APP_MICROSOFT_CLIENT_ID: ${REACT_APP_MICROSOFT_CLIENT_ID:-}
-        REACT_APP_MICROSOFT_TENANT_ID: ${REACT_APP_MICROSOFT_TENANT_ID:-common}
     container_name: edaptv2_frontend_prod
     restart: always
     # No exposed ports — nginx reverse-proxies to this container

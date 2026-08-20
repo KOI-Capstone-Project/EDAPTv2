@@ -13,7 +13,8 @@
       "Bash(MSYS_NO_PATHCONV=1 docker exec edaptv2_frontend node /app/tmp_validate_palette.mjs \"#2E6E8E,#534AB7,#EF9F27,#185FA5\" --mode light --surface \"#ffffff\")",
       "Bash(MSYS_NO_PATHCONV=1 docker exec edaptv2_frontend node /app/tmp_validate_palette.mjs \"#185FA5,#4a3aa7,#eb6834\" --mode light --surface \"#ffffff\")",
       "Bash(MSYS_NO_PATHCONV=1 docker exec edaptv2_frontend node /app/tmp_validate_palette.mjs \"#185FA5,#4a3aa7,#eb6834,#e87ba4\" --mode light --surface \"#ffffff\")",
-      "Bash(MSYS_NO_PATHCONV=1 docker exec edaptv2_frontend node /app/tmp_validate_palette.mjs \"#2a78d6,#eb6834,#1baf7a,#eda100\" --mode light --surface \"#ffffff\")"
+      "Bash(MSYS_NO_PATHCONV=1 docker exec edaptv2_frontend node /app/tmp_validate_palette.mjs \"#2a78d6,#eb6834,#1baf7a,#eda100\" --mode light --surface \"#ffffff\")",
+      "Bash(python \"C:\\\\Users\\\\nites\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-nites-Desktop-MIT-4th-Sem-Capstone-EDAPTv2\\\\45c5f4b4-a5d9-4a98-a1d4-dd004732003f\\\\scratchpad\\\\generate_sample_csv.py\")"
     ]
   }
 }

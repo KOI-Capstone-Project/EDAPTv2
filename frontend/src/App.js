@@ -21,6 +21,7 @@ import PredictorView      from './pages/PredictorView';
 import StudentsAtRisk     from './pages/StudentsAtRisk';
 import SettingsView       from './pages/SettingsView';
 import RiskEmailTemplateView from './pages/RiskEmailTemplateView';
+import OAuthProvidersView from './pages/OAuthProvidersView';
 
 // Auth utilities
 import { getToken, getUser } from './utils/auth';
@@ -122,6 +123,9 @@ export default function App() {
       {/* Admin only (HoT or HoS) — matches the backend's require_head_of_school
           gate on GET/PUT /api/risk-email-template. */}
       <Route path="/risk-email-template" element={<AdminProtected><RiskEmailTemplateView /></AdminProtected>} />
+      {/* Admin only (HoT or HoS) — matches the backend's require_head_of_school
+          gate on GET/PUT /api/oauth-providers. */}
+      <Route path="/oauth-providers" element={<AdminProtected><OAuthProvidersView /></AdminProtected>} />
 
       {/* Shared settings (role-aware) */}
       <Route path="/settings" element={<Protected><SettingsPage /></Protected>} />

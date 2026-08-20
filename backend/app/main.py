@@ -40,7 +40,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
-from app.db.models import AnalyzeJob, ApiKey, AuditLog, Base, IngestJob, Intervention, PendingIngest, Prediction, RiskEmailTemplate, User as UserModel
+from app.db.models import AnalyzeJob, ApiKey, AuditLog, Base, IngestJob, Intervention, OAuthProviderConfig, PendingIngest, Prediction, RiskEmailTemplate, User as UserModel
 from app import oauth_providers
 # Light module — pure functions over an already-computed SHAP dict, no model
 # loading, so it is safe to import at module scope unlike app.ml.predictor.
@@ -596,6 +596,34 @@ async def _seed_risk_email_template() -> None:
         ))
         await db.commit()
 
+
+# provider -> (env var holding its client_id, env var holding its tenant id or None)
+_OAUTH_PROVIDER_ENV = {
+    "google":    ("GOOGLE_CLIENT_ID", None),
+    "microsoft": ("MICROSOFT_CLIENT_ID", "MICROSOFT_TENANT_ID"),
+}
+
+
+async def _seed_oauth_provider_configs() -> None:
+    """Insert the Google/Microsoft config rows if missing, one-time-seeded
+    from whatever GOOGLE_CLIENT_ID/MICROSOFT_CLIENT_ID/MICROSOFT_TENANT_ID
+    env vars are already set — so a deployment that had them configured the
+    old way keeps working after this migration, with nothing to re-enter
+    beyond what Settings > OAuth Providers already shows. A fresh
+    deployment with no env vars seeds both providers disabled and empty,
+    ready to be filled in from that same page instead of a redeploy."""
+    async with _AsyncSession() as db:
+        for provider, (client_env, tenant_env) in _OAUTH_PROVIDER_ENV.items():
+            if await db.get(OAuthProviderConfig, provider) is not None:
+                continue
+            client_id = os.getenv(client_env, "") or ""
+            tenant_id = os.getenv(tenant_env) if tenant_env else None
+            db.add(OAuthProviderConfig(
+                provider=provider, client_id=client_id, tenant_id=tenant_id,
+                enabled=bool(client_id),
+            ))
+        await db.commit()
+
 # ── Dashboard constants ───────────────────────────────────────────────────────
 
 PERIODS_ORDER = ["23.1", "23.2", "23.3", "24.1", "24.2", "24.3", "25.1", "25.2", "25.3"]
@@ -849,6 +877,7 @@ async def _startup():
         await conn.run_sync(Base.metadata.create_all)
     await _seed_default_users()
     await _seed_risk_email_template()
+    await _seed_oauth_provider_configs()
     logger.info("Database ready")
     if GMAIL_SENDER and GMAIL_APP_PASSWORD:
         logger.info("Email service configured")
@@ -1094,9 +1123,14 @@ async def _complete_oauth_login(db: AsyncSession, email: str, provider: str) -> 
 
 @app.post("/api/auth/google", tags=["Auth"])
 async def login_google(req: OAuthLoginRequest, db: AsyncSession = Depends(get_db)):
-    """Sign in with a Google-verified ID token."""
+    """Sign in with a Google-verified ID token. client_id comes from the
+    Settings > OAuth Providers config (see OAuthProviderConfig), not an env
+    var — a disabled or unfilled-in provider means no client_id is passed,
+    same as it being unset used to."""
+    cfg = await db.get(OAuthProviderConfig, "google")
+    client_id = cfg.client_id if (cfg and cfg.enabled) else None
     try:
-        email = oauth_providers.verify_google_id_token(req.id_token)
+        email = oauth_providers.verify_google_id_token(req.id_token, client_id)
     except oauth_providers.OAuthVerificationError as exc:
         raise HTTPException(status_code=401, detail=str(exc)) from exc
     return await _complete_oauth_login(db, email, provider="Google")
@@ -1104,12 +1138,104 @@ async def login_google(req: OAuthLoginRequest, db: AsyncSession = Depends(get_db
 
 @app.post("/api/auth/microsoft", tags=["Auth"])
 async def login_microsoft(req: OAuthLoginRequest, db: AsyncSession = Depends(get_db)):
-    """Sign in with a Microsoft-verified ID token."""
+    """Sign in with a Microsoft-verified ID token. client_id/tenant_id come
+    from the Settings > OAuth Providers config, same reasoning as Google above."""
+    cfg = await db.get(OAuthProviderConfig, "microsoft")
+    client_id = cfg.client_id if (cfg and cfg.enabled) else None
+    tenant_id = cfg.tenant_id if cfg else None
     try:
-        email = await oauth_providers.verify_microsoft_id_token(req.id_token)
+        email = await oauth_providers.verify_microsoft_id_token(req.id_token, client_id, tenant_id)
     except oauth_providers.OAuthVerificationError as exc:
         raise HTTPException(status_code=401, detail=str(exc)) from exc
     return await _complete_oauth_login(db, email, provider="Microsoft")
+
+
+class OAuthProviderUpdate(BaseModel):
+    client_id: str       = Field("", max_length=255)
+    tenant_id: str | None = Field(None, max_length=255)
+    enabled:   bool      = False
+
+
+def _oauth_provider_public_dict(row: OAuthProviderConfig | None, provider: str) -> dict:
+    return {
+        "provider":   provider,
+        "client_id":  row.client_id if row else "",
+        "tenant_id":  row.tenant_id if row else None,
+        "enabled":    bool(row.enabled) if row else False,
+        "updated_by": row.updated_by if row else None,
+        "updated_at": row.updated_at.isoformat() if row and row.updated_at else None,
+    }
+
+
+@app.get("/api/oauth-providers", tags=["Auth"])
+async def list_oauth_providers(
+    user: dict         = Depends(require_head_of_school),
+    db:   AsyncSession = Depends(get_db),
+):
+    """Full Google/Microsoft config, including disabled/empty rows — admin
+    only, for the Settings > OAuth Providers page. Client IDs are public
+    identifiers (see OAuthProviderConfig's docstring), so returning them
+    to an already-authenticated admin here is no different a disclosure
+    than the public endpoint below returning them to anyone."""
+    rows = {r.provider: r for r in (await db.execute(select(OAuthProviderConfig))).scalars().all()}
+    return {"providers": [_oauth_provider_public_dict(rows.get(p), p) for p in _OAUTH_PROVIDER_ENV]}
+
+
+@app.put("/api/oauth-providers/{provider}", tags=["Auth"])
+async def update_oauth_provider(
+    provider: str,
+    req:  OAuthProviderUpdate,
+    user: dict         = Depends(require_head_of_school),
+    db:   AsyncSession = Depends(get_db),
+):
+    """Configure a provider's sign-in — admin only (Head of Technology /
+    Head of School). This is the replacement for hand-editing
+    GOOGLE_CLIENT_ID/MICROSOFT_CLIENT_ID/MICROSOFT_TENANT_ID and
+    redeploying: the next login attempt reads whatever is saved here."""
+    if provider not in _OAUTH_PROVIDER_ENV:
+        raise HTTPException(404, f"Unknown provider '{provider}'. Expected one of: {', '.join(_OAUTH_PROVIDER_ENV)}")
+
+    row = await db.get(OAuthProviderConfig, provider)
+    if row is None:
+        row = OAuthProviderConfig(provider=provider)
+        db.add(row)
+
+    client_id = req.client_id.strip()
+    now = datetime.now(timezone.utc)
+    row.client_id  = client_id
+    row.tenant_id  = (req.tenant_id or "").strip() or None
+    # Can't be enabled with no client_id to verify tokens against, regardless
+    # of what the toggle in the request says.
+    row.enabled    = bool(req.enabled and client_id)
+    row.updated_by = user["sub"]
+    row.updated_at = now
+
+    await _append_audit_db(
+        db, user_uid=user["sub"], action_type="Settings Changed", status="Success",
+        detail=f"Updated the {provider} OAuth provider config",
+    )
+    return {
+        "provider": provider, "client_id": client_id, "tenant_id": row.tenant_id,
+        "enabled": row.enabled, "updated_by": user["sub"], "updated_at": now.isoformat(),
+    }
+
+
+@app.get("/api/oauth-providers/public", tags=["Auth"])
+async def public_oauth_providers(db: AsyncSession = Depends(get_db)):
+    """Unauthenticated — the login page needs this before the user has a
+    token at all, to know which sign-in buttons to render and what
+    client_id/tenant_id to hand each provider's own JS SDK. Only exposes
+    enabled providers with a client_id set; both fields are public
+    identifiers, not secrets (see OAuthProviderConfig's docstring)."""
+    rows = (await db.execute(
+        select(OAuthProviderConfig).where(OAuthProviderConfig.enabled.is_(True))
+    )).scalars().all()
+    return {
+        "providers": [
+            {"provider": r.provider, "client_id": r.client_id, "tenant_id": r.tenant_id}
+            for r in rows if r.client_id
+        ]
+    }
 
 
 @app.post("/api/auth/forgot-password", tags=["Auth"])

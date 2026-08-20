@@ -300,6 +300,38 @@ class RiskEmailTemplate(Base):
     )
 
 
+class OAuthProviderConfig(Base):
+    """
+    Per-provider Google/Microsoft sign-in configuration, editable from
+    Settings > OAuth Providers instead of the GOOGLE_CLIENT_ID /
+    MICROSOFT_CLIENT_ID / MICROSOFT_TENANT_ID environment variables this
+    replaces — previously the one piece of app config that needed a
+    redeploy to change.
+
+    `provider` is a fixed primary key ("google"/"microsoft"); rows are
+    seeded once at startup and never created/deleted through the API,
+    since oauth_providers.py's verification functions only know how to
+    handle these two providers. No client-secret column: this project only
+    implements the ID-token flow (the frontend gets a signed ID token
+    straight from Google/Microsoft's own JS SDK and hands it to us) rather
+    than a server-side authorization-code exchange, so a secret is never
+    needed — client_id is a public identifier, not sensitive, the same way
+    it was already embedded directly in the frontend bundle before this.
+    """
+
+    __tablename__ = "oauth_provider_configs"
+
+    provider:  str      = Column(String(20), primary_key=True)
+    client_id: str      = Column(String(255), nullable=False, default="")
+    tenant_id: str | None = Column(String(255), nullable=True, comment="Microsoft only; blank means 'common'")
+    enabled:   bool     = Column(Boolean, nullable=False, default=False)
+
+    updated_by: str | None = Column(String(254), nullable=True)
+    updated_at: datetime = Column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False,
+    )
+
+
 class User(AuditMixin, Base):
     """
     Application user account for EDAPT staff / admins.
