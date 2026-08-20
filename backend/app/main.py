@@ -1642,15 +1642,21 @@ async def _do_capstone_confirm(pending_df: pd.DataFrame, mode: str = "override")
     # `ingested_data_prod` volume in prod — see train_model.INGESTED_DATA_DIR's
     # docstring for why this is env-var-driven rather than hardcoded to this
     # file's own directory), then temporarily point train_model.DATA_PATH /
-    # check_new_period.DATA_PATH at it — the same monkey-patch pattern
-    # verify_dynamic_period_e2e.py already uses for isolated retrain testing —
-    # restoring both afterward regardless of outcome. This is required for
-    # check_new_period.py and train_model.py to actually see the newly
-    # ingested data (both read DATA_PATH from disk, not from the in-memory
-    # _DATA this endpoint also updates).
+    # check_new_period.DATA_PATH (and train_model.ATTENDANCE_PATH, if
+    # attendance has ever been ingested) at it — the same monkey-patch
+    # pattern verify_dynamic_period_e2e.py already uses for isolated retrain
+    # testing — restoring all of them afterward regardless of outcome. This
+    # is required for check_new_period.py and train_model.py to actually
+    # see the newly ingested data (all read their paths from disk, not from
+    # the in-memory _DATA/_ATTENDANCE this endpoint also updates).
     import app.ml.train_model as train_model_mod
     train_model_mod.INGESTED_DATA_DIR.mkdir(parents=True, exist_ok=True)
     INGESTED_CAPSTONE_PATH = train_model_mod.INGESTED_DATA_DIR / "ingested_capstone.csv"
+    # Written by _do_attendance_confirm (same raw per-session shape
+    # load_attendance_raw() expects from ATTENDANCE_PATH) — if an admin has
+    # ever ingested attendance through the UI, retraining should train on
+    # that instead of silently falling back to the archived /data file.
+    INGESTED_ATTENDANCE_RAW_PATH = train_model_mod.INGESTED_DATA_DIR / "ingested_attendance_raw.csv"
 
     # Refresh the PASS target merged into _ATTENDANCE, if attendance data
     # is already loaded, so it stays consistent with the new capstone data.
@@ -1694,13 +1700,16 @@ async def _do_capstone_confirm(pending_df: pd.DataFrame, mode: str = "override")
         _ATTENDANCE = new_attendance
 
         original_paths = {
-            "train_model": train_model_mod.DATA_PATH,
-            "check_new_period": check_new_period_mod.DATA_PATH,
+            "train_model":            train_model_mod.DATA_PATH,
+            "check_new_period":       check_new_period_mod.DATA_PATH,
+            "train_model_attendance": train_model_mod.ATTENDANCE_PATH,
         }
         retrain_info = {"triggered": False, "reason": None, "candidate_version": None}
         try:
             train_model_mod.DATA_PATH = INGESTED_CAPSTONE_PATH
             check_new_period_mod.DATA_PATH = INGESTED_CAPSTONE_PATH
+            if INGESTED_ATTENDANCE_RAW_PATH.exists():
+                train_model_mod.ATTENDANCE_PATH = INGESTED_ATTENDANCE_RAW_PATH
 
             is_new, latest, validated_on = check_new_period_mod.new_period_available()
             if is_new:
@@ -1720,6 +1729,7 @@ async def _do_capstone_confirm(pending_df: pd.DataFrame, mode: str = "override")
         finally:
             train_model_mod.DATA_PATH = original_paths["train_model"]
             check_new_period_mod.DATA_PATH = original_paths["check_new_period"]
+            train_model_mod.ATTENDANCE_PATH = original_paths["train_model_attendance"]
     finally:
         _release_ingest_lock()
 
