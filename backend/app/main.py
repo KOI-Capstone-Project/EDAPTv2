@@ -40,7 +40,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
-from app.db.models import ApiKey, AuditLog, Base, IngestJob, Intervention, PendingIngest, Prediction, User as UserModel
+from app.db.models import AnalyzeJob, ApiKey, AuditLog, Base, IngestJob, Intervention, PendingIngest, Prediction, User as UserModel
 from app import oauth_providers
 # Light module — pure functions over an already-computed SHAP dict, no model
 # loading, so it is safe to import at module scope unlike app.ml.predictor.
@@ -1459,16 +1459,161 @@ async def ingest_status(
     }
 
 
-@app.post("/api/ingest/capstone/analyze", tags=["Ingest"])
+async def _run_analyze_job(
+    job_id: int, content: bytes, filename: Optional[str], user_email: str, kind: str,
+) -> None:
+    """
+    Background body of analyze — parses + classifies the already-received
+    upload and stashes the result as a PendingIngest, exactly what the old
+    synchronous analyze endpoint did inline. Split out so a client
+    disconnect (page refresh, closed tab) while this runs can't silently
+    lose the analysis: once the browser has finished sending the file,
+    everything after that point is durable and runs independently of the
+    request/response cycle — the same fix already applied to confirm.
+
+    Needs its own AsyncSession, same reasoning as _run_capstone_confirm_job:
+    the request-scoped session is closed by the time BackgroundTasks runs.
+    """
+    async with _AsyncSession() as db:
+        job = await db.get(AnalyzeJob, job_id)
+
+        try:
+            analysis = (
+                _capstone_analysis_from_bytes(content, filename) if kind == "capstone"
+                else _attendance_analysis_from_bytes(content, filename)
+            )
+        except HTTPException as exc:
+            status_label = "Error" if exc.status_code == 422 else "Alert"
+            job.status = "failed"
+            job.error_detail = str(exc.detail)
+            job.finished_at = datetime.now(timezone.utc)
+            await _append_audit_db(db, user_uid=user_email, action_type="Data Upload",
+                                   status=status_label, detail=f"Rejected {kind} upload: {exc.detail}")
+            await db.commit()
+            return
+        except Exception as exc:
+            job.status = "failed"
+            job.error_detail = "The uploaded file could not be parsed as a valid CSV."
+            job.finished_at = datetime.now(timezone.utc)
+            await _append_audit_db(db, user_uid=user_email, action_type="Data Upload",
+                                   status="Error", detail=f"Failed to parse {kind} CSV: {exc}")
+            await db.commit()
+            return
+
+        token = str(uuid.uuid4())
+        await _save_pending_ingest(db, kind, token, filename, content)
+        job.status = "success"
+        job.result = {"token": token, **analysis}
+        job.finished_at = datetime.now(timezone.utc)
+        await db.commit()
+
+
+@app.get("/api/ingest/{kind}/analyze-status", tags=["Ingest"])
+async def ingest_analyze_status(
+    kind: str,
+    user: dict = Depends(require_head_of_school),
+    db:   AsyncSession = Depends(get_db),
+):
+    """
+    Whether an analyze from before a page refresh is still running (or most
+    recently failed) for this kind, so the page can resume showing
+    "Analyzing…" (or the failure) instead of looking blank while that
+    background job keeps working. A *successful* analyze doesn't need
+    anything here — its result already lives in PendingIngest, covered by
+    GET /api/ingest/{kind}/status.
+    """
+    if kind not in ("capstone", "attendance"):
+        raise HTTPException(400, "kind must be 'capstone' or 'attendance'")
+
+    result = await db.execute(
+        select(AnalyzeJob).where(AnalyzeJob.kind == kind).order_by(AnalyzeJob.id.desc()).limit(1)
+    )
+    job = result.scalar_one_or_none()
+    if job is None or job.status == "success":
+        return {"active": False}
+
+    # A failed analyze only matters for a little while — don't resurrect an
+    # old failure indefinitely on every page load.
+    age_minutes = (datetime.now(timezone.utc) - job.started_at).total_seconds() / 60
+    if job.status == "failed" and age_minutes > PENDING_INGEST_TTL_MINUTES:
+        return {"active": False}
+
+    return {
+        "active":       True,
+        "job_id":       job.id,
+        "status":       job.status,
+        "filename":     job.filename,
+        "error_detail": job.error_detail,
+    }
+
+
+@app.get("/api/ingest/analyze-jobs", tags=["Ingest"])
+async def analyze_jobs_list(
+    limit: int = Query(30, ge=1, le=200),
+    user: dict = Depends(require_head_of_school),
+    db:   AsyncSession = Depends(get_db),
+):
+    """Recent analyze jobs (both kinds), most recent first — merged with
+    GET /api/ingest/jobs client-side into one Ingestion Activity timeline."""
+    result = await db.execute(select(AnalyzeJob).order_by(AnalyzeJob.id.desc()).limit(limit))
+    jobs = result.scalars().all()
+    return {
+        "jobs": [
+            {
+                "id":           j.id,
+                "kind":         j.kind,
+                "status":       j.status,
+                "filename":     j.filename,
+                "started_by":   j.started_by,
+                "started_at":   j.started_at.isoformat() if j.started_at else None,
+                "finished_at":  j.finished_at.isoformat() if j.finished_at else None,
+                "result":       j.result,
+                "error_detail": j.error_detail,
+            }
+            for j in jobs
+        ]
+    }
+
+
+@app.get("/api/ingest/analyze-jobs/{job_id}", tags=["Ingest"])
+async def analyze_job_detail(
+    job_id: int,
+    user: dict = Depends(require_head_of_school),
+    db:   AsyncSession = Depends(get_db),
+):
+    """Poll a single analyze job — used right after upload to watch that
+    specific run without waiting for the next full jobs-list refresh."""
+    job = await db.get(AnalyzeJob, job_id)
+    if job is None:
+        raise HTTPException(404, "No analyze job with that id.")
+    return {
+        "id":           job.id,
+        "kind":         job.kind,
+        "status":       job.status,
+        "filename":     job.filename,
+        "started_by":   job.started_by,
+        "started_at":   job.started_at.isoformat() if job.started_at else None,
+        "finished_at":  job.finished_at.isoformat() if job.finished_at else None,
+        "result":       job.result,
+        "error_detail": job.error_detail,
+    }
+
+
+@app.post("/api/ingest/capstone/analyze", status_code=202, tags=["Ingest"])
 async def ingest_capstone_analyze(
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     user: dict = Depends(require_head_of_school),
     db:   AsyncSession = Depends(get_db),
 ):
     """
-    Parse + classify a capstone CSV's columns (KEEP/SKIP/NEW) WITHOUT
-    committing it to the live dataset. Returns a token; call
-    POST /api/ingest/capstone/confirm with it to actually commit.
+    Accept a capstone CSV upload and return immediately — the actual parse +
+    column classification (and the PendingIngest write it produces) happens
+    in the background so a page refresh while this runs doesn't lose it.
+    Poll GET /api/ingest/analyze-jobs/{job_id} (or GET
+    /api/ingest/{kind}/analyze-status after a refresh) to see when it
+    finishes; the result is the same {token, row_count, columns, ...}
+    payload this endpoint used to return directly.
     """
     ext = (file.filename or "").rsplit(".", 1)[-1].lower()
     if ext != "csv":
@@ -1481,21 +1626,13 @@ async def ingest_capstone_analyze(
                                status="Alert", detail=f"Rejected capstone upload: {err}")
         raise HTTPException(400, err)
 
-    try:
-        analysis = _capstone_analysis_from_bytes(content, file.filename)
-    except HTTPException as exc:
-        status_label = "Error" if exc.status_code == 422 else "Alert"
-        await _append_audit_db(db, user_uid=user["sub"], action_type="Data Upload",
-                               status=status_label, detail=f"Rejected capstone upload: {exc.detail}")
-        raise
-    except Exception as exc:
-        await _append_audit_db(db, user_uid=user["sub"], action_type="Data Upload",
-                               status="Error", detail=f"Failed to parse capstone CSV: {exc}")
-        raise HTTPException(422, "The uploaded file could not be parsed as a valid CSV.") from exc
+    job = AnalyzeJob(kind="capstone", filename=file.filename, started_by=user["sub"])
+    db.add(job)
+    await db.commit()
+    await db.refresh(job)
 
-    token = str(uuid.uuid4())
-    await _save_pending_ingest(db, "capstone", token, file.filename, content)
-    return {"token": token, **analysis}
+    background_tasks.add_task(_run_analyze_job, job.id, content, file.filename, user["sub"], "capstone")
+    return {"job_id": job.id, "status": "running"}
 
 
 async def _run_capstone_confirm_job(
@@ -1820,19 +1957,20 @@ async def ingest_preview(
     }
 
 
-@app.post("/api/ingest/attendance/analyze", tags=["Ingest"])
+@app.post("/api/ingest/attendance/analyze", status_code=202, tags=["Ingest"])
 async def ingest_attendance_analyze(
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     user: dict = Depends(require_head_of_school),
     db:   AsyncSession = Depends(get_db),
 ):
     """
-    Parse + classify an attendance CSV's columns (KEEP/SKIP/NEW) WITHOUT
-    committing it. A separate, clearly distinct slot from the capstone
-    analyze endpoint — the two file types are never accepted through the
-    same endpoint, so they can't be cross-uploaded into the wrong slot.
-    Returns a token; call POST /api/ingest/attendance/confirm with it to
-    actually commit.
+    Accept an attendance CSV upload and return immediately — see
+    ingest_capstone_analyze's docstring for the full reasoning (same
+    BackgroundTasks fix, applied here too). A separate, clearly distinct
+    slot from the capstone analyze endpoint — the two file types are never
+    accepted through the same endpoint, so they can't be cross-uploaded
+    into the wrong slot.
     """
     ext = (file.filename or "").rsplit(".", 1)[-1].lower()
     if ext != "csv":
@@ -1845,21 +1983,13 @@ async def ingest_attendance_analyze(
                                status="Alert", detail=f"Rejected attendance upload: {err}")
         raise HTTPException(400, err)
 
-    try:
-        analysis = _attendance_analysis_from_bytes(content, file.filename)
-    except HTTPException as exc:
-        status_label = "Error" if exc.status_code == 422 else "Alert"
-        await _append_audit_db(db, user_uid=user["sub"], action_type="Data Upload",
-                               status=status_label, detail=f"Rejected attendance upload: {exc.detail}")
-        raise
-    except Exception as exc:
-        await _append_audit_db(db, user_uid=user["sub"], action_type="Data Upload",
-                               status="Error", detail=f"Failed to parse attendance CSV: {exc}")
-        raise HTTPException(422, "The uploaded file could not be parsed as a valid CSV.") from exc
+    job = AnalyzeJob(kind="attendance", filename=file.filename, started_by=user["sub"])
+    db.add(job)
+    await db.commit()
+    await db.refresh(job)
 
-    token = str(uuid.uuid4())
-    await _save_pending_ingest(db, "attendance", token, file.filename, content)
-    return {"token": token, **analysis}
+    background_tasks.add_task(_run_analyze_job, job.id, content, file.filename, user["sub"], "attendance")
+    return {"job_id": job.id, "status": "running"}
 
 
 ATTENDANCE_MERGE_KEY_COLS = ["STUDENTID_MASKED", "course", "study_period_code", "cls_session_no"]

@@ -409,6 +409,52 @@ class IngestJob(Base):
     error_detail: str | None = Column(Text, nullable=True)
 
 
+class AnalyzeJob(Base):
+    """
+    Tracks one analyze-time parse/classify run so it can happen in the
+    background — the same fix IngestJob already applied to confirm, now
+    applied to the earlier analyze step too.
+
+    Analyze used to run entirely inline in the request: read the upload,
+    parse it with pandas, classify its columns, and write the PendingIngest
+    row, all before responding. A client disconnect partway through (a page
+    refresh, a closed tab) could abort that request — and with it, the
+    PendingIngest write — leaving nothing durable to resume from. Analyze
+    now returns immediately with a job id, the real work runs via
+    BackgroundTasks (unaffected by the client's connection once the
+    response has been sent), and GET /api/ingest/{kind}/analyze-status
+    lets a freshly-loaded page discover a still-running (or just-failed)
+    analyze from before the refresh instead of looking blank.
+    """
+
+    __tablename__ = "analyze_jobs"
+
+    id: int = Column(Integer, primary_key=True, autoincrement=True)
+
+    kind: str = Column(String(20), nullable=False, comment="'capstone' or 'attendance'")
+
+    status: str = Column(
+        String(20), nullable=False, default="running", server_default="running",
+        comment="running | success | failed",
+    )
+
+    filename: str | None = Column(String(255), nullable=True)
+
+    started_by: str = Column(
+        String(254), nullable=False,
+        comment="Email/uid of the admin who uploaded this file",
+    )
+
+    started_at: datetime = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    finished_at: datetime | None = Column(DateTime(timezone=True), nullable=True)
+
+    result: dict | None = Column(
+        JSON, nullable=True,
+        comment="Same {token, row_count, columns, ...} payload the old synchronous analyze endpoint returned",
+    )
+    error_detail: str | None = Column(Text, nullable=True)
+
+
 class AuditLog(Base):
     """
     Persistent audit trail for all significant system events.
