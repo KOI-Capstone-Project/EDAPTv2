@@ -227,7 +227,7 @@ export default function StudentsAtRisk() {
                       aria-label="Select all filtered students"
                     />
                   </th>
-                  {['Student', 'Subject', 'Attendance', 'Assessments Recorded', 'Weight Recorded', 'Weighted Score', 'Pass Probability', 'Risk'].map(h => (
+                  {['Student', 'Subject', 'Attendance', 'Assessments Recorded', 'Weighted Score', 'Pass Probability', 'Risk'].map(h => (
                     <th key={h} style={s.th}>{h}</th>
                   ))}
                 </tr>
@@ -254,7 +254,6 @@ export default function StudentsAtRisk() {
                       {formatAttendance(r.attendance_rate_used)}
                     </td>
                     <td style={s.td}>{r.num_assessments_recorded}</td>
-                    <td style={s.td}>{r.cumulative_weighting_recorded}%</td>
                     <td style={s.td}>{r.current_weighted_score}</td>
                     <td style={s.td}>{formatProbability(r.probability)}</td>
                     <td style={s.td}>
@@ -266,7 +265,7 @@ export default function StudentsAtRisk() {
                   </tr>
                 ))}
                 {filtered.length === 0 && (
-                  <tr><td style={s.td} colSpan={9}>No students match the current filters.</td></tr>
+                  <tr><td style={s.td} colSpan={8}>No students match the current filters.</td></tr>
                 )}
               </tbody>
             </table>
