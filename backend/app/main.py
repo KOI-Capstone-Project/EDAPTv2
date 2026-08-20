@@ -40,7 +40,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
-from app.db.models import AnalyzeJob, ApiKey, AuditLog, Base, IngestJob, Intervention, PendingIngest, Prediction, User as UserModel
+from app.db.models import AnalyzeJob, ApiKey, AuditLog, Base, IngestJob, Intervention, PendingIngest, Prediction, RiskEmailTemplate, User as UserModel
 from app import oauth_providers
 # Light module — pure functions over an already-computed SHAP dict, no model
 # loading, so it is safe to import at module scope unlike app.ml.predictor.
@@ -572,6 +572,30 @@ async def _seed_default_users() -> None:
         await db.commit()
         logger.info("Default users seeded")
 
+
+DEFAULT_RISK_EMAIL_SUBJECT = "You've been flagged as at risk in {{subject_code}}"
+DEFAULT_RISK_EMAIL_BODY = (
+    "Hi {{student_id}},\n\n"
+    "Our early-warning system has flagged your current progress in "
+    "{{subject_code}} ({{study_period}}) as \"{{risk_band}}\".\n\n"
+    "We'd like to check in and see how we can help you get back on track. "
+    "Please reach out to your lecturer or student support services at your "
+    "earliest convenience.\n\n"
+    "Kind regards,\nAcademic Support Team"
+)
+
+
+async def _seed_risk_email_template() -> None:
+    """Insert the default Students-at-Risk email template if it's missing."""
+    async with _AsyncSession() as db:
+        existing = await db.get(RiskEmailTemplate, 1)
+        if existing is not None:
+            return
+        db.add(RiskEmailTemplate(
+            id=1, subject=DEFAULT_RISK_EMAIL_SUBJECT, body=DEFAULT_RISK_EMAIL_BODY,
+        ))
+        await db.commit()
+
 # ── Dashboard constants ───────────────────────────────────────────────────────
 
 PERIODS_ORDER = ["23.1", "23.2", "23.3", "24.1", "24.2", "24.3", "25.1", "25.2", "25.3"]
@@ -824,6 +848,7 @@ async def _startup():
     async with _engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     await _seed_default_users()
+    await _seed_risk_email_template()
     logger.info("Database ready")
     if GMAIL_SENDER and GMAIL_APP_PASSWORD:
         logger.info("Email service configured")
@@ -4524,6 +4549,130 @@ async def intervention_action_types(user: dict = Depends(get_current_user)):
     """The whitelist the UI renders, so the frontend never hardcodes its own
     copy and drift between the two is impossible."""
     return {"action_types": INTERVENTION_ACTION_TYPES}
+
+
+class InterventionBulkTarget(BaseModel):
+    student_id_masked: str = Field(..., min_length=1, max_length=50)
+    subject_code:      str = Field(..., min_length=1, max_length=20)
+    study_period:      str = Field(..., min_length=1, max_length=10)
+    risk_band:  Optional[str] = Field(None, max_length=20)
+
+
+class InterventionBulkCreate(BaseModel):
+    targets:     list[InterventionBulkTarget] = Field(..., min_length=1, max_length=500)
+    action_type: str           = Field(..., min_length=1, max_length=50)
+    notes:       Optional[str] = Field(None, max_length=2000)
+
+
+def _render_risk_email(template: str, target: "InterventionBulkTarget") -> str:
+    return (
+        template
+        .replace("{{student_id}}",   target.student_id_masked)
+        .replace("{{subject_code}}", target.subject_code)
+        .replace("{{study_period}}", target.study_period)
+        .replace("{{risk_band}}",    target.risk_band or "at risk")
+    )
+
+
+@app.post("/api/interventions/bulk", status_code=201, tags=["Interventions"])
+async def create_interventions_bulk(
+    req:  InterventionBulkCreate,
+    user: dict         = Depends(get_current_user),
+    db:   AsyncSession = Depends(get_db),
+):
+    """
+    Log the same action for many students at once — built for the Students
+    at Risk page's bulk "mark as emailed" action. This never sends a real
+    email (see RiskEmailTemplate's docstring for why: no real student email
+    exists anywhere in this system) — it only records, per selected
+    student, that a staff member already did that themselves.
+
+    req.notes, if given, is treated as a template and rendered per-target
+    (see _render_risk_email) so each Intervention row's notes reflects that
+    specific student/subject/period rather than one identical blob of text
+    with unresolved {{placeholders}} across every row.
+    """
+    if req.action_type not in INTERVENTION_ACTION_TYPES:
+        raise HTTPException(
+            422,
+            f"action_type must be one of: {', '.join(INTERVENTION_ACTION_TYPES)}",
+        )
+    for t in req.targets:
+        _assert_subject_visible(t.subject_code, user)
+
+    created_ids = []
+    for t in req.targets:
+        row = Intervention(
+            student_id_masked = t.student_id_masked,
+            subject_code       = t.subject_code,
+            study_period        = t.study_period,
+            action_type          = req.action_type,
+            notes                = _render_risk_email(req.notes, t) if req.notes else None,
+            created_by           = user["sub"],
+        )
+        db.add(row)
+        await db.flush()
+        created_ids.append(row.id)
+
+    await _append_audit_db(
+        db, user_uid=user["sub"], action_type="Intervention Logged", status="Success",
+        detail=f"Bulk-logged '{req.action_type}' for {len(created_ids)} student(s)",
+    )
+    return {"created": len(created_ids), "ids": created_ids}
+
+
+class RiskEmailTemplateUpdate(BaseModel):
+    subject: str = Field(..., min_length=1, max_length=255)
+    body:    str = Field(..., min_length=1, max_length=5000)
+
+
+@app.get("/api/risk-email-template", tags=["Interventions"])
+async def get_risk_email_template(
+    user: dict         = Depends(get_current_user),
+    db:   AsyncSession = Depends(get_db),
+):
+    """The current Students-at-Risk bulk-email template — readable by any
+    authenticated role so the Students at Risk page can render a preview."""
+    row = await db.get(RiskEmailTemplate, 1)
+    return {
+        "subject":     row.subject,
+        "body":        row.body,
+        "updated_by":  row.updated_by,
+        "updated_at":  row.updated_at.isoformat() if row.updated_at else None,
+    }
+
+
+@app.put("/api/risk-email-template", tags=["Interventions"])
+async def update_risk_email_template(
+    req:  RiskEmailTemplateUpdate,
+    user: dict         = Depends(require_head_of_school),
+    db:   AsyncSession = Depends(get_db),
+):
+    """Update the shared template — admin-only (Head of Technology / Head of
+    School), matching how other institution-wide config is gated in this app."""
+    row = await db.get(RiskEmailTemplate, 1)
+    now = datetime.now(timezone.utc)
+    row.subject    = req.subject
+    row.body       = req.body
+    row.updated_by = user["sub"]
+    row.updated_at = now
+
+    # _append_audit_db commits, which expires every attribute on `row` —
+    # reading req.subject/user["sub"]/now (already-known values, not a
+    # re-read of the now-expired ORM object) avoids the async lazy-load
+    # that a post-commit `row.x` access would otherwise trigger outside a
+    # valid greenlet context (a real, confirmed MissingGreenlet crash here,
+    # not a hypothetical one).
+    await _append_audit_db(
+        db, user_uid=user["sub"], action_type="Settings Changed", status="Success",
+        detail="Updated the Students-at-Risk email template",
+    )
+    return {
+        "subject":     req.subject,
+        "body":        req.body,
+        "updated_by":  user["sub"],
+        "updated_at":  now.isoformat(),
+    }
 
 
 # ═══════════════════════════════════════════════════════════════════════════

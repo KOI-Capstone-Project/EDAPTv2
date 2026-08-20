@@ -266,6 +266,40 @@ class Intervention(Base):
     )
 
 
+class RiskEmailTemplate(Base):
+    """
+    Singleton config row (always id=1) for the "Students at Risk" bulk
+    action's email wording.
+
+    This system has no real student email anywhere — STUDENTID_MASKED is a
+    one-way pseudonym applied upstream, before the data ever reaches this
+    project (see README's masking section). So this is never sent by the
+    app itself: it's reference text a staff member copies into the real
+    email they send on their own, to the real student they personally
+    know, outside this system — the bulk action on the Students at Risk
+    page then logs an `Intervention` row (action_type="email sent") per
+    selected student to record that it happened. One fixed-id row rather
+    than a generic key/value settings table: this is the one piece of
+    admin-configurable free-text copy in the app, so there's no need for
+    a table designed to hold more than that.
+    """
+
+    __tablename__ = "risk_email_templates"
+
+    id: int = Column(Integer, primary_key=True, autoincrement=False)
+
+    subject: str = Column(String(255), nullable=False)
+    body:    str = Column(
+        Text, nullable=False,
+        comment="May contain {{student_id}}, {{subject_code}}, {{study_period}}, {{risk_band}} placeholders",
+    )
+
+    updated_by: str | None = Column(String(254), nullable=True)
+    updated_at: datetime = Column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False,
+    )
+
+
 class User(AuditMixin, Base):
     """
     Application user account for EDAPT staff / admins.
