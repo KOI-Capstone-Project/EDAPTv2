@@ -33,6 +33,13 @@ bcrypt==3.2.2
 python-multipart==0.0.9
 aiofiles==23.2.1
 
+# ── Auth — OAuth sign-in (Google ID token verification) ───────────────────
+# Microsoft ID tokens are verified with python-jose above against Azure
+# AD's own JWKS — no separate MSAL/server-side library needed for that.
+# Version matches what google-generativeai already pulls in transitively —
+# pinned explicitly here since we now import it directly too.
+google-auth==2.56.3
+
 # ── HTTP client (Gemini API calls) ────────────────────────────────────────
 httpx==0.27.2
 

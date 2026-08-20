@@ -4,6 +4,7 @@ import { Link, useNavigate } from 'react-router-dom';
 import api from '../services/api';
 import { getToken, isAdmin, STORAGE_TOKEN_KEY, STORAGE_USER_KEY } from '../utils/auth';
 import { SESSION_EXPIRED_KEY } from '../api/client';
+import OAuthButtons from '../components/OAuthButtons';
 
 const EyeOpen = () => (
   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -74,6 +75,17 @@ export default function Login() {
     }
   };
 
+  const completeLogin = (data) => {
+    localStorage.setItem(STORAGE_TOKEN_KEY, data.access_token);
+    localStorage.setItem(STORAGE_USER_KEY,  JSON.stringify(data.user));
+
+    if (['Head of Technology', 'Head of School'].includes(data.user.role)) {
+      navigate('/dashboard/admin');
+    } else {
+      navigate('/dashboard/lecturer');
+    }
+  };
+
   const handleSubmit = async (e) => {
     e.preventDefault();
     setLoading(true);
@@ -81,14 +93,7 @@ export default function Login() {
 
     try {
       const res = await api.post('/api/auth/login', { email, password });
-      localStorage.setItem(STORAGE_TOKEN_KEY, res.data.access_token);
-      localStorage.setItem(STORAGE_USER_KEY,  JSON.stringify(res.data.user));
-
-      if (['Head of Technology', 'Head of School'].includes(res.data.user.role)) {
-        navigate('/dashboard/admin');
-      } else {
-        navigate('/dashboard/lecturer');
-      }
+      completeLogin(res.data);
     } catch (err) {
       setError(err.response?.data?.detail || 'Sign in failed. Please try again.');
     } finally {
@@ -201,6 +206,8 @@ export default function Login() {
             </button>
 
           </form>
+
+          <OAuthButtons disabled={loading} onSuccess={completeLogin} onError={setError} />
         </div>
       </div>
     </div>

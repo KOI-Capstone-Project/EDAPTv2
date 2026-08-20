@@ -84,6 +84,9 @@ services:
     env_file: .env
     environment:
       REACT_APP_API_BASE_URL: ${REACT_APP_API_BASE_URL:-http://localhost:8000}
+      REACT_APP_GOOGLE_CLIENT_ID: ${REACT_APP_GOOGLE_CLIENT_ID:-}
+      REACT_APP_MICROSOFT_CLIENT_ID: ${REACT_APP_MICROSOFT_CLIENT_ID:-}
+      REACT_APP_MICROSOFT_TENANT_ID: ${REACT_APP_MICROSOFT_TENANT_ID:-common}
       CHOKIDAR_USEPOLLING: "true"   # needed for hot-reload inside Docker on some OS
     volumes:
       - ./frontend:/app
