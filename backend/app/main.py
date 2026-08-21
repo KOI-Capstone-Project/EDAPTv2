@@ -40,8 +40,9 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
-from app.db.models import AnalyzeJob, ApiKey, AuditLog, Base, IngestJob, Intervention, OAuthProviderConfig, PendingIngest, Prediction, RiskEmailTemplate, User as UserModel
+from app.db.models import AIProviderConfig, AnalyzeJob, ApiKey, AuditLog, Base, IngestJob, Intervention, OAuthProviderConfig, PendingIngest, Prediction, RiskEmailTemplate, User as UserModel
 from app import oauth_providers
+from app.crypto_utils import encrypt_secret, decrypt_secret
 # Light module — pure functions over an already-computed SHAP dict, no model
 # loading, so it is safe to import at module scope unlike app.ml.predictor.
 from app.ml.actionable import excluded_factor_summary, top_actionable_factor
@@ -270,28 +271,81 @@ def _period_total_weight(subject: str, study_period: str) -> float:
         return 0.0
     return float(df.drop_duplicates(subset=["ASSESSMENTTYPECODE"])["WEIGHTING"].sum())
 
-# ── Gemini ────────────────────────────────────────────────────────────────────
+# ── AI Config (Anthropic / Gemini / OpenAI) ─────────────────────────────────
+# Every AI-insight endpoint below (still under the /api/gemini/* prefix for
+# frontend compatibility — see AIProviderConfig's docstring) calls _ai_call(),
+# which dispatches to whichever provider/model/key is currently configured
+# from Settings > AI Config, instead of a hardcoded GEMINI_API_KEY env var +
+# fixed flash/pro model pair. Config is cached in-memory (_AI_CONFIG_CACHE),
+# refreshed at startup and on every successful PUT /api/ai-config — one
+# fewer DB round-trip per AI call, same pattern as _PACKAGE for the ML model.
 
 class ResourceExhausted(Exception):
     """Fallback stand-in used if google.api_core is unavailable at import time."""
 
-_flash_model               = None
-_pro_model                 = None
+try:
+    from google.api_core.exceptions import ResourceExhausted
+except Exception:
+    pass
+
+# label shown in the model dropdown per provider — id is the exact string
+# sent to that provider's API. Curated, not exhaustive: a provider release
+# a new model, an admin just won't see it here until this list is updated.
+AI_MODELS_BY_PROVIDER: dict[str, list[dict]] = {
+    "anthropic": [
+        {"id": "claude-3-5-sonnet-latest", "label": "Claude 3.5 Sonnet"},
+        {"id": "claude-3-5-haiku-latest",  "label": "Claude 3.5 Haiku"},
+        {"id": "claude-3-opus-latest",     "label": "Claude 3 Opus"},
+    ],
+    "gemini": [
+        {"id": "gemini-2.0-flash", "label": "Gemini 2.0 Flash"},
+        {"id": "gemini-1.5-flash", "label": "Gemini 1.5 Flash"},
+        {"id": "gemini-1.5-pro",  "label": "Gemini 1.5 Pro"},
+    ],
+    "openai": [
+        {"id": "gpt-4o",      "label": "GPT-4o"},
+        {"id": "gpt-4o-mini", "label": "GPT-4o mini"},
+        {"id": "gpt-4-turbo", "label": "GPT-4 Turbo"},
+    ],
+}
+_AI_PROVIDERS = tuple(AI_MODELS_BY_PROVIDER.keys())
+
 _GEMINI_TOKEN_LOG: list[dict] = []
 
-try:
-    import google.generativeai as _genai
-    from google.api_core.exceptions import ResourceExhausted
-    _gemini_key = os.getenv("GEMINI_API_KEY", "")
-    if _gemini_key and "your-gemini" not in _gemini_key:
-        _genai.configure(api_key=_gemini_key)
-        _flash_model = _genai.GenerativeModel("gemini-1.5-flash")
-        _pro_model   = _genai.GenerativeModel("gemini-1.5-pro")
-        logger.info("Gemini API configured successfully")
-    else:
-        logger.warning("Gemini API key not configured")
-except Exception as _e:
-    logger.warning("Gemini API key not configured — %s", _e)
+# Populated by _refresh_ai_config_cache() at startup and after every
+# successful PUT /api/ai-config — never read the DB row on the hot path of
+# an actual AI call.
+_AI_CONFIG_CACHE: dict = {"provider": None, "model": None, "api_key": None}
+
+
+async def _refresh_ai_config_cache() -> None:
+    async with _AsyncSession() as db:
+        row = await db.get(AIProviderConfig, 1)
+        if row is None:
+            _AI_CONFIG_CACHE.update(provider=None, model=None, api_key=None)
+            return
+        api_key = decrypt_secret(row.encrypted_api_key, SECRET_KEY) if row.encrypted_api_key else None
+        _AI_CONFIG_CACHE.update(provider=row.provider, model=row.model, api_key=api_key)
+
+
+async def _seed_ai_provider_config() -> None:
+    """One-time migration seed: if the GEMINI_API_KEY env var is already set
+    and no AIProviderConfig row exists yet, seed provider=gemini/
+    model=gemini-1.5-pro from it, so an existing deployment
+    keeps working after this migration with nothing to re-enter beyond what
+    Settings > AI Config already shows. A fresh deployment with no env var
+    seeds an empty (no key) gemini-default row, ready to be filled in from
+    that same page instead of a redeploy."""
+    async with _AsyncSession() as db:
+        if await db.get(AIProviderConfig, 1) is not None:
+            return
+        gemini_key = os.getenv("GEMINI_API_KEY", "")
+        has_real_key = bool(gemini_key) and "your-gemini" not in gemini_key
+        db.add(AIProviderConfig(
+            id=1, provider="gemini", model="gemini-1.5-pro",
+            encrypted_api_key=encrypt_secret(gemini_key, SECRET_KEY) if has_real_key else None,
+        ))
+        await db.commit()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # In-Memory State
@@ -929,6 +983,8 @@ async def _startup():
     await _seed_default_users()
     await _seed_risk_email_template()
     await _seed_oauth_provider_configs()
+    await _seed_ai_provider_config()
+    await _refresh_ai_config_cache()
     logger.info("Database ready")
     if GMAIL_SENDER and GMAIL_APP_PASSWORD:
         logger.info("Email service configured")
@@ -3251,26 +3307,158 @@ async def explorer_export(
 # Predict Routes
 # ─────────────────────────────────────────────────────────────────────────────
 
-async def _gemini_call(model, prompt: str) -> tuple[str, int]:
-    """Run a synchronous Gemini SDK call in a thread pool. Returns (text, tokens)."""
-    if model is None:
+def _call_gemini_sync(model: str, api_key: str, prompt: str) -> tuple[str, int]:
+    import google.generativeai as genai
+    genai.configure(api_key=api_key)
+    response = genai.GenerativeModel(model).generate_content(prompt)
+    text   = response.text.strip()
+    tokens = int(getattr(getattr(response, "usage_metadata", None), "total_token_count", 0) or 0)
+    return text, tokens
+
+
+def _call_anthropic_sync(model: str, api_key: str, prompt: str) -> tuple[str, int]:
+    import anthropic
+    client   = anthropic.Anthropic(api_key=api_key)
+    response = client.messages.create(
+        model=model, max_tokens=800,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    text   = "".join(block.text for block in response.content if getattr(block, "type", None) == "text").strip()
+    tokens = int(response.usage.input_tokens + response.usage.output_tokens)
+    return text, tokens
+
+
+def _call_openai_sync(model: str, api_key: str, prompt: str) -> tuple[str, int]:
+    import openai
+    client   = openai.OpenAI(api_key=api_key)
+    response = client.chat.completions.create(
+        model=model, max_tokens=800,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    text   = (response.choices[0].message.content or "").strip()
+    tokens = int(response.usage.total_tokens) if response.usage else 0
+    return text, tokens
+
+
+_AI_PROVIDER_CALLERS = {
+    "gemini":    _call_gemini_sync,
+    "anthropic": _call_anthropic_sync,
+    "openai":    _call_openai_sync,
+}
+
+
+async def _ai_call(prompt: str) -> tuple[str, int]:
+    """Run whichever provider/model is currently configured (Settings > AI
+    Config, cached in _AI_CONFIG_CACHE) in a thread pool — all three SDKs
+    are synchronous. Returns (text, tokens). Kept provider-agnostic in
+    naming (not _gemini_call) even though every caller below still lives
+    under the /api/gemini/* route prefix, for frontend compatibility."""
+    provider, model, api_key = _AI_CONFIG_CACHE["provider"], _AI_CONFIG_CACHE["model"], _AI_CONFIG_CACHE["api_key"]
+    if not provider or not api_key:
+        return "AI insight unavailable — no AI provider is configured. Set one up in Settings > AI Config.", 0
+
+    caller = _AI_PROVIDER_CALLERS.get(provider)
+    if caller is None:
         return "AI insight unavailable.", 0
+
     try:
-        response = await asyncio.to_thread(model.generate_content, prompt)
-        text     = response.text.strip()
-        tokens   = getattr(getattr(response, "usage_metadata", None), "total_token_count", 0)
+        text, tokens = await asyncio.to_thread(caller, model, api_key, prompt)
         _GEMINI_TOKEN_LOG.append({
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "tokens":    int(tokens),
-            "model":     getattr(model, "model_name", "unknown"),
+            "tokens":    tokens,
+            "model":     f"{provider}/{model}",
         })
-        return text, int(tokens)
+        return text, tokens
     except ResourceExhausted:
-        return "Gemini rate limit reached. Please wait 60 seconds before requesting another insight.", 0
+        return "AI rate limit reached. Please wait 60 seconds before requesting another insight.", 0
     except Exception as _e:
         if "429" in str(_e) or "rate limit" in str(_e).lower() or "quota" in str(_e).lower():
-            return "Gemini rate limit reached. Please wait 60 seconds before requesting another insight.", 0
+            return "AI rate limit reached. Please wait 60 seconds before requesting another insight.", 0
         return "AI insight unavailable.", 0
+
+
+class AIConfigUpdate(BaseModel):
+    provider: str = Field(..., max_length=20)
+    model:    str = Field(..., max_length=100)
+    # Blank/omitted keeps whatever key is already stored — an admin
+    # switching models shouldn't have to re-paste the same key every time.
+    api_key:  str | None = Field(None, max_length=2000)
+
+
+def _mask_key_preview(plaintext: str | None) -> str | None:
+    if not plaintext:
+        return None
+    if len(plaintext) <= 4:
+        return "••••"
+    return f"••••{plaintext[-4:]}"
+
+
+@app.get("/api/ai-config", tags=["AI Config"])
+async def get_ai_config(
+    user: dict         = Depends(require_head_of_school),
+    db:   AsyncSession = Depends(get_db),
+):
+    """Current AI provider config — admin-only. Never returns the real API
+    key (see AIProviderConfig's docstring): only whether one is set and a
+    masked last-4-characters preview, plus the curated model list per
+    provider so the frontend's dropdowns don't need their own copy of it."""
+    row = await db.get(AIProviderConfig, 1)
+    api_key = decrypt_secret(row.encrypted_api_key, SECRET_KEY) if row and row.encrypted_api_key else None
+    return {
+        "provider":          row.provider if row else "gemini",
+        "model":             row.model if row else "gemini-1.5-pro",
+        "has_key":           bool(api_key),
+        "key_preview":       _mask_key_preview(api_key),
+        "updated_by":        row.updated_by if row else None,
+        "updated_at":        row.updated_at.isoformat() if row and row.updated_at else None,
+        "available_models":  AI_MODELS_BY_PROVIDER,
+    }
+
+
+@app.put("/api/ai-config", tags=["AI Config"])
+async def update_ai_config(
+    req:  AIConfigUpdate,
+    user: dict         = Depends(require_head_of_school),
+    db:   AsyncSession = Depends(get_db),
+):
+    """Configure which AI provider/model/key powers every AI-insight
+    endpoint — admin only. This is the replacement for hand-editing
+    GEMINI_API_KEY and redeploying: the next AI call reads whatever is
+    saved here (see _refresh_ai_config_cache, called right after commit)."""
+    if req.provider not in _AI_PROVIDERS:
+        raise HTTPException(422, f"provider must be one of: {', '.join(_AI_PROVIDERS)}")
+    valid_model_ids = {m["id"] for m in AI_MODELS_BY_PROVIDER[req.provider]}
+    if req.model not in valid_model_ids:
+        raise HTTPException(422, f"model must be one of: {', '.join(sorted(valid_model_ids))}")
+
+    row = await db.get(AIProviderConfig, 1)
+    if row is None:
+        row = AIProviderConfig(id=1)
+        db.add(row)
+
+    now = datetime.now(timezone.utc)
+    row.provider = req.provider
+    row.model    = req.model
+    if req.api_key:
+        row.encrypted_api_key = encrypt_secret(req.api_key, SECRET_KEY)
+    row.updated_by = user["sub"]
+    row.updated_at = now
+
+    await _append_audit_db(
+        db, user_uid=user["sub"], action_type="Settings Changed", status="Success",
+        detail=f"Updated AI Config — provider={req.provider}, model={req.model}",
+    )
+    await db.commit()
+    await _refresh_ai_config_cache()
+
+    return {
+        "provider":    req.provider,
+        "model":       req.model,
+        "has_key":     bool(_AI_CONFIG_CACHE["api_key"]),
+        "key_preview": _mask_key_preview(_AI_CONFIG_CACHE["api_key"]),
+        "updated_by":  user["sub"],
+        "updated_at":  now.isoformat(),
+    }
 
 
 @app.post("/api/predict", tags=["ML"])
@@ -3781,7 +3969,7 @@ async def gemini_alert(
         f"Weakest assessment type: {stats['weakest_type']}. "
         "Write ONE alert sentence for a lecturer. Be specific. Mention the subject name and the change."
     )
-    alert, tokens = await _gemini_call(_flash_model, prompt)
+    alert, tokens = await _ai_call(prompt)
     await _append_audit_db(db, user_uid=user["sub"], action_type="AI Request",
                            status="Success",
                            detail=f"Gemini alert requested for {req.subject or 'all subjects'}")
@@ -3805,11 +3993,11 @@ async def gemini_analyse(
         "Write a 3-4 sentence analysis for a lecturer. "
         "Be factual. Use the exact numbers provided. Recommend one action."
     )
-    analysis, tokens = await _gemini_call(_pro_model, prompt)
+    analysis, tokens = await _ai_call(prompt)
     await _append_audit_db(db, user_uid=user["sub"], action_type="AI Request",
                            status="Success",
                            detail=f"Gemini analysis requested for {req.subject}")
-    return {"analysis": analysis, "tokens_used": tokens, "model": "gemini-1.5-pro"}
+    return {"analysis": analysis, "tokens_used": tokens, "model": f"{_AI_CONFIG_CACHE['provider']}/{_AI_CONFIG_CACHE['model']}"}
 
 
 @app.post("/api/gemini/ask", tags=["Gemini"])
@@ -3828,11 +4016,11 @@ async def gemini_ask(
         f"Lecturer question: {req.question}. "
         "Answer in 2-3 sentences using the data provided. Be specific and actionable."
     )
-    answer, tokens = await _gemini_call(_pro_model, prompt)
+    answer, tokens = await _ai_call(prompt)
     await _append_audit_db(db, user_uid=user["sub"], action_type="AI Request",
                            status="Success",
                            detail=f"Gemini question asked about {req.subject or 'institution'}")
-    return {"answer": answer, "tokens_used": tokens, "model": "gemini-1.5-pro"}
+    return {"answer": answer, "tokens_used": tokens, "model": f"{_AI_CONFIG_CACHE['provider']}/{_AI_CONFIG_CACHE['model']}"}
 
 
 @app.post("/api/gemini/institution-alert", tags=["Gemini"])
@@ -3855,7 +4043,7 @@ async def gemini_institution_alert(
         f"Top failing: {top3}. "
         "Write ONE alert sentence for the Head of Technology. Name specific subjects. Be direct."
     )
-    alert, tokens = await _gemini_call(_flash_model, prompt)
+    alert, tokens = await _ai_call(prompt)
     await _append_audit_db(db, user_uid=user["sub"], action_type="AI Request",
                            status="Success", detail="Institution alert requested")
     return {"alert": alert, "tokens_used": tokens}
@@ -3876,10 +4064,10 @@ async def gemini_institution_analyse(
         "Write a 4-5 sentence analysis for the Head of Technology. "
         "Be factual, use exact numbers, recommend two specific actions."
     )
-    analysis, tokens = await _gemini_call(_pro_model, prompt)
+    analysis, tokens = await _ai_call(prompt)
     await _append_audit_db(db, user_uid=user["sub"], action_type="AI Request",
                            status="Success", detail="Institution analysis requested")
-    return {"analysis": analysis, "tokens_used": tokens, "model": "gemini-1.5-pro"}
+    return {"analysis": analysis, "tokens_used": tokens, "model": f"{_AI_CONFIG_CACHE['provider']}/{_AI_CONFIG_CACHE['model']}"}
 
 
 @app.post("/api/gemini/institution-ask", tags=["Gemini"])
@@ -3897,7 +4085,7 @@ async def gemini_institution_ask(
         f"Head of Technology question: {req.question}. "
         "Answer in 2-3 sentences using the data. Be specific."
     )
-    answer, tokens = await _gemini_call(_pro_model, prompt)
+    answer, tokens = await _ai_call(prompt)
     await _append_audit_db(db, user_uid=user["sub"], action_type="AI Request",
                            status="Success", detail="Institution question asked")
     return {"answer": answer, "tokens_used": tokens}

@@ -193,6 +193,7 @@ export default function Sidebar() {
     { label: 'My Profile', icon: <I.Settings />, to: '/settings' },
     ...(isAdmin || isHoS ? [{ label: 'Risk Email Template', icon: <I.AlertTriangle />, to: '/risk-email-template' }] : []),
     ...(isAdmin || isHoS ? [{ label: 'OAuth Providers', icon: <I.Shield />, to: '/oauth-providers' }] : []),
+    ...(isAdmin || isHoS ? [{ label: 'AI Config', icon: <I.AI />, to: '/ai-config' }] : []),
     ...(isAdmin ? [{ label: 'API Console', icon: <I.ApiKey />, to: '/api-console' }] : []),
     ...(isAdmin && isSuperAdmin ? [
       { label: 'User Management', icon: <I.Users />,    to: '/users'     },

@@ -332,6 +332,39 @@ class OAuthProviderConfig(Base):
     )
 
 
+class AIProviderConfig(Base):
+    """
+    Singleton config row (always id=1) for which AI provider/model/API key
+    powers every AI-insight endpoint in this app (the alert/analyse/ask
+    endpoints under /api/gemini/*, kept under that route prefix for
+    frontend compatibility even though they're no longer Gemini-exclusive)
+    — replaces the single hardcoded GEMINI_API_KEY env var + fixed
+    gemini-1.5-flash/pro model pair with an admin-configurable, swappable
+    provider (Anthropic / Gemini / OpenAI) and model, editable from
+    Settings > AI Config.
+
+    api_key is Fernet-encrypted (see app.crypto_utils) — unlike
+    OAuthProviderConfig.client_id (a public identifier), a provider API key
+    is a genuine secret this app sends on the wire on the admin's behalf,
+    so it is never returned in plaintext by the API; GET only exposes
+    whether one is set and a short masked preview.
+    """
+
+    __tablename__ = "ai_provider_configs"
+
+    id: int = Column(Integer, primary_key=True, autoincrement=False)
+
+    provider: str = Column(String(20), nullable=False, default="gemini", comment="'anthropic' | 'gemini' | 'openai'")
+    model:    str = Column(String(100), nullable=False, default="gemini-1.5-pro")
+
+    encrypted_api_key: str | None = Column(Text, nullable=True)
+
+    updated_by: str | None = Column(String(254), nullable=True)
+    updated_at: datetime = Column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False,
+    )
+
+
 class User(AuditMixin, Base):
     """
     Application user account for EDAPT staff / admins.
