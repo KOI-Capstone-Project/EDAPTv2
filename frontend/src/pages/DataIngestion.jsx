@@ -28,6 +28,63 @@ function Spinner({ label = 'Processing…' }) {
   );
 }
 
+// ── Chunked upload ────────────────────────────────────────────────────────────
+// A big CSV sent as one multipart POST turned out to be genuinely fragile:
+// a real 125MB attendance file sat stuck "(pending)" in the browser for
+// 500+ seconds and never completed, even though a curl upload of a
+// similarly sized file to the same endpoint finished in under 90 seconds
+// and the CORS preflight for the browser's own request succeeded
+// instantly — bumping the client timeout alone (see the old comment this
+// replaced) wasn't the real fix. Splitting the file into small sequential
+// chunks (server decides the size at /batch/init) keeps every individual
+// request small regardless of total file size, and gives real progress to
+// show instead of one opaque spinner.
+const UPLOAD_CHUNK_RETRY_LIMIT = 3;
+
+async function uploadFileInChunks(kind, file, onProgress) {
+  const initRes = await api.post(`/api/ingest/${kind}/batch/init`, {
+    filename: file.name, total_size: file.size,
+  });
+  const { batch_id, total_chunks, chunk_size } = initRes.data;
+
+  for (let idx = 0; idx < total_chunks; idx++) {
+    const start = idx * chunk_size;
+    const chunk = file.slice(start, Math.min(start + chunk_size, file.size));
+
+    // Only an actual request failure (network blip, timeout, 5xx) is
+    // retried here — a response that landed fine but reports the batch as
+    // "failed" (bad CSV, size mismatch) is a definitive server-side
+    // rejection that retrying can never fix, so it's thrown once, below,
+    // outside this retry loop.
+    let data = null;
+    let lastErr = null;
+    for (let attempt = 1; attempt <= UPLOAD_CHUNK_RETRY_LIMIT; attempt++) {
+      try {
+        const res = await api.post(
+          `/api/ingest/${kind}/batch/${batch_id}/chunk`,
+          chunk,
+          { params: { chunk_index: idx }, headers: { 'Content-Type': 'application/octet-stream' }, timeout: 60000 },
+        );
+        data = res.data;
+        lastErr = null;
+        break;
+      } catch (err) {
+        lastErr = err;
+        if (attempt < UPLOAD_CHUNK_RETRY_LIMIT) await new Promise(r => setTimeout(r, 800 * attempt));
+      }
+    }
+    if (lastErr) throw lastErr;
+
+    if (data.status === 'failed') {
+      throw Object.assign(new Error(data.error_detail || 'Upload failed.'),
+        { response: { data: { detail: data.error_detail } } });
+    }
+    onProgress(data.received_chunks, total_chunks);
+    if (data.status === 'analyzing') return { analyze_job_id: data.analyze_job_id };
+  }
+  throw new Error('Upload finished without receiving an analysis job.');
+}
+
 // ── Persistent per-kind status — "has this ever been ingested?" survives a
 // refresh because it's derived from the server (GET /api/ingest/dataset-summary
 // + the jobs list), not from React state that resets on page load. ──────────
@@ -63,7 +120,7 @@ function DatasetStatusBadge({ summary, runningJob, nowMs }) {
 
 // ── One upload card — capstone or attendance, fully independent state ────────
 
-function UploadCard({ kind, title, hint, maxSizeMB, analyzeUrl, onJobStarted, onCleared, onDeleteDataset, analysis, restored, activeJob, datasetSummary, runningJob, nowMs }) {
+function UploadCard({ kind, title, hint, maxSizeMB, onJobStarted, onCleared, onDeleteDataset, analysis, restored, activeJob, datasetSummary, runningJob, nowMs }) {
   const fileRef = useRef(null);
   const [dragging,  setDragging]  = useState(false);
   const [file,      setFile]      = useState(null);
@@ -78,6 +135,7 @@ function UploadCard({ kind, title, hint, maxSizeMB, analyzeUrl, onJobStarted, on
   // sending it, which for a real 327k-row / tens-of-MB file is long enough
   // that it looked like nothing was happening.
   const [uploading, setUploading] = useState(false);
+  const [batchProgress, setBatchProgress] = useState(null); // {received, total} | null — chunk-upload progress
 
   // activeJob comes from the parent — it's the SAME state whether this
   // analyze was just started in this browser tab or discovered still
@@ -95,37 +153,25 @@ function UploadCard({ kind, title, hint, maxSizeMB, analyzeUrl, onJobStarted, on
   const analyze = useCallback(async (f) => {
     setError(null);
     setUploading(true);
+    setBatchProgress(null);
     try {
-      const form = new FormData();
-      form.append('file', f);
-      // Override the client's global 30s timeout for this call specifically —
-      // a real, found-and-fixed bug: a large multipart upload (attendance
-      // files run up to 200MB) can legitimately take longer than 30s to
-      // serialize and transmit client-side, well before the server sees
-      // anything. Confirmed via CDP network inspection on a real 34MB
-      // upload: the request was aborted client-side ("canceled: true",
-      // net::ERR_ABORTED) at exactly the 30s mark, even though the
-      // server itself processes the same file in ~1s once it arrives —
-      // this was the browser's own axios timeout firing, not a server or
-      // network problem.
-      //
-      // The upload itself still has to complete as one request/response —
-      // that part of the browser sending bytes genuinely can't be made
-      // resumable — but analyze now only returns a job id; the parent
-      // polls GET /api/ingest/analyze-jobs/{job_id} to actually finish, so
-      // once the upload has landed, a refresh no longer loses the analysis.
-      const res = await api.post(analyzeUrl, form, {
-        headers: { 'Content-Type': 'multipart/form-data' },
-        timeout: 600000,
+      // Uploaded in small chunks (see uploadFileInChunks above), not one
+      // multipart request — analyze itself still only returns a job id;
+      // the parent polls GET /api/ingest/analyze-jobs/{job_id} to actually
+      // finish, so once the upload has landed, a refresh no longer loses
+      // the analysis.
+      const { analyze_job_id } = await uploadFileInChunks(kind, f, (received, total) => {
+        setBatchProgress({ received, total });
       });
-      onJobStarted(kind, res.data.job_id, f);
+      onJobStarted(kind, analyze_job_id, f);
     } catch (err) {
-      setError(err.response?.data?.detail || 'Analysis failed. Please try again.');
+      setError(err.response?.data?.detail || 'Upload failed. Please try again.');
       setFile(null);
     } finally {
       setUploading(false);
+      setBatchProgress(null);
     }
-  }, [analyzeUrl, kind, onJobStarted]);
+  }, [kind, onJobStarted]);
 
   const pickFile = useCallback(f => {
     if (!f) return;
@@ -193,7 +239,17 @@ function UploadCard({ kind, title, hint, maxSizeMB, analyzeUrl, onJobStarted, on
         )}
       </div>
 
-      {isAnalyzing && <p style={s.statusLine}><Spinner label={uploading ? 'Uploading…' : 'Analyzing…'} /></p>}
+      {isAnalyzing && (
+        <p style={s.statusLine}>
+          <Spinner label={
+            uploading
+              ? (batchProgress && batchProgress.total > 1
+                  ? `Uploading… ${batchProgress.received}/${batchProgress.total} chunks (${Math.round(batchProgress.received / batchProgress.total * 100)}%)`
+                  : 'Uploading…')
+              : 'Analyzing…'
+          } />
+        </p>
+      )}
       {(error || jobError) && <p style={s.errorLine}>⚠ {error || jobError}</p>}
       {!isAnalyzing && analysis && !restored && (
         <div style={s.analyzedRow}>
@@ -473,6 +529,63 @@ function IngestJobsPanel({ jobs, nowMs }) {
   );
 }
 
+// ── Batch uploads panel ─────────────────────────────────────────────────────
+// A batch's own lifecycle only ever reaches "uploading" (still receiving
+// chunks) or a terminal "failed" (a chunk-integrity problem) / "analyzing"
+// (every chunk landed, handed off to the AnalyzeJob shown in Ingestion
+// Activity) — this panel is specifically about the getting-the-bytes-there
+// phase, not a duplicate of the analyze/confirm outcome.
+
+function BatchRow({ batch, nowMs }) {
+  const pct = batch.total_chunks ? Math.round((batch.received_chunks / batch.total_chunks) * 100) : 0;
+  const isUploading = batch.status === 'uploading';
+  const isFailed    = batch.status === 'failed';
+  const dotStyle  = isUploading ? s.jobDotRunning : isFailed ? s.jobDotFailed : s.jobDotSuccess;
+  const pillStyle = isUploading ? s.jobStatusRunning : isFailed ? s.jobStatusFailed : s.jobStatusSuccess;
+
+  return (
+    <div style={s.jobRow}>
+      <div style={s.jobRowTop}>
+        <span style={{ ...s.jobDot, ...dotStyle }} />
+        <span style={s.jobKind}>{KIND_LABEL[batch.kind] || batch.kind}</span>
+        <span style={s.jobPhaseTag}>Upload</span>
+        <span style={s.jobFilename}>{batch.filename}</span>
+        <span style={{ ...s.jobStatusPill, ...pillStyle }}>
+          {isUploading ? `${pct}%` : isFailed ? 'Failed' : 'Uploaded'}
+        </span>
+      </div>
+      <div style={s.jobRowMeta}>
+        {isUploading
+          ? <>Started by {batch.started_by} — {batch.received_chunks}/{batch.total_chunks} chunks ({pct}%), {formatElapsed(batch.started_at, nowMs)}</>
+          : <>Started by {batch.started_by} · {timeAgo(batch.finished_at || batch.started_at, nowMs)}</>}
+      </div>
+      {batch.status === 'analyzing' && batch.analyze_job_id && (
+        <div style={s.jobResult}>
+          <span>All {batch.total_chunks} chunks received — see Ingestion Activity for analysis progress</span>
+        </div>
+      )}
+      {isFailed && <div style={s.jobError}>⚠ {batch.error_detail || 'Upload failed.'}</div>}
+    </div>
+  );
+}
+
+function BatchUploadsPanel({ batches, nowMs }) {
+  return (
+    <div style={s.card}>
+      <h3 style={s.cardTitle}>Batch Uploads</h3>
+      {batches.length === 0 ? (
+        <p style={s.emptyNote}>
+          No chunked uploads yet — large files are automatically split into small pieces and uploaded one at a time; progress will show here.
+        </p>
+      ) : (
+        <div style={s.jobList}>
+          {batches.map(b => <BatchRow key={b.id} batch={b} nowMs={nowMs} />)}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Incremental vs. Override wizard ────────────────────────────────────────────
 // Shown at confirm time only for a kind that already has live data — with
 // nothing to merge into or replace yet, there's no real choice to make, so a
@@ -544,6 +657,8 @@ export default function DataIngestion() {
   const [committing, setCommitting] = useState(false);
   const [commitError, setCommitError] = useState(null);
 
+  const [activityTab, setActivityTab] = useState('ingestion'); // 'ingestion' | 'batches'
+
   // Info about a pending upload resumed from the server on page load (no
   // File object — the browser never held one this session). Kept separate
   // from *Analysis so the "Resumed …" banner can tell that case apart from
@@ -580,11 +695,26 @@ export default function DataIngestion() {
     } catch { /* history is best-effort; leave the prior list showing */ }
   }, []);
 
-  useEffect(() => { fetchJobs(); fetchAnalyzeJobsHistory(); }, [fetchJobs, fetchAnalyzeJobsHistory]);
+  // Chunked-upload batches (see UploadBatch in backend/app/db/models.py) —
+  // shown in their own "Batch Uploads" tab rather than folded into the
+  // Ingestion Activity timeline: a batch's own status only ever reaches
+  // "uploading" or "failed"/"analyzing" (getting-the-bytes-there), while
+  // the actual analyze/confirm outcome is the existing AnalyzeJob/IngestJob
+  // this hands off to (analyze_job_id) — that job already shows up in
+  // Ingestion Activity like any other upload once the bytes have landed.
+  const [batches, setBatches] = useState([]);
+  const fetchBatches = useCallback(async () => {
+    try {
+      const res = await api.get('/api/ingest/batches', { params: { limit: 20 } });
+      setBatches(res.data.batches);
+    } catch { /* history is best-effort; leave the prior list showing */ }
+  }, []);
+
+  useEffect(() => { fetchJobs(); fetchAnalyzeJobsHistory(); fetchBatches(); }, [fetchJobs, fetchAnalyzeJobsHistory, fetchBatches]);
   useEffect(() => {
-    const timer = setInterval(() => { fetchJobs(); fetchAnalyzeJobsHistory(); }, 5000);
+    const timer = setInterval(() => { fetchJobs(); fetchAnalyzeJobsHistory(); fetchBatches(); }, 5000);
     return () => clearInterval(timer);
-  }, [fetchJobs, fetchAnalyzeJobsHistory]);
+  }, [fetchJobs, fetchAnalyzeJobsHistory, fetchBatches]);
   useEffect(() => {
     const timer = setInterval(() => setNowMs(Date.now()), 1000);
     return () => clearInterval(timer);
@@ -750,13 +880,10 @@ export default function DataIngestion() {
     const { setAnalysis } = kindSetters(kind);
     try {
       if (file) {
-        const url = kind === 'capstone' ? '/api/ingest/capstone/analyze' : '/api/ingest/attendance/analyze';
-        const form = new FormData();
-        form.append('file', file);
-        const jobRes = await api.post(url, form, { headers: { 'Content-Type': 'multipart/form-data' } });
+        const { analyze_job_id } = await uploadFileInChunks(kind, file, () => {});
         // eslint-disable-next-line no-constant-condition
         while (true) {
-          const job = (await api.get(`/api/ingest/analyze-jobs/${jobRes.data.job_id}`)).data;
+          const job = (await api.get(`/api/ingest/analyze-jobs/${analyze_job_id}`)).data;
           if (job.status === 'running') { await new Promise(r => setTimeout(r, 1500)); continue; }
           if (job.status === 'success') setAnalysis(job.result);
           break;
@@ -866,7 +993,6 @@ export default function DataIngestion() {
           title="Capstone Data"
           hint="Supported: .csv — Max 50MB"
           maxSizeMB={50}
-          analyzeUrl="/api/ingest/capstone/analyze"
           onJobStarted={handleJobStarted}
           onCleared={handleCleared}
           onDeleteDataset={handleDeleteDataset}
@@ -882,7 +1008,6 @@ export default function DataIngestion() {
           title="Attendance Data"
           hint="Supported: .csv — Max 200MB"
           maxSizeMB={200}
-          analyzeUrl="/api/ingest/attendance/analyze"
           onJobStarted={handleJobStarted}
           onCleared={handleCleared}
           onDeleteDataset={handleDeleteDataset}
@@ -915,9 +1040,27 @@ export default function DataIngestion() {
         </button>
       </div>
 
-      {/* ── Ingestion activity — real background job status, not an estimate.
-          Covers both phases: analyze (parse/classify) and confirm (commit). ── */}
-      <IngestJobsPanel jobs={activity} nowMs={nowMs} />
+      {/* ── Ingestion activity / Batch uploads — real background job status,
+          not an estimate. Ingestion Activity covers analyze (parse/classify)
+          and confirm (commit); Batch Uploads covers the chunked-upload
+          transfer phase for large files (see UploadBatch's docstring). ── */}
+      <div style={s.tabRow}>
+        <button
+          style={activityTab === 'ingestion' ? s.tabActive : s.tab}
+          onClick={() => setActivityTab('ingestion')}
+        >
+          Ingestion Activity
+        </button>
+        <button
+          style={activityTab === 'batches' ? s.tabActive : s.tab}
+          onClick={() => setActivityTab('batches')}
+        >
+          Batch Uploads
+        </button>
+      </div>
+      {activityTab === 'ingestion'
+        ? <IngestJobsPanel jobs={activity} nowMs={nowMs} />
+        : <BatchUploadsPanel batches={batches} nowMs={nowMs} />}
 
       {wizardPending && (
         <IngestModeWizard
@@ -1010,6 +1153,16 @@ const s = {
   confirmDeleteYesBtn: {
     padding: '5px 12px', borderRadius: 7, border: 'none',
     background: '#DC2626', color: '#fff', fontSize: 11.5, fontWeight: 600, cursor: 'pointer',
+  },
+
+  tabRow: { display: 'flex', gap: 4, marginBottom: 12 },
+  tab: {
+    padding: '8px 16px', borderRadius: '8px 8px 0 0', border: 'none', borderBottom: '2px solid transparent',
+    background: 'transparent', color: '#5A7A8A', fontSize: 13, fontWeight: 600, cursor: 'pointer',
+  },
+  tabActive: {
+    padding: '8px 16px', borderRadius: '8px 8px 0 0', border: 'none', borderBottom: '2px solid #2E6E8E',
+    background: 'transparent', color: '#1A2E40', fontSize: 13, fontWeight: 600, cursor: 'pointer',
   },
 
   card:      { background: '#fff', border: '0.5px solid #DDE4EA', borderRadius: 12, padding: '20px', marginBottom: 20 },

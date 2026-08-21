@@ -28,7 +28,7 @@ from typing import Annotated, Optional
 import joblib
 import pandas as pd
 from dotenv import load_dotenv
-from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, Query, Response, UploadFile, status
+from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, Query, Request, Response, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.security import APIKeyHeader, OAuth2PasswordBearer
@@ -40,7 +40,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
-from app.db.models import AIProviderConfig, AnalyzeJob, ApiKey, AuditLog, Base, IngestJob, Intervention, OAuthProviderConfig, PendingIngest, Prediction, RiskEmailTemplate, User as UserModel
+from app.db.models import AIProviderConfig, AnalyzeJob, ApiKey, AuditLog, Base, IngestJob, Intervention, OAuthProviderConfig, PendingIngest, Prediction, RiskEmailTemplate, UploadBatch, User as UserModel
 from app import oauth_providers
 from app.crypto_utils import encrypt_secret, decrypt_secret
 # Light module — pure functions over an already-computed SHAP dict, no model
@@ -2248,6 +2248,204 @@ async def ingest_attendance_analyze(
 
     background_tasks.add_task(_run_analyze_job, job.id, content, file.filename, user["sub"], "attendance")
     return {"job_id": job.id, "status": "running"}
+
+
+# ── Chunked upload — see UploadBatch's docstring for why this exists ────────
+
+UPLOAD_CHUNK_MAX_BYTES = 10 * 1024 * 1024  # 10 MiB per chunk
+
+
+def _batch_max_bytes(kind: str) -> int:
+    return MAX_ATTENDANCE_UPLOAD_BYTES if kind == "attendance" else MAX_UPLOAD_BYTES
+
+
+def _batch_storage_dir() -> Path:
+    import app.ml.train_model as train_model_mod
+    d = train_model_mod.INGESTED_DATA_DIR / "batch_uploads"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _batch_to_dict(b: UploadBatch) -> dict:
+    return {
+        "id":              b.id,
+        "kind":            b.kind,
+        "filename":        b.filename,
+        "status":          b.status,
+        "total_size":      b.total_size,
+        "chunk_size":      b.chunk_size,
+        "total_chunks":    b.total_chunks,
+        "received_chunks": b.received_chunks,
+        "analyze_job_id":  b.analyze_job_id,
+        "started_by":      b.started_by,
+        "started_at":      b.started_at.isoformat() if b.started_at else None,
+        "finished_at":     b.finished_at.isoformat() if b.finished_at else None,
+        "error_detail":    b.error_detail,
+    }
+
+
+class BatchInitRequest(BaseModel):
+    filename:   str = Field(..., min_length=1, max_length=255)
+    total_size: int = Field(..., gt=0)
+
+
+@app.post("/api/ingest/{kind}/batch/init", status_code=201, tags=["Ingest"])
+async def ingest_batch_init(
+    kind: str,
+    req: BatchInitRequest,
+    user: dict = Depends(require_head_of_school),
+    db:   AsyncSession = Depends(get_db),
+):
+    """
+    Start a chunked upload: declares the file's name/size up front so the
+    size limit can be checked, and total_chunks computed, before a single
+    byte of the file itself arrives. The browser then POSTs the file in
+    UPLOAD_CHUNK_MAX_BYTES-sized pieces to .../batch/{batch_id}/chunk.
+    """
+    if kind not in ("capstone", "attendance"):
+        raise HTTPException(400, "kind must be 'capstone' or 'attendance'")
+
+    ext = req.filename.rsplit(".", 1)[-1].lower()
+    if ext != "csv":
+        raise HTTPException(400, "Unsupported file type. Only .csv files are accepted.")
+
+    max_bytes = _batch_max_bytes(kind)
+    if req.total_size > max_bytes:
+        raise HTTPException(400, f"File exceeds the {max_bytes // (1024*1024)} MB limit.")
+
+    total_chunks = math.ceil(req.total_size / UPLOAD_CHUNK_MAX_BYTES)
+
+    batch = UploadBatch(
+        kind=kind, filename=req.filename, status="uploading",
+        total_size=req.total_size, chunk_size=UPLOAD_CHUNK_MAX_BYTES,
+        total_chunks=total_chunks, received_chunks=0,
+        storage_path="", started_by=user["sub"],
+    )
+    db.add(batch)
+    await db.flush()
+    storage_path = _batch_storage_dir() / f"batch_{batch.id}.part"
+    storage_path.write_bytes(b"")
+    batch.storage_path = str(storage_path)
+    await db.commit()
+
+    return {"batch_id": batch.id, "total_chunks": total_chunks, "chunk_size": UPLOAD_CHUNK_MAX_BYTES}
+
+
+@app.post("/api/ingest/{kind}/batch/{batch_id}/chunk", tags=["Ingest"])
+async def ingest_batch_chunk(
+    kind: str,
+    batch_id: int,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    chunk_index: int = Query(..., ge=0),
+    user: dict = Depends(require_head_of_school),
+    db:   AsyncSession = Depends(get_db),
+):
+    """
+    Upload one chunk of a batch started by .../batch/init. Chunks must
+    arrive strictly in order (chunk_index must equal batch.received_chunks,
+    the next expected index) — a retry of the immediately preceding chunk
+    is an idempotent no-op rather than an error, so the client can safely
+    retry one failed chunk POST without first checking what already landed.
+
+    Once the last chunk arrives, hands the assembled file to the same
+    analyze pipeline (_run_analyze_job) the old single-shot upload used —
+    from this point on the browser polls the resulting AnalyzeJob exactly
+    like it always has for a regular upload.
+    """
+    batch = await db.get(UploadBatch, batch_id)
+    if batch is None or batch.kind != kind:
+        raise HTTPException(404, "Upload batch not found.")
+    if batch.status != "uploading":
+        raise HTTPException(409, f"This batch is no longer accepting chunks (status: {batch.status}).")
+
+    if chunk_index == batch.received_chunks - 1:
+        return {"received_chunks": batch.received_chunks, "total_chunks": batch.total_chunks, "status": batch.status}
+    if chunk_index != batch.received_chunks:
+        raise HTTPException(
+            409,
+            f"Expected chunk {batch.received_chunks}, got {chunk_index}. "
+            f"Chunks must be uploaded in order — resync from received_chunks.",
+        )
+
+    chunk_bytes = await request.body()
+    if not chunk_bytes:
+        raise HTTPException(400, "Empty chunk body.")
+
+    with open(batch.storage_path, "ab") as f:
+        f.write(chunk_bytes)
+    batch.received_chunks += 1
+
+    if batch.received_chunks < batch.total_chunks:
+        await db.commit()
+        return {"received_chunks": batch.received_chunks, "total_chunks": batch.total_chunks, "status": batch.status}
+
+    # Last chunk just landed — assemble, validate, and hand off to analyze.
+    assembled_path = Path(batch.storage_path)
+    content = assembled_path.read_bytes()
+    assembled_path.unlink(missing_ok=True)
+
+    if len(content) != batch.total_size:
+        batch.status = "failed"
+        batch.error_detail = (
+            f"Assembled file size ({len(content):,} bytes) didn't match the "
+            f"declared size ({batch.total_size:,} bytes) — a chunk may have "
+            f"been dropped or duplicated. Please retry the upload."
+        )
+        batch.finished_at = datetime.now(timezone.utc)
+        await db.commit()
+        return {"received_chunks": batch.received_chunks, "total_chunks": batch.total_chunks,
+                "status": "failed", "error_detail": batch.error_detail}
+
+    err = _reject_upload_common(content, _batch_max_bytes(kind))
+    if err:
+        batch.status = "failed"
+        batch.error_detail = err
+        batch.finished_at = datetime.now(timezone.utc)
+        await _append_audit_db(db, user_uid=user["sub"], action_type="Data Upload",
+                               status="Alert", detail=f"Rejected {kind} batch upload: {err}")
+        await db.commit()
+        return {"received_chunks": batch.received_chunks, "total_chunks": batch.total_chunks,
+                "status": "failed", "error_detail": err}
+
+    job = AnalyzeJob(kind=kind, filename=batch.filename, started_by=user["sub"])
+    db.add(job)
+    await db.flush()
+
+    batch.status = "analyzing"
+    batch.analyze_job_id = job.id
+    batch.finished_at = datetime.now(timezone.utc)
+    await db.commit()
+
+    background_tasks.add_task(_run_analyze_job, job.id, content, batch.filename, user["sub"], kind)
+
+    return {"received_chunks": batch.received_chunks, "total_chunks": batch.total_chunks,
+            "status": "analyzing", "analyze_job_id": job.id}
+
+
+@app.get("/api/ingest/{kind}/batch/{batch_id}", tags=["Ingest"])
+async def ingest_batch_status(
+    kind: str,
+    batch_id: int,
+    user: dict = Depends(require_head_of_school),
+    db:   AsyncSession = Depends(get_db),
+):
+    batch = await db.get(UploadBatch, batch_id)
+    if batch is None or batch.kind != kind:
+        raise HTTPException(404, "Upload batch not found.")
+    return _batch_to_dict(batch)
+
+
+@app.get("/api/ingest/batches", tags=["Ingest"])
+async def list_upload_batches(
+    limit: int = Query(20, ge=1, le=100),
+    user: dict = Depends(require_head_of_school),
+    db:   AsyncSession = Depends(get_db),
+):
+    """Recent chunked-upload batches, most recent first — powers the Data
+    Ingestion page's Batch Upload history tab."""
+    result = await db.execute(select(UploadBatch).order_by(UploadBatch.id.desc()).limit(limit))
+    return {"batches": [_batch_to_dict(b) for b in result.scalars().all()]}
 
 
 ATTENDANCE_MERGE_KEY_COLS = ["STUDENTID_MASKED", "course", "study_period_code", "cls_session_no"]

@@ -570,6 +570,75 @@ class AnalyzeJob(Base):
     error_detail: str | None = Column(Text, nullable=True)
 
 
+class UploadBatch(Base):
+    """
+    Tracks a large file upload split into small sequential chunks from the
+    browser, instead of one giant multipart request.
+
+    Confirmed real-world failure mode this replaces: a 125MB attendance CSV
+    sent as a single POST sat stuck "(pending)" in the browser for 500+
+    seconds and never completed, even though a direct curl of a similarly
+    sized file to the same endpoint finished in under 90 seconds and the
+    CORS preflight for the browser's own request succeeded instantly — the
+    backend and network path were fine, something about handling one huge
+    request client-side wasn't. Splitting the upload into small (~10MB)
+    chunks keeps every individual request small regardless of total file
+    size, and gives real progress to show ("34/58 chunks") instead of one
+    opaque spinner.
+
+    Chunks must arrive strictly in order — received_chunks is both the
+    count received so far and the index of the next chunk expected. This
+    project has no need for concurrent/out-of-order chunk upload, and
+    requiring order keeps the server-side append logic a plain byte-append
+    rather than a seek-and-write-at-offset. Re-POSTing the immediately
+    preceding chunk index is treated as an idempotent no-op, not an error,
+    so the client can safely retry one failed chunk without first checking
+    what already landed.
+
+    Once the last chunk arrives, the assembled file is handed to the exact
+    same analyze pipeline the old single-shot upload used (_run_analyze_job)
+    — analyze_job_id links to that follow-on AnalyzeJob so the browser can
+    switch from polling batch progress to polling the AnalyzeJob it already
+    knows how to render, rather than this table needing its own duplicate
+    "analyzing/success" result shape.
+    """
+
+    __tablename__ = "upload_batches"
+
+    id: int = Column(Integer, primary_key=True, autoincrement=True)
+
+    kind: str = Column(String(20), nullable=False, comment="'capstone' or 'attendance'")
+
+    status: str = Column(
+        String(20), nullable=False, default="uploading", server_default="uploading",
+        comment="uploading | analyzing | failed",
+    )
+
+    filename: str | None = Column(String(255), nullable=True)
+
+    total_size:   int = Column(BigInteger, nullable=False, comment="Total file size in bytes, declared at init")
+    chunk_size:   int = Column(Integer, nullable=False, comment="Bytes per chunk, declared at init")
+    total_chunks: int = Column(Integer, nullable=False)
+
+    received_chunks: int = Column(
+        Integer, nullable=False, default=0, server_default="0",
+        comment="Count received so far — also the index of the next chunk expected",
+    )
+
+    storage_path: str = Column(String(500), nullable=False, comment="Server-side path chunks are appended to")
+
+    analyze_job_id: int | None = Column(
+        Integer, ForeignKey("analyze_jobs.id"), nullable=True,
+        comment="Set once all chunks have landed and analysis has been handed off",
+    )
+
+    started_by: str = Column(String(254), nullable=False)
+    started_at: datetime = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    finished_at: datetime | None = Column(DateTime(timezone=True), nullable=True)
+
+    error_detail: str | None = Column(Text, nullable=True)
+
+
 class AuditLog(Base):
     """
     Persistent audit trail for all significant system events.
