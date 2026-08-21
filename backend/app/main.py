@@ -146,15 +146,25 @@ def _attendance_raw_sessions() -> pd.DataFrame:
     """Raw (non-aggregated) attendance sessions for the roster endpoint's
     mid-term truncation — reuses train_model.load_attendance_raw() rather
     than re-implementing the same filter/join logic. Cached against the
-    current _DATA's identity so ingestion (which replaces _DATA wholesale)
-    correctly invalidates it."""
+    current _DATA's identity (and the resolved attendance path) so
+    ingestion of either dataset correctly invalidates it.
+
+    Explicitly passes _current_attendance_path() — without this,
+    load_attendance_raw() falls back to its own module-level
+    ATTENDANCE_PATH (the bundled /data sample), completely ignoring
+    whatever attendance file an admin has actually ingested. That bundled
+    file isn't even present in every environment, so this surfaced as a
+    500 on Students at Risk for any mid-term study period, on an otherwise
+    fully working ingested dataset — a real, confirmed bug, not a
+    hypothetical one."""
     from app.ml.train_model import load_attendance_raw
-    cache_key = id(_DATA)
+    attendance_path = _current_attendance_path()
+    cache_key = (id(_DATA), str(attendance_path))
     if cache_key not in _attendance_raw_sessions_cache:
         _attendance_raw_sessions_cache.clear()
-        _attendance_raw_sessions_cache[cache_key] = load_attendance_raw(_DATA).sort_values(
-            ["class_no", "actv_no", "cls_session_no"]
-        )
+        _attendance_raw_sessions_cache[cache_key] = load_attendance_raw(
+            _DATA, attendance_path=attendance_path
+        ).sort_values(["class_no", "actv_no", "cls_session_no"])
     return _attendance_raw_sessions_cache[cache_key]
 
 

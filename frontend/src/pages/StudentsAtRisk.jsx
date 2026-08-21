@@ -85,7 +85,14 @@ export default function StudentsAtRisk() {
     if (!studyPeriod) return;
 
     setLoading(true);
-    api.get('/api/students-at-risk', { params: { study_period: studyPeriod } })
+    // Overrides the client's global 30s timeout — this aggregates every
+    // visible subject's roster (real per-student ML inference) in one
+    // request, sequentially, so on a full real dataset (129 subjects) it
+    // can genuinely take under a minute. Confirmed on real data: ~50s for
+    // a full admin view once actual predictions run end-to-end, well past
+    // the default timeout, which would abort the request client-side
+    // before the (perfectly valid) response ever arrives.
+    api.get('/api/students-at-risk', { params: { study_period: studyPeriod }, timeout: 120000 })
       .then(r => {
         setStudents(r.data.students || []);
         setSubjectsIncluded(r.data.subjects_included || 0);
