@@ -18,7 +18,10 @@ import ModelHealth       from './pages/ModelHealth';
 import UserManagement     from './pages/UserManagement';
 import ApiConsole         from './pages/ApiConsole';
 import PredictorView      from './pages/PredictorView';
+import StudentsAtRisk     from './pages/StudentsAtRisk';
 import SettingsView       from './pages/SettingsView';
+import RiskEmailTemplateView from './pages/RiskEmailTemplateView';
+import OAuthProvidersView from './pages/OAuthProvidersView';
 
 // Auth utilities
 import { getToken, getUser } from './utils/auth';
@@ -93,6 +96,11 @@ export default function App() {
       <Route path="/dashboard/lecturer" element={<Protected><LecturerDashboard /></Protected>} />
       <Route path="/explorer"            element={<Protected><ExplorerView isLecturer={true} /></Protected>} />
       <Route path="/predictor"           element={<Protected><PredictorView isAdmin={false} /></Protected>} />
+      {/* Visible to every authenticated role (lecturer, Head of School, Head
+          of Technology) — the backend (GET /api/students-at-risk) already
+          scopes rows to whatever subjects the requesting user can see, so
+          one shared route/guard is enough; no admin-only content lives here. */}
+      <Route path="/students-at-risk"    element={<Protected><StudentsAtRisk /></Protected>} />
 
       {/* Admin dashboard */}
       <Route path="/dashboard/admin" element={
@@ -112,6 +120,12 @@ export default function App() {
       <Route path="/predictive-reports" element={<AdminProtected><PredictorView isAdmin={true} /></AdminProtected>} />
       <Route path="/users"              element={<HoTOnlyProtected><UserManagement /></HoTOnlyProtected>} />
       <Route path="/api-console"        element={<HoTOnlyProtected><ApiConsole /></HoTOnlyProtected>} />
+      {/* Admin only (HoT or HoS) — matches the backend's require_head_of_school
+          gate on GET/PUT /api/risk-email-template. */}
+      <Route path="/risk-email-template" element={<AdminProtected><RiskEmailTemplateView /></AdminProtected>} />
+      {/* Admin only (HoT or HoS) — matches the backend's require_head_of_school
+          gate on GET/PUT /api/oauth-providers. */}
+      <Route path="/oauth-providers" element={<AdminProtected><OAuthProvidersView /></AdminProtected>} />
 
       {/* Shared settings (role-aware) */}
       <Route path="/settings" element={<Protected><SettingsPage /></Protected>} />

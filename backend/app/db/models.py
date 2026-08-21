@@ -266,6 +266,72 @@ class Intervention(Base):
     )
 
 
+class RiskEmailTemplate(Base):
+    """
+    Singleton config row (always id=1) for the "Students at Risk" bulk
+    action's email wording.
+
+    This system has no real student email anywhere — STUDENTID_MASKED is a
+    one-way pseudonym applied upstream, before the data ever reaches this
+    project (see README's masking section). So this is never sent by the
+    app itself: it's reference text a staff member copies into the real
+    email they send on their own, to the real student they personally
+    know, outside this system — the bulk action on the Students at Risk
+    page then logs an `Intervention` row (action_type="email sent") per
+    selected student to record that it happened. One fixed-id row rather
+    than a generic key/value settings table: this is the one piece of
+    admin-configurable free-text copy in the app, so there's no need for
+    a table designed to hold more than that.
+    """
+
+    __tablename__ = "risk_email_templates"
+
+    id: int = Column(Integer, primary_key=True, autoincrement=False)
+
+    subject: str = Column(String(255), nullable=False)
+    body:    str = Column(
+        Text, nullable=False,
+        comment="May contain {{student_id}}, {{subject_code}}, {{study_period}}, {{risk_band}} placeholders",
+    )
+
+    updated_by: str | None = Column(String(254), nullable=True)
+    updated_at: datetime = Column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False,
+    )
+
+
+class OAuthProviderConfig(Base):
+    """
+    Per-provider Google/Microsoft sign-in configuration, editable from
+    Settings > OAuth Providers instead of the GOOGLE_CLIENT_ID /
+    MICROSOFT_CLIENT_ID / MICROSOFT_TENANT_ID environment variables this
+    replaces — previously the one piece of app config that needed a
+    redeploy to change.
+
+    `provider` is a fixed primary key ("google"/"microsoft"); rows are
+    seeded once at startup and never created/deleted through the API,
+    since oauth_providers.py's verification functions only know how to
+    handle these two providers. No client-secret column: this project only
+    implements the ID-token flow (the frontend gets a signed ID token
+    straight from Google/Microsoft's own JS SDK and hands it to us) rather
+    than a server-side authorization-code exchange, so a secret is never
+    needed — client_id is a public identifier, not sensitive, the same way
+    it was already embedded directly in the frontend bundle before this.
+    """
+
+    __tablename__ = "oauth_provider_configs"
+
+    provider:  str      = Column(String(20), primary_key=True)
+    client_id: str      = Column(String(255), nullable=False, default="")
+    tenant_id: str | None = Column(String(255), nullable=True, comment="Microsoft only; blank means 'common'")
+    enabled:   bool     = Column(Boolean, nullable=False, default=False)
+
+    updated_by: str | None = Column(String(254), nullable=True)
+    updated_at: datetime = Column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False,
+    )
+
+
 class User(AuditMixin, Base):
     """
     Application user account for EDAPT staff / admins.
@@ -394,6 +460,11 @@ class IngestJob(Base):
 
     filename: str | None = Column(String(255), nullable=True)
 
+    mode: str | None = Column(
+        String(20), nullable=True,
+        comment="'override' or 'incremental' — the mode this confirm ran with",
+    )
+
     started_by: str = Column(
         String(254), nullable=False,
         comment="Email/uid of the admin who confirmed this ingestion",
@@ -402,9 +473,66 @@ class IngestJob(Base):
     started_at: datetime = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     finished_at: datetime | None = Column(DateTime(timezone=True), nullable=True)
 
+    cleared_at: datetime | None = Column(
+        DateTime(timezone=True), nullable=True,
+        comment=(
+            "Set when DELETE /api/ingest/datasets/{kind} clears the data this "
+            "successful job ingested. The job row itself is kept — this isn't "
+            "an edit to history, just a marker so ingest_dataset_summary's "
+            "'currently active' lookup (latest success, cleared_at IS NULL) "
+            "stops pointing at a job whose data no longer backs the live app."
+        ),
+    )
+
     result: dict | None = Column(
         JSON, nullable=True,
         comment="Same payload the old synchronous confirm endpoint returned, once finished successfully",
+    )
+    error_detail: str | None = Column(Text, nullable=True)
+
+
+class AnalyzeJob(Base):
+    """
+    Tracks one analyze-time parse/classify run so it can happen in the
+    background — the same fix IngestJob already applied to confirm, now
+    applied to the earlier analyze step too.
+
+    Analyze used to run entirely inline in the request: read the upload,
+    parse it with pandas, classify its columns, and write the PendingIngest
+    row, all before responding. A client disconnect partway through (a page
+    refresh, a closed tab) could abort that request — and with it, the
+    PendingIngest write — leaving nothing durable to resume from. Analyze
+    now returns immediately with a job id, the real work runs via
+    BackgroundTasks (unaffected by the client's connection once the
+    response has been sent), and GET /api/ingest/{kind}/analyze-status
+    lets a freshly-loaded page discover a still-running (or just-failed)
+    analyze from before the refresh instead of looking blank.
+    """
+
+    __tablename__ = "analyze_jobs"
+
+    id: int = Column(Integer, primary_key=True, autoincrement=True)
+
+    kind: str = Column(String(20), nullable=False, comment="'capstone' or 'attendance'")
+
+    status: str = Column(
+        String(20), nullable=False, default="running", server_default="running",
+        comment="running | success | failed",
+    )
+
+    filename: str | None = Column(String(255), nullable=True)
+
+    started_by: str = Column(
+        String(254), nullable=False,
+        comment="Email/uid of the admin who uploaded this file",
+    )
+
+    started_at: datetime = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    finished_at: datetime | None = Column(DateTime(timezone=True), nullable=True)
+
+    result: dict | None = Column(
+        JSON, nullable=True,
+        comment="Same {token, row_count, columns, ...} payload the old synchronous analyze endpoint returned",
     )
     error_detail: str | None = Column(Text, nullable=True)
 

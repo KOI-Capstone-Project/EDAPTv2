@@ -40,7 +40,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
-from app.db.models import ApiKey, AuditLog, Base, IngestJob, Intervention, PendingIngest, Prediction, User as UserModel
+from app.db.models import AnalyzeJob, ApiKey, AuditLog, Base, IngestJob, Intervention, OAuthProviderConfig, PendingIngest, Prediction, RiskEmailTemplate, User as UserModel
 from app import oauth_providers
 # Light module — pure functions over an already-computed SHAP dict, no model
 # loading, so it is safe to import at module scope unlike app.ml.predictor.
@@ -389,12 +389,45 @@ def _verify_otp(email: str, code: str) -> bool:
 # applied per request in _role_filter. Head of Technology and Head of School see all
 # rows; Lecturers see only rows matching their assigned subjects.
 _DATA: Optional[pd.DataFrame] = pd.DataFrame()
-
-# Load the bundled development dataset on server start so the demo works without a
-# manual upload. The /api/ingest endpoint handles runtime uploads and overwrites _DATA.
 _DATA_PATH = Path(__file__).parent.parent.parent / "data" / "Capstone_data_20260729.csv"
-try:
-    _df = pd.read_csv(_DATA_PATH)
+
+_ATTENDANCE: Optional[pd.DataFrame] = pd.DataFrame()
+_ATTENDANCE_PATH = Path(__file__).parent.parent.parent / "data" / "masked_attendance.csv.gz"
+
+
+def _current_capstone_path() -> Path:
+    """Whatever capstone CSV is actually backing the live dataset right now:
+    the ingested override (INGESTED_DATA_DIR/ingested_capstone.csv) if an
+    admin has ever confirmed a capstone upload, else the bundled sample
+    file this container started with. Used both at startup — so previously
+    ingested data survives a container restart instead of reverting to the
+    bundled sample (or nothing) — and by build_attendance_features's
+    callers below, which used to hardcode _DATA_PATH regardless of what
+    had actually been ingested (see _do_attendance_confirm)."""
+    import app.ml.train_model as train_model_mod
+    ingested = train_model_mod.INGESTED_DATA_DIR / "ingested_capstone.csv"
+    return ingested if ingested.exists() else _DATA_PATH
+
+
+def _current_attendance_path() -> Path:
+    """Same idea as _current_capstone_path, for the raw attendance file:
+    the ingested override (INGESTED_DATA_DIR/ingested_attendance_raw.csv)
+    if an admin has ever confirmed an attendance upload, else the bundled
+    sample. Without this, _ATTENDANCE silently reverted to the bundled
+    sample (or nothing) on every restart, discarding previously ingested
+    attendance data — the same restart-durability gap _current_capstone_path
+    closes for capstone data."""
+    import app.ml.train_model as train_model_mod
+    ingested = train_model_mod.INGESTED_DATA_DIR / "ingested_attendance_raw.csv"
+    return ingested if ingested.exists() else _ATTENDANCE_PATH
+
+
+def _load_capstone_dataframe(path: Path) -> pd.DataFrame:
+    """Parse+clean one capstone CSV into the shape _DATA expects — shared
+    by the startup load below and by DELETE /api/ingest/datasets/{kind},
+    which needs to reload _DATA from whatever's left (the bundled sample,
+    or nothing) exactly the same way startup does."""
+    _df = pd.read_csv(path)
     _df.columns = [c.strip() for c in _df.columns]
     if "MARKPERCENT" in _df.columns:
         _df["MARKPERCENT"] = pd.to_numeric(_df["MARKPERCENT"], errors="coerce")
@@ -403,12 +436,44 @@ try:
         _df["STUDYPERIOD"] = _df["STUDYPERIOD"].apply(
             lambda x: str(round(float(x), 1)) if pd.notna(x) else ""
         )
-    _DATA = _df
+    return _df
+
+
+def _load_attendance_dataframe() -> pd.DataFrame:
+    """Rebuild _ATTENDANCE from whatever's currently on disk (ingested
+    override or bundled sample, via _current_attendance_path/
+    _current_capstone_path) — shared by the startup load below and by
+    DELETE /api/ingest/datasets/{kind}. Depends on _DATA already being
+    the dataframe you want the PASS target merged from — call this AFTER
+    _DATA is set to whatever it should be."""
+    from app.ml.train_model import collapse_attempts_to_latest_per_type, build_target
+    from app.ml.build_attendance_features import build_attendance_features
+
+    att_features = build_attendance_features(
+        attendance_path=_current_attendance_path(), capstone_path=_current_capstone_path()
+    )
+    if not _DATA.empty:
+        collapsed = collapse_attempts_to_latest_per_type(_DATA.copy())
+        target = build_target(collapsed)
+        att_features = att_features.merge(
+            target, on=["STUDENTID_MASKED", "SUBJECTCODE", "STUDYPERIOD"], how="left"
+        )
+    return att_features
+
+
+# Load the bundled sample, or whatever was last ingested via the UI, on
+# server start — so a real deployment's already-uploaded data survives a
+# restart instead of reverting to the bundled demo file (or nothing at
+# all). The /api/ingest endpoint handles runtime uploads and overwrites
+# _DATA from then on, for the lifetime of this process.
+try:
+    _DATA = _load_capstone_dataframe(_current_capstone_path())
     logger.info("Startup data loaded: %s rows, %d columns", f"{len(_DATA):,}", len(_DATA.columns))
 except FileNotFoundError:
-    logger.error("Startup CSV not found at %s — upload a dataset via /api/ingest", _DATA_PATH)
+    logger.error("Startup CSV not found at %s — upload a dataset via /api/ingest", _current_capstone_path())
 except Exception as _e:
     logger.error("Failed to load startup data: %s", _e)
+
 
 # ── Attendance data store ───────────────────────────────────────────────────
 # Wired in as a standard part of startup, same as _DATA above — not a manual
@@ -418,25 +483,11 @@ except Exception as _e:
 # + build_target, not the row-level PASSED column _DATA uses) merged on, so
 # an attendance-vs-outcome correlation means the same "pass" everywhere else
 # in this project means.
-_ATTENDANCE: Optional[pd.DataFrame] = pd.DataFrame()
-_ATTENDANCE_PATH = Path(__file__).parent.parent.parent / "data" / "masked_attendance.csv.gz"
 try:
-    from app.ml.train_model import collapse_attempts_to_latest_per_type, build_target
-    from app.ml.build_attendance_features import build_attendance_features
-
-    _att_features = build_attendance_features(
-        attendance_path=_ATTENDANCE_PATH, capstone_path=_DATA_PATH
-    )
-    if not _DATA.empty:
-        _collapsed_for_target = collapse_attempts_to_latest_per_type(_DATA.copy())
-        _target = build_target(_collapsed_for_target)
-        _att_features = _att_features.merge(
-            _target, on=["STUDENTID_MASKED", "SUBJECTCODE", "STUDYPERIOD"], how="left"
-        )
-    _ATTENDANCE = _att_features
+    _ATTENDANCE = _load_attendance_dataframe()
     logger.info("Attendance features loaded: %s enrolments", f"{len(_ATTENDANCE):,}")
 except FileNotFoundError:
-    logger.warning("Attendance data not found at %s — attendance endpoints will return empty", _ATTENDANCE_PATH)
+    logger.warning("Attendance data not found at %s — attendance endpoints will return empty", _current_attendance_path())
 except Exception as _e:
     logger.error("Failed to load attendance data: %s", _e)
 
@@ -571,6 +622,58 @@ async def _seed_default_users() -> None:
             db.add(u)
         await db.commit()
         logger.info("Default users seeded")
+
+
+DEFAULT_RISK_EMAIL_SUBJECT = "You've been flagged as at risk in {{subject_code}}"
+DEFAULT_RISK_EMAIL_BODY = (
+    "Hi {{student_id}},\n\n"
+    "Our early-warning system has flagged your current progress in "
+    "{{subject_code}} ({{study_period}}) as \"{{risk_band}}\".\n\n"
+    "We'd like to check in and see how we can help you get back on track. "
+    "Please reach out to your lecturer or student support services at your "
+    "earliest convenience.\n\n"
+    "Kind regards,\nAcademic Support Team"
+)
+
+
+async def _seed_risk_email_template() -> None:
+    """Insert the default Students-at-Risk email template if it's missing."""
+    async with _AsyncSession() as db:
+        existing = await db.get(RiskEmailTemplate, 1)
+        if existing is not None:
+            return
+        db.add(RiskEmailTemplate(
+            id=1, subject=DEFAULT_RISK_EMAIL_SUBJECT, body=DEFAULT_RISK_EMAIL_BODY,
+        ))
+        await db.commit()
+
+
+# provider -> (env var holding its client_id, env var holding its tenant id or None)
+_OAUTH_PROVIDER_ENV = {
+    "google":    ("GOOGLE_CLIENT_ID", None),
+    "microsoft": ("MICROSOFT_CLIENT_ID", "MICROSOFT_TENANT_ID"),
+}
+
+
+async def _seed_oauth_provider_configs() -> None:
+    """Insert the Google/Microsoft config rows if missing, one-time-seeded
+    from whatever GOOGLE_CLIENT_ID/MICROSOFT_CLIENT_ID/MICROSOFT_TENANT_ID
+    env vars are already set — so a deployment that had them configured the
+    old way keeps working after this migration, with nothing to re-enter
+    beyond what Settings > OAuth Providers already shows. A fresh
+    deployment with no env vars seeds both providers disabled and empty,
+    ready to be filled in from that same page instead of a redeploy."""
+    async with _AsyncSession() as db:
+        for provider, (client_env, tenant_env) in _OAUTH_PROVIDER_ENV.items():
+            if await db.get(OAuthProviderConfig, provider) is not None:
+                continue
+            client_id = os.getenv(client_env, "") or ""
+            tenant_id = os.getenv(tenant_env) if tenant_env else None
+            db.add(OAuthProviderConfig(
+                provider=provider, client_id=client_id, tenant_id=tenant_id,
+                enabled=bool(client_id),
+            ))
+        await db.commit()
 
 # ── Dashboard constants ───────────────────────────────────────────────────────
 
@@ -824,6 +927,8 @@ async def _startup():
     async with _engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     await _seed_default_users()
+    await _seed_risk_email_template()
+    await _seed_oauth_provider_configs()
     logger.info("Database ready")
     if GMAIL_SENDER and GMAIL_APP_PASSWORD:
         logger.info("Email service configured")
@@ -1069,9 +1174,14 @@ async def _complete_oauth_login(db: AsyncSession, email: str, provider: str) -> 
 
 @app.post("/api/auth/google", tags=["Auth"])
 async def login_google(req: OAuthLoginRequest, db: AsyncSession = Depends(get_db)):
-    """Sign in with a Google-verified ID token."""
+    """Sign in with a Google-verified ID token. client_id comes from the
+    Settings > OAuth Providers config (see OAuthProviderConfig), not an env
+    var — a disabled or unfilled-in provider means no client_id is passed,
+    same as it being unset used to."""
+    cfg = await db.get(OAuthProviderConfig, "google")
+    client_id = cfg.client_id if (cfg and cfg.enabled) else None
     try:
-        email = oauth_providers.verify_google_id_token(req.id_token)
+        email = oauth_providers.verify_google_id_token(req.id_token, client_id)
     except oauth_providers.OAuthVerificationError as exc:
         raise HTTPException(status_code=401, detail=str(exc)) from exc
     return await _complete_oauth_login(db, email, provider="Google")
@@ -1079,12 +1189,104 @@ async def login_google(req: OAuthLoginRequest, db: AsyncSession = Depends(get_db
 
 @app.post("/api/auth/microsoft", tags=["Auth"])
 async def login_microsoft(req: OAuthLoginRequest, db: AsyncSession = Depends(get_db)):
-    """Sign in with a Microsoft-verified ID token."""
+    """Sign in with a Microsoft-verified ID token. client_id/tenant_id come
+    from the Settings > OAuth Providers config, same reasoning as Google above."""
+    cfg = await db.get(OAuthProviderConfig, "microsoft")
+    client_id = cfg.client_id if (cfg and cfg.enabled) else None
+    tenant_id = cfg.tenant_id if cfg else None
     try:
-        email = await oauth_providers.verify_microsoft_id_token(req.id_token)
+        email = await oauth_providers.verify_microsoft_id_token(req.id_token, client_id, tenant_id)
     except oauth_providers.OAuthVerificationError as exc:
         raise HTTPException(status_code=401, detail=str(exc)) from exc
     return await _complete_oauth_login(db, email, provider="Microsoft")
+
+
+class OAuthProviderUpdate(BaseModel):
+    client_id: str       = Field("", max_length=255)
+    tenant_id: str | None = Field(None, max_length=255)
+    enabled:   bool      = False
+
+
+def _oauth_provider_public_dict(row: OAuthProviderConfig | None, provider: str) -> dict:
+    return {
+        "provider":   provider,
+        "client_id":  row.client_id if row else "",
+        "tenant_id":  row.tenant_id if row else None,
+        "enabled":    bool(row.enabled) if row else False,
+        "updated_by": row.updated_by if row else None,
+        "updated_at": row.updated_at.isoformat() if row and row.updated_at else None,
+    }
+
+
+@app.get("/api/oauth-providers", tags=["Auth"])
+async def list_oauth_providers(
+    user: dict         = Depends(require_head_of_school),
+    db:   AsyncSession = Depends(get_db),
+):
+    """Full Google/Microsoft config, including disabled/empty rows — admin
+    only, for the Settings > OAuth Providers page. Client IDs are public
+    identifiers (see OAuthProviderConfig's docstring), so returning them
+    to an already-authenticated admin here is no different a disclosure
+    than the public endpoint below returning them to anyone."""
+    rows = {r.provider: r for r in (await db.execute(select(OAuthProviderConfig))).scalars().all()}
+    return {"providers": [_oauth_provider_public_dict(rows.get(p), p) for p in _OAUTH_PROVIDER_ENV]}
+
+
+@app.put("/api/oauth-providers/{provider}", tags=["Auth"])
+async def update_oauth_provider(
+    provider: str,
+    req:  OAuthProviderUpdate,
+    user: dict         = Depends(require_head_of_school),
+    db:   AsyncSession = Depends(get_db),
+):
+    """Configure a provider's sign-in — admin only (Head of Technology /
+    Head of School). This is the replacement for hand-editing
+    GOOGLE_CLIENT_ID/MICROSOFT_CLIENT_ID/MICROSOFT_TENANT_ID and
+    redeploying: the next login attempt reads whatever is saved here."""
+    if provider not in _OAUTH_PROVIDER_ENV:
+        raise HTTPException(404, f"Unknown provider '{provider}'. Expected one of: {', '.join(_OAUTH_PROVIDER_ENV)}")
+
+    row = await db.get(OAuthProviderConfig, provider)
+    if row is None:
+        row = OAuthProviderConfig(provider=provider)
+        db.add(row)
+
+    client_id = req.client_id.strip()
+    now = datetime.now(timezone.utc)
+    row.client_id  = client_id
+    row.tenant_id  = (req.tenant_id or "").strip() or None
+    # Can't be enabled with no client_id to verify tokens against, regardless
+    # of what the toggle in the request says.
+    row.enabled    = bool(req.enabled and client_id)
+    row.updated_by = user["sub"]
+    row.updated_at = now
+
+    await _append_audit_db(
+        db, user_uid=user["sub"], action_type="Settings Changed", status="Success",
+        detail=f"Updated the {provider} OAuth provider config",
+    )
+    return {
+        "provider": provider, "client_id": client_id, "tenant_id": row.tenant_id,
+        "enabled": row.enabled, "updated_by": user["sub"], "updated_at": now.isoformat(),
+    }
+
+
+@app.get("/api/oauth-providers/public", tags=["Auth"])
+async def public_oauth_providers(db: AsyncSession = Depends(get_db)):
+    """Unauthenticated — the login page needs this before the user has a
+    token at all, to know which sign-in buttons to render and what
+    client_id/tenant_id to hand each provider's own JS SDK. Only exposes
+    enabled providers with a client_id set; both fields are public
+    identifiers, not secrets (see OAuthProviderConfig's docstring)."""
+    rows = (await db.execute(
+        select(OAuthProviderConfig).where(OAuthProviderConfig.enabled.is_(True))
+    )).scalars().all()
+    return {
+        "providers": [
+            {"provider": r.provider, "client_id": r.client_id, "tenant_id": r.tenant_id}
+            for r in rows if r.client_id
+        ]
+    }
 
 
 @app.post("/api/auth/forgot-password", tags=["Auth"])
@@ -1459,16 +1661,161 @@ async def ingest_status(
     }
 
 
-@app.post("/api/ingest/capstone/analyze", tags=["Ingest"])
+async def _run_analyze_job(
+    job_id: int, content: bytes, filename: Optional[str], user_email: str, kind: str,
+) -> None:
+    """
+    Background body of analyze — parses + classifies the already-received
+    upload and stashes the result as a PendingIngest, exactly what the old
+    synchronous analyze endpoint did inline. Split out so a client
+    disconnect (page refresh, closed tab) while this runs can't silently
+    lose the analysis: once the browser has finished sending the file,
+    everything after that point is durable and runs independently of the
+    request/response cycle — the same fix already applied to confirm.
+
+    Needs its own AsyncSession, same reasoning as _run_capstone_confirm_job:
+    the request-scoped session is closed by the time BackgroundTasks runs.
+    """
+    async with _AsyncSession() as db:
+        job = await db.get(AnalyzeJob, job_id)
+
+        try:
+            analysis = (
+                _capstone_analysis_from_bytes(content, filename) if kind == "capstone"
+                else _attendance_analysis_from_bytes(content, filename)
+            )
+        except HTTPException as exc:
+            status_label = "Error" if exc.status_code == 422 else "Alert"
+            job.status = "failed"
+            job.error_detail = str(exc.detail)
+            job.finished_at = datetime.now(timezone.utc)
+            await _append_audit_db(db, user_uid=user_email, action_type="Data Upload",
+                                   status=status_label, detail=f"Rejected {kind} upload: {exc.detail}")
+            await db.commit()
+            return
+        except Exception as exc:
+            job.status = "failed"
+            job.error_detail = "The uploaded file could not be parsed as a valid CSV."
+            job.finished_at = datetime.now(timezone.utc)
+            await _append_audit_db(db, user_uid=user_email, action_type="Data Upload",
+                                   status="Error", detail=f"Failed to parse {kind} CSV: {exc}")
+            await db.commit()
+            return
+
+        token = str(uuid.uuid4())
+        await _save_pending_ingest(db, kind, token, filename, content)
+        job.status = "success"
+        job.result = {"token": token, **analysis}
+        job.finished_at = datetime.now(timezone.utc)
+        await db.commit()
+
+
+@app.get("/api/ingest/{kind}/analyze-status", tags=["Ingest"])
+async def ingest_analyze_status(
+    kind: str,
+    user: dict = Depends(require_head_of_school),
+    db:   AsyncSession = Depends(get_db),
+):
+    """
+    Whether an analyze from before a page refresh is still running (or most
+    recently failed) for this kind, so the page can resume showing
+    "Analyzing…" (or the failure) instead of looking blank while that
+    background job keeps working. A *successful* analyze doesn't need
+    anything here — its result already lives in PendingIngest, covered by
+    GET /api/ingest/{kind}/status.
+    """
+    if kind not in ("capstone", "attendance"):
+        raise HTTPException(400, "kind must be 'capstone' or 'attendance'")
+
+    result = await db.execute(
+        select(AnalyzeJob).where(AnalyzeJob.kind == kind).order_by(AnalyzeJob.id.desc()).limit(1)
+    )
+    job = result.scalar_one_or_none()
+    if job is None or job.status == "success":
+        return {"active": False}
+
+    # A failed analyze only matters for a little while — don't resurrect an
+    # old failure indefinitely on every page load.
+    age_minutes = (datetime.now(timezone.utc) - job.started_at).total_seconds() / 60
+    if job.status == "failed" and age_minutes > PENDING_INGEST_TTL_MINUTES:
+        return {"active": False}
+
+    return {
+        "active":       True,
+        "job_id":       job.id,
+        "status":       job.status,
+        "filename":     job.filename,
+        "error_detail": job.error_detail,
+    }
+
+
+@app.get("/api/ingest/analyze-jobs", tags=["Ingest"])
+async def analyze_jobs_list(
+    limit: int = Query(30, ge=1, le=200),
+    user: dict = Depends(require_head_of_school),
+    db:   AsyncSession = Depends(get_db),
+):
+    """Recent analyze jobs (both kinds), most recent first — merged with
+    GET /api/ingest/jobs client-side into one Ingestion Activity timeline."""
+    result = await db.execute(select(AnalyzeJob).order_by(AnalyzeJob.id.desc()).limit(limit))
+    jobs = result.scalars().all()
+    return {
+        "jobs": [
+            {
+                "id":           j.id,
+                "kind":         j.kind,
+                "status":       j.status,
+                "filename":     j.filename,
+                "started_by":   j.started_by,
+                "started_at":   j.started_at.isoformat() if j.started_at else None,
+                "finished_at":  j.finished_at.isoformat() if j.finished_at else None,
+                "result":       j.result,
+                "error_detail": j.error_detail,
+            }
+            for j in jobs
+        ]
+    }
+
+
+@app.get("/api/ingest/analyze-jobs/{job_id}", tags=["Ingest"])
+async def analyze_job_detail(
+    job_id: int,
+    user: dict = Depends(require_head_of_school),
+    db:   AsyncSession = Depends(get_db),
+):
+    """Poll a single analyze job — used right after upload to watch that
+    specific run without waiting for the next full jobs-list refresh."""
+    job = await db.get(AnalyzeJob, job_id)
+    if job is None:
+        raise HTTPException(404, "No analyze job with that id.")
+    return {
+        "id":           job.id,
+        "kind":         job.kind,
+        "status":       job.status,
+        "filename":     job.filename,
+        "started_by":   job.started_by,
+        "started_at":   job.started_at.isoformat() if job.started_at else None,
+        "finished_at":  job.finished_at.isoformat() if job.finished_at else None,
+        "result":       job.result,
+        "error_detail": job.error_detail,
+    }
+
+
+@app.post("/api/ingest/capstone/analyze", status_code=202, tags=["Ingest"])
 async def ingest_capstone_analyze(
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     user: dict = Depends(require_head_of_school),
     db:   AsyncSession = Depends(get_db),
 ):
     """
-    Parse + classify a capstone CSV's columns (KEEP/SKIP/NEW) WITHOUT
-    committing it to the live dataset. Returns a token; call
-    POST /api/ingest/capstone/confirm with it to actually commit.
+    Accept a capstone CSV upload and return immediately — the actual parse +
+    column classification (and the PendingIngest write it produces) happens
+    in the background so a page refresh while this runs doesn't lose it.
+    Poll GET /api/ingest/analyze-jobs/{job_id} (or GET
+    /api/ingest/{kind}/analyze-status after a refresh) to see when it
+    finishes; the result is the same {token, row_count, columns, ...}
+    payload this endpoint used to return directly.
     """
     ext = (file.filename or "").rsplit(".", 1)[-1].lower()
     if ext != "csv":
@@ -1481,21 +1828,13 @@ async def ingest_capstone_analyze(
                                status="Alert", detail=f"Rejected capstone upload: {err}")
         raise HTTPException(400, err)
 
-    try:
-        analysis = _capstone_analysis_from_bytes(content, file.filename)
-    except HTTPException as exc:
-        status_label = "Error" if exc.status_code == 422 else "Alert"
-        await _append_audit_db(db, user_uid=user["sub"], action_type="Data Upload",
-                               status=status_label, detail=f"Rejected capstone upload: {exc.detail}")
-        raise
-    except Exception as exc:
-        await _append_audit_db(db, user_uid=user["sub"], action_type="Data Upload",
-                               status="Error", detail=f"Failed to parse capstone CSV: {exc}")
-        raise HTTPException(422, "The uploaded file could not be parsed as a valid CSV.") from exc
+    job = AnalyzeJob(kind="capstone", filename=file.filename, started_by=user["sub"])
+    db.add(job)
+    await db.commit()
+    await db.refresh(job)
 
-    token = str(uuid.uuid4())
-    await _save_pending_ingest(db, "capstone", token, file.filename, content)
-    return {"token": token, **analysis}
+    background_tasks.add_task(_run_analyze_job, job.id, content, file.filename, user["sub"], "capstone")
+    return {"job_id": job.id, "status": "running"}
 
 
 async def _run_capstone_confirm_job(
@@ -1642,15 +1981,21 @@ async def _do_capstone_confirm(pending_df: pd.DataFrame, mode: str = "override")
     # `ingested_data_prod` volume in prod — see train_model.INGESTED_DATA_DIR's
     # docstring for why this is env-var-driven rather than hardcoded to this
     # file's own directory), then temporarily point train_model.DATA_PATH /
-    # check_new_period.DATA_PATH at it — the same monkey-patch pattern
-    # verify_dynamic_period_e2e.py already uses for isolated retrain testing —
-    # restoring both afterward regardless of outcome. This is required for
-    # check_new_period.py and train_model.py to actually see the newly
-    # ingested data (both read DATA_PATH from disk, not from the in-memory
-    # _DATA this endpoint also updates).
+    # check_new_period.DATA_PATH (and train_model.ATTENDANCE_PATH, if
+    # attendance has ever been ingested) at it — the same monkey-patch
+    # pattern verify_dynamic_period_e2e.py already uses for isolated retrain
+    # testing — restoring all of them afterward regardless of outcome. This
+    # is required for check_new_period.py and train_model.py to actually
+    # see the newly ingested data (all read their paths from disk, not from
+    # the in-memory _DATA/_ATTENDANCE this endpoint also updates).
     import app.ml.train_model as train_model_mod
     train_model_mod.INGESTED_DATA_DIR.mkdir(parents=True, exist_ok=True)
     INGESTED_CAPSTONE_PATH = train_model_mod.INGESTED_DATA_DIR / "ingested_capstone.csv"
+    # Written by _do_attendance_confirm (same raw per-session shape
+    # load_attendance_raw() expects from ATTENDANCE_PATH) — if an admin has
+    # ever ingested attendance through the UI, retraining should train on
+    # that instead of silently falling back to the archived /data file.
+    INGESTED_ATTENDANCE_RAW_PATH = train_model_mod.INGESTED_DATA_DIR / "ingested_attendance_raw.csv"
 
     # Refresh the PASS target merged into _ATTENDANCE, if attendance data
     # is already loaded, so it stays consistent with the new capstone data.
@@ -1694,13 +2039,16 @@ async def _do_capstone_confirm(pending_df: pd.DataFrame, mode: str = "override")
         _ATTENDANCE = new_attendance
 
         original_paths = {
-            "train_model": train_model_mod.DATA_PATH,
-            "check_new_period": check_new_period_mod.DATA_PATH,
+            "train_model":            train_model_mod.DATA_PATH,
+            "check_new_period":       check_new_period_mod.DATA_PATH,
+            "train_model_attendance": train_model_mod.ATTENDANCE_PATH,
         }
         retrain_info = {"triggered": False, "reason": None, "candidate_version": None}
         try:
             train_model_mod.DATA_PATH = INGESTED_CAPSTONE_PATH
             check_new_period_mod.DATA_PATH = INGESTED_CAPSTONE_PATH
+            if INGESTED_ATTENDANCE_RAW_PATH.exists():
+                train_model_mod.ATTENDANCE_PATH = INGESTED_ATTENDANCE_RAW_PATH
 
             is_new, latest, validated_on = check_new_period_mod.new_period_available()
             if is_new:
@@ -1720,6 +2068,7 @@ async def _do_capstone_confirm(pending_df: pd.DataFrame, mode: str = "override")
         finally:
             train_model_mod.DATA_PATH = original_paths["train_model"]
             check_new_period_mod.DATA_PATH = original_paths["check_new_period"]
+            train_model_mod.ATTENDANCE_PATH = original_paths["train_model_attendance"]
     finally:
         _release_ingest_lock()
 
@@ -1771,7 +2120,7 @@ async def ingest_capstone_confirm(
     csv_bytes, filename = pending_row.csv_bytes, pending_row.filename
     await _delete_pending_ingest(db, "capstone")
 
-    job = IngestJob(kind="capstone", filename=filename, started_by=user["sub"])
+    job = IngestJob(kind="capstone", filename=filename, mode=mode, started_by=user["sub"])
     db.add(job)
     await db.commit()
     await db.refresh(job)
@@ -1810,19 +2159,20 @@ async def ingest_preview(
     }
 
 
-@app.post("/api/ingest/attendance/analyze", tags=["Ingest"])
+@app.post("/api/ingest/attendance/analyze", status_code=202, tags=["Ingest"])
 async def ingest_attendance_analyze(
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     user: dict = Depends(require_head_of_school),
     db:   AsyncSession = Depends(get_db),
 ):
     """
-    Parse + classify an attendance CSV's columns (KEEP/SKIP/NEW) WITHOUT
-    committing it. A separate, clearly distinct slot from the capstone
-    analyze endpoint — the two file types are never accepted through the
-    same endpoint, so they can't be cross-uploaded into the wrong slot.
-    Returns a token; call POST /api/ingest/attendance/confirm with it to
-    actually commit.
+    Accept an attendance CSV upload and return immediately — see
+    ingest_capstone_analyze's docstring for the full reasoning (same
+    BackgroundTasks fix, applied here too). A separate, clearly distinct
+    slot from the capstone analyze endpoint — the two file types are never
+    accepted through the same endpoint, so they can't be cross-uploaded
+    into the wrong slot.
     """
     ext = (file.filename or "").rsplit(".", 1)[-1].lower()
     if ext != "csv":
@@ -1835,21 +2185,13 @@ async def ingest_attendance_analyze(
                                status="Alert", detail=f"Rejected attendance upload: {err}")
         raise HTTPException(400, err)
 
-    try:
-        analysis = _attendance_analysis_from_bytes(content, file.filename)
-    except HTTPException as exc:
-        status_label = "Error" if exc.status_code == 422 else "Alert"
-        await _append_audit_db(db, user_uid=user["sub"], action_type="Data Upload",
-                               status=status_label, detail=f"Rejected attendance upload: {exc.detail}")
-        raise
-    except Exception as exc:
-        await _append_audit_db(db, user_uid=user["sub"], action_type="Data Upload",
-                               status="Error", detail=f"Failed to parse attendance CSV: {exc}")
-        raise HTTPException(422, "The uploaded file could not be parsed as a valid CSV.") from exc
+    job = AnalyzeJob(kind="attendance", filename=file.filename, started_by=user["sub"])
+    db.add(job)
+    await db.commit()
+    await db.refresh(job)
 
-    token = str(uuid.uuid4())
-    await _save_pending_ingest(db, "attendance", token, file.filename, content)
-    return {"token": token, **analysis}
+    background_tasks.add_task(_run_analyze_job, job.id, content, file.filename, user["sub"], "attendance")
+    return {"job_id": job.id, "status": "running"}
 
 
 ATTENDANCE_MERGE_KEY_COLS = ["STUDENTID_MASKED", "course", "study_period_code", "cls_session_no"]
@@ -1937,8 +2279,20 @@ async def _do_attendance_confirm(csv_bytes: bytes, mode: str = "override") -> di
 
     from app.ml.train_model import collapse_attempts_to_latest_per_type, build_target
 
+    capstone_path = _current_capstone_path()
+    if not capstone_path.exists():
+        # build_attendance_features scopes attendance rows to the capstone
+        # data's own subjects/years (see its docstring) — with no capstone
+        # data ingested yet (and no bundled sample file present either),
+        # there's nothing to scope against. Surfacing this plainly beats
+        # letting a raw FileNotFoundError naming an internal filename
+        # reach the Ingestion Activity panel.
+        raise ValueError(
+            "No capstone data has been ingested yet. Ingest capstone data first — "
+            "attendance is scoped to the subjects and years found there."
+        )
     att_features = build_attendance_features(
-        attendance_path=ingested_attendance_raw_path, capstone_path=_DATA_PATH,
+        attendance_path=ingested_attendance_raw_path, capstone_path=capstone_path,
     )
 
     if not _DATA.empty:
@@ -2000,7 +2354,7 @@ async def ingest_attendance_confirm(
     csv_bytes, filename = pending_row.csv_bytes, pending_row.filename
     await _delete_pending_ingest(db, "attendance")
 
-    job = IngestJob(kind="attendance", filename=filename, started_by=user["sub"])
+    job = IngestJob(kind="attendance", filename=filename, mode=mode, started_by=user["sub"])
     db.add(job)
     await db.commit()
     await db.refresh(job)
@@ -2083,6 +2437,15 @@ async def ingest_dataset_summary(
     browser tab. Also what the frontend checks before offering the
     incremental-vs-override wizard: that choice only makes sense once
     there's existing data to merge into or replace.
+
+    filename/mode/uploaded_by/uploaded_at describe the last SUCCESSFUL,
+    NOT-SINCE-CLEARED confirm specifically (not just the most recent
+    attempt, which last_job_id/last_status/last_ingested_at below still
+    track) — a failed retry after a successful ingest must not overwrite
+    what's shown as the currently active dataset's source, and a job whose
+    data has since been cleared via DELETE /api/ingest/datasets/{kind}
+    (see IngestJob.cleared_at) must stop being reported as active at all,
+    consistent with has_data having flipped to false.
     """
     summary = {}
     for kind, df in (("capstone", _DATA), ("attendance", _ATTENDANCE)):
@@ -2090,6 +2453,14 @@ async def ingest_dataset_summary(
             select(IngestJob).where(IngestJob.kind == kind).order_by(IngestJob.id.desc()).limit(1)
         )
         last_job = result.scalar_one_or_none()
+
+        result_success = await db.execute(
+            select(IngestJob)
+            .where(IngestJob.kind == kind, IngestJob.status == "success", IngestJob.cleared_at.is_(None))
+            .order_by(IngestJob.id.desc()).limit(1)
+        )
+        active_job = result_success.scalar_one_or_none()
+
         summary[kind] = {
             "has_data":  bool(df is not None and not df.empty),
             "row_count": int(len(df)) if df is not None else 0,
@@ -2099,8 +2470,92 @@ async def ingest_dataset_summary(
                 last_job.finished_at.isoformat()
                 if last_job and last_job.finished_at else None
             ),
+            "filename":    active_job.filename if active_job else None,
+            "mode":        active_job.mode if active_job else None,
+            "uploaded_by": active_job.started_by if active_job else None,
+            "uploaded_at": (
+                active_job.finished_at.isoformat()
+                if active_job and active_job.finished_at else None
+            ),
         }
     return summary
+
+
+@app.delete("/api/ingest/datasets/{kind}", tags=["Ingest"])
+async def delete_ingested_dataset(
+    kind: str,
+    user: dict         = Depends(require_head_of_school),
+    db:   AsyncSession = Depends(get_db),
+):
+    """
+    Clears the ingested override for one kind (capstone/attendance) and
+    reloads the live in-memory dataset from whatever's left — the bundled
+    sample file, or nothing at all if that isn't present either (see
+    _current_capstone_path/_current_attendance_path). Admin-only: this is
+    the one action that can make prediction/dashboard data disappear
+    outright, so it's deliberately not something a lecturer — or an
+    accidental click — can trigger.
+
+    Clearing capstone also refreshes _ATTENDANCE's merged PASS target
+    (same reasoning _do_capstone_confirm already applies when NEW capstone
+    data lands — a cleared capstone dataset must not leave attendance
+    scored against a target that no longer reflects what's live).
+
+    Does not delete IngestJob history — the row that ingested this data
+    stays, for the audit trail — but its cleared_at gets stamped so
+    ingest_dataset_summary's "currently active" lookup stops pointing at
+    it (see that endpoint's docstring), instead of the job row remaining
+    reachable via a status='success' filter alone and reporting stale
+    filename/mode next to has_data: false.
+    """
+    global _DATA, _ATTENDANCE
+
+    if kind not in ("capstone", "attendance"):
+        raise HTTPException(404, "kind must be 'capstone' or 'attendance'")
+
+    active_job_result = await db.execute(
+        select(IngestJob)
+        .where(IngestJob.kind == kind, IngestJob.status == "success", IngestJob.cleared_at.is_(None))
+        .order_by(IngestJob.id.desc()).limit(1)
+    )
+    active_job = active_job_result.scalar_one_or_none()
+    if active_job is not None:
+        active_job.cleared_at = datetime.now(timezone.utc)
+
+    import app.ml.train_model as train_model_mod
+    train_model_mod.INGESTED_DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+    if kind == "capstone":
+        (train_model_mod.INGESTED_DATA_DIR / "ingested_capstone.csv").unlink(missing_ok=True)
+        try:
+            _DATA = _load_capstone_dataframe(_current_capstone_path())
+        except Exception:
+            _DATA = pd.DataFrame()
+        # build_attendance_features scopes attendance rows to the capstone
+        # data's own subjects/years — if there's now no capstone data to
+        # scope against either (no bundled sample present), attendance
+        # can't be correctly rebuilt, and must not be left showing its
+        # STALE pre-clear features as if they were still valid (the same
+        # failure mode startup already handles by falling back to empty).
+        try:
+            _ATTENDANCE = _load_attendance_dataframe()
+        except Exception:
+            _ATTENDANCE = pd.DataFrame()
+    else:
+        (train_model_mod.INGESTED_DATA_DIR / "ingested_attendance_raw.csv").unlink(missing_ok=True)
+        try:
+            _ATTENDANCE = _load_attendance_dataframe()
+        except Exception:
+            _ATTENDANCE = pd.DataFrame()
+
+    await _append_audit_db(
+        db, user_uid=user["sub"], action_type="Data Upload", status="Success",
+        detail=f"Cleared the ingested {kind} dataset",
+    )
+    await db.commit()
+
+    current_df = _DATA if kind == "capstone" else _ATTENDANCE
+    return {"kind": kind, "cleared": True, "has_data": bool(current_df is not None and not current_df.empty)}
 
 
 @app.post("/api/ingest/columns/decide", tags=["Ingest"])
@@ -3760,6 +4215,63 @@ async def subject_roster(
     return response
 
 
+@app.get("/api/students-at-risk", tags=["Subjects"])
+async def students_at_risk(
+    study_period: str          = Query(...),
+    user:         dict         = Depends(get_current_user),
+    db:           AsyncSession = Depends(get_db),
+):
+    """
+    Cross-subject risk view for one study period — one row per (student,
+    subject) enrolment, aggregated across every subject the requesting user
+    can see (every subject for an admin/Head of School, only their assigned
+    subjects for a lecturer — same visibility rule subject_roster() already
+    enforces per call).
+
+    Deliberately reuses subject_roster() per subject rather than re-deriving
+    the same coverage/prediction logic here: same risk_band values, same
+    SAFE_SUBJECTS/reliability gating, same guarantee this can never disagree
+    with what /api/subjects/{subject}/roster shows for the same student.
+    """
+    if _DATA is None or _DATA.empty:
+        raise HTTPException(503, "No data loaded. Upload a dataset first.")
+
+    is_admin = user.get("role") in {"Head of Technology", "Head of School"}
+    subjects = (
+        sorted(_DATA["SUBJECTCODE"].dropna().unique().tolist()) if is_admin
+        else list(user.get("subjects", []))
+    )
+
+    combined: list = []
+    subjects_included = 0
+    for subj in subjects:
+        try:
+            result = await subject_roster(
+                subject=subj, study_period=study_period, simulate_progress=None,
+                user=user, db=db,
+            )
+        except HTTPException:
+            # No data for this subject in this period, or the subject code
+            # doesn't exist in _DATA at all — just not part of this period's
+            # picture, not an error for the whole aggregate view.
+            continue
+        if not result.get("prediction_available", True):
+            continue  # unreliable subject — subject_roster already declines to score it
+        if result.get("roster"):
+            subjects_included += 1
+        for row in result["roster"]:
+            combined.append({**row, "subject": subj})
+
+    combined.sort(key=lambda r: (r["probability"] is None, r["probability"] if r["probability"] is not None else 0))
+
+    return {
+        "study_period":      study_period,
+        "subjects_included": subjects_included,
+        "total_rows":        len(combined),
+        "students":          combined,
+    }
+
+
 @app.get("/api/subjects/analytics", tags=["Subjects"])
 async def subjects_analytics(
     subject_a: str           = Query(...),
@@ -4327,6 +4839,130 @@ async def intervention_action_types(user: dict = Depends(get_current_user)):
     """The whitelist the UI renders, so the frontend never hardcodes its own
     copy and drift between the two is impossible."""
     return {"action_types": INTERVENTION_ACTION_TYPES}
+
+
+class InterventionBulkTarget(BaseModel):
+    student_id_masked: str = Field(..., min_length=1, max_length=50)
+    subject_code:      str = Field(..., min_length=1, max_length=20)
+    study_period:      str = Field(..., min_length=1, max_length=10)
+    risk_band:  Optional[str] = Field(None, max_length=20)
+
+
+class InterventionBulkCreate(BaseModel):
+    targets:     list[InterventionBulkTarget] = Field(..., min_length=1, max_length=500)
+    action_type: str           = Field(..., min_length=1, max_length=50)
+    notes:       Optional[str] = Field(None, max_length=2000)
+
+
+def _render_risk_email(template: str, target: "InterventionBulkTarget") -> str:
+    return (
+        template
+        .replace("{{student_id}}",   target.student_id_masked)
+        .replace("{{subject_code}}", target.subject_code)
+        .replace("{{study_period}}", target.study_period)
+        .replace("{{risk_band}}",    target.risk_band or "at risk")
+    )
+
+
+@app.post("/api/interventions/bulk", status_code=201, tags=["Interventions"])
+async def create_interventions_bulk(
+    req:  InterventionBulkCreate,
+    user: dict         = Depends(get_current_user),
+    db:   AsyncSession = Depends(get_db),
+):
+    """
+    Log the same action for many students at once — built for the Students
+    at Risk page's bulk "mark as emailed" action. This never sends a real
+    email (see RiskEmailTemplate's docstring for why: no real student email
+    exists anywhere in this system) — it only records, per selected
+    student, that a staff member already did that themselves.
+
+    req.notes, if given, is treated as a template and rendered per-target
+    (see _render_risk_email) so each Intervention row's notes reflects that
+    specific student/subject/period rather than one identical blob of text
+    with unresolved {{placeholders}} across every row.
+    """
+    if req.action_type not in INTERVENTION_ACTION_TYPES:
+        raise HTTPException(
+            422,
+            f"action_type must be one of: {', '.join(INTERVENTION_ACTION_TYPES)}",
+        )
+    for t in req.targets:
+        _assert_subject_visible(t.subject_code, user)
+
+    created_ids = []
+    for t in req.targets:
+        row = Intervention(
+            student_id_masked = t.student_id_masked,
+            subject_code       = t.subject_code,
+            study_period        = t.study_period,
+            action_type          = req.action_type,
+            notes                = _render_risk_email(req.notes, t) if req.notes else None,
+            created_by           = user["sub"],
+        )
+        db.add(row)
+        await db.flush()
+        created_ids.append(row.id)
+
+    await _append_audit_db(
+        db, user_uid=user["sub"], action_type="Intervention Logged", status="Success",
+        detail=f"Bulk-logged '{req.action_type}' for {len(created_ids)} student(s)",
+    )
+    return {"created": len(created_ids), "ids": created_ids}
+
+
+class RiskEmailTemplateUpdate(BaseModel):
+    subject: str = Field(..., min_length=1, max_length=255)
+    body:    str = Field(..., min_length=1, max_length=5000)
+
+
+@app.get("/api/risk-email-template", tags=["Interventions"])
+async def get_risk_email_template(
+    user: dict         = Depends(get_current_user),
+    db:   AsyncSession = Depends(get_db),
+):
+    """The current Students-at-Risk bulk-email template — readable by any
+    authenticated role so the Students at Risk page can render a preview."""
+    row = await db.get(RiskEmailTemplate, 1)
+    return {
+        "subject":     row.subject,
+        "body":        row.body,
+        "updated_by":  row.updated_by,
+        "updated_at":  row.updated_at.isoformat() if row.updated_at else None,
+    }
+
+
+@app.put("/api/risk-email-template", tags=["Interventions"])
+async def update_risk_email_template(
+    req:  RiskEmailTemplateUpdate,
+    user: dict         = Depends(require_head_of_school),
+    db:   AsyncSession = Depends(get_db),
+):
+    """Update the shared template — admin-only (Head of Technology / Head of
+    School), matching how other institution-wide config is gated in this app."""
+    row = await db.get(RiskEmailTemplate, 1)
+    now = datetime.now(timezone.utc)
+    row.subject    = req.subject
+    row.body       = req.body
+    row.updated_by = user["sub"]
+    row.updated_at = now
+
+    # _append_audit_db commits, which expires every attribute on `row` —
+    # reading req.subject/user["sub"]/now (already-known values, not a
+    # re-read of the now-expired ORM object) avoids the async lazy-load
+    # that a post-commit `row.x` access would otherwise trigger outside a
+    # valid greenlet context (a real, confirmed MissingGreenlet crash here,
+    # not a hypothetical one).
+    await _append_audit_db(
+        db, user_uid=user["sub"], action_type="Settings Changed", status="Success",
+        detail="Updated the Students-at-Risk email template",
+    )
+    return {
+        "subject":     req.subject,
+        "body":        req.body,
+        "updated_by":  user["sub"],
+        "updated_at":  now.isoformat(),
+    }
 
 
 # ═══════════════════════════════════════════════════════════════════════════

@@ -119,7 +119,7 @@ export default function SettingsView({ isLecturer }) {
     <div style={{ maxWidth: 720 }}>
 
       <div style={s.pageHeader}>
-        <h1 style={s.pageTitle}>Settings</h1>
+        <h1 style={s.pageTitle}>My Profile</h1>
         <p style={s.pageSub}>Manage your account and preferences</p>
       </div>
 

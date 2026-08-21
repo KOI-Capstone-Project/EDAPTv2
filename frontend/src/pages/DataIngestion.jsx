@@ -63,13 +63,28 @@ function DatasetStatusBadge({ summary, runningJob, nowMs }) {
 
 // ── One upload card — capstone or attendance, fully independent state ────────
 
-function UploadCard({ kind, title, hint, maxSizeMB, analyzeUrl, onAnalyzed, onCleared, restored, datasetSummary, runningJob, nowMs }) {
+function UploadCard({ kind, title, hint, maxSizeMB, analyzeUrl, onJobStarted, onCleared, onDeleteDataset, analysis, restored, activeJob, datasetSummary, runningJob, nowMs }) {
   const fileRef = useRef(null);
-  const [dragging, setDragging] = useState(false);
-  const [file,     setFile]     = useState(null);
-  const [status,   setStatus]   = useState('IDLE'); // IDLE | ANALYZING | ANALYZED | ERROR
-  const [error,    setError]    = useState(null);
-  const [analysis, setAnalysis] = useState(null);
+  const [dragging,  setDragging]  = useState(false);
+  const [file,      setFile]      = useState(null);
+  const [error,     setError]     = useState(null); // immediate, synchronous rejection only (bad type/size, or the upload request itself failing)
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [deleting,         setDeleting]         = useState(false);
+  const [deleteError,      setDeleteError]      = useState(null);
+  // True only while the multipart POST itself is in flight — the one
+  // window activeJob can't cover, since the server hasn't accepted the
+  // upload (and so hasn't handed back a job id to poll) yet. Without this,
+  // picking a large file showed nothing at all until the browser finished
+  // sending it, which for a real 327k-row / tens-of-MB file is long enough
+  // that it looked like nothing was happening.
+  const [uploading, setUploading] = useState(false);
+
+  // activeJob comes from the parent — it's the SAME state whether this
+  // analyze was just started in this browser tab or discovered still
+  // running (or freshly failed) after a page refresh via
+  // GET /api/ingest/{kind}/analyze-status, so both cases render identically.
+  const isAnalyzing = uploading || activeJob?.status === 'running';
+  const jobError     = activeJob?.status === 'failed' ? activeJob.error_detail : null;
 
   const fmtSize = bytes => {
     if (bytes < 1024)      return `${bytes} B`;
@@ -78,8 +93,8 @@ function UploadCard({ kind, title, hint, maxSizeMB, analyzeUrl, onAnalyzed, onCl
   };
 
   const analyze = useCallback(async (f) => {
-    setStatus('ANALYZING');
     setError(null);
+    setUploading(true);
     try {
       const form = new FormData();
       form.append('file', f);
@@ -93,19 +108,24 @@ function UploadCard({ kind, title, hint, maxSizeMB, analyzeUrl, onAnalyzed, onCl
       // server itself processes the same file in ~1s once it arrives —
       // this was the browser's own axios timeout firing, not a server or
       // network problem.
+      //
+      // The upload itself still has to complete as one request/response —
+      // that part of the browser sending bytes genuinely can't be made
+      // resumable — but analyze now only returns a job id; the parent
+      // polls GET /api/ingest/analyze-jobs/{job_id} to actually finish, so
+      // once the upload has landed, a refresh no longer loses the analysis.
       const res = await api.post(analyzeUrl, form, {
         headers: { 'Content-Type': 'multipart/form-data' },
         timeout: 600000,
       });
-      setAnalysis(res.data);
-      setStatus('ANALYZED');
-      onAnalyzed(kind, res.data, f);
+      onJobStarted(kind, res.data.job_id, f);
     } catch (err) {
       setError(err.response?.data?.detail || 'Analysis failed. Please try again.');
-      setStatus('ERROR');
-      onAnalyzed(kind, null, null);
+      setFile(null);
+    } finally {
+      setUploading(false);
     }
-  }, [analyzeUrl, kind, onAnalyzed]);
+  }, [analyzeUrl, kind, onJobStarted]);
 
   const pickFile = useCallback(f => {
     if (!f) return;
@@ -129,10 +149,25 @@ function UploadCard({ kind, title, hint, maxSizeMB, analyzeUrl, onAnalyzed, onCl
   const onInput     = e  => pickFile(e.target.files[0]);
 
   const handleReset = () => {
-    setFile(null); setStatus('IDLE'); setError(null); setAnalysis(null);
+    setFile(null); setError(null);
     if (fileRef.current) fileRef.current.value = '';
     onCleared(kind);
   };
+
+  const handleDeleteDataset = async () => {
+    setDeleting(true);
+    setDeleteError(null);
+    try {
+      await onDeleteDataset(kind);
+      setConfirmingDelete(false);
+    } catch (err) {
+      setDeleteError(err.response?.data?.detail || 'Could not clear this dataset. Please try again.');
+    } finally {
+      setDeleting(false);
+    }
+  };
+
+  const displayFilename = file?.name || activeJob?.filename || restored?.filename || null;
 
   return (
     <div style={s.uploadCard}>
@@ -143,29 +178,31 @@ function UploadCard({ kind, title, hint, maxSizeMB, analyzeUrl, onAnalyzed, onCl
       <div
         style={{ ...s.dropZone, ...(dragging ? s.dropActive : {}) }}
         onDragOver={onDragOver} onDragLeave={onDragLeave} onDrop={onDrop}
-        onClick={() => !file && fileRef.current?.click()}
+        onClick={() => !file && !isAnalyzing && fileRef.current?.click()}
       >
         <input ref={fileRef} type="file" accept=".csv" style={{ display: 'none' }} onChange={onInput} />
         <div style={{ color: 'rgba(255,255,255,0.85)', marginBottom: 8 }}><IconCloud /></div>
-        <p style={s.dropTitle}>{file ? file.name : 'Drag and drop, or browse'}</p>
-        <p style={s.dropSub}>{file ? fmtSize(file.size) : hint}</p>
-        {!file && (
+        <p style={s.dropTitle}>{displayFilename || 'Drag and drop, or browse'}</p>
+        <p style={s.dropSub}>
+          {file ? fmtSize(file.size) : isAnalyzing ? 'Resuming analysis from before you left this page…' : hint}
+        </p>
+        {!file && !isAnalyzing && (
           <button style={s.browseBtn} onClick={e => { e.stopPropagation(); fileRef.current?.click(); }}>
             Browse File
           </button>
         )}
       </div>
 
-      {status === 'ANALYZING' && <p style={s.statusLine}><Spinner label="Analyzing…" /></p>}
-      {error && <p style={s.errorLine}>⚠ {error}</p>}
-      {status === 'ANALYZED' && analysis && (
+      {isAnalyzing && <p style={s.statusLine}><Spinner label={uploading ? 'Uploading…' : 'Analyzing…'} /></p>}
+      {(error || jobError) && <p style={s.errorLine}>⚠ {error || jobError}</p>}
+      {!isAnalyzing && analysis && !restored && (
         <div style={s.analyzedRow}>
           <span style={s.analyzedRowLabel}>Detected</span>
           <strong>{analysis.row_count.toLocaleString()} rows</strong>
           {analysis.subjects != null && <span style={s.analyzedSub}>· {analysis.subjects} subjects</span>}
         </div>
       )}
-      {!file && status === 'IDLE' && restored && (
+      {!file && !isAnalyzing && restored && (
         <div style={s.restoredBanner}>
           Resumed <strong>{restored.filename}</strong> — {restored.row_count.toLocaleString()} rows,
           analyzed earlier and still waiting to be confirmed. Expires in{' '}
@@ -173,9 +210,46 @@ function UploadCard({ kind, title, hint, maxSizeMB, analyzeUrl, onAnalyzed, onCl
         </div>
       )}
 
-      {(file || restored) && (
+      {(file || restored || isAnalyzing) && (
         <button style={s.resetBtn} onClick={handleReset}>Remove file</button>
       )}
+
+      {/* ── Currently-active dataset: what it is, and a way to clear it ── */}
+      {!file && !isAnalyzing && !restored && datasetSummary?.has_data && (
+        <div style={s.currentDatasetBox}>
+          <div style={s.currentDatasetInfo}>
+            <div style={s.currentDatasetTop}>
+              <span style={s.currentDatasetFilename}>{datasetSummary.filename || 'Unknown filename'}</span>
+              {datasetSummary.mode && (
+                <span style={datasetSummary.mode === 'incremental' ? s.modeBadgeIncremental : s.modeBadgeOverride}>
+                  {datasetSummary.mode === 'incremental' ? 'Incremental' : 'Override'}
+                </span>
+              )}
+            </div>
+            <p style={s.currentDatasetMeta}>
+              Uploaded by {datasetSummary.uploaded_by || 'unknown'}
+              {datasetSummary.uploaded_at && <> · {timeAgo(datasetSummary.uploaded_at, nowMs)}</>}
+            </p>
+          </div>
+
+          {!confirmingDelete ? (
+            <button style={s.deleteDatasetBtn} onClick={() => setConfirmingDelete(true)}>
+              Delete
+            </button>
+          ) : (
+            <div style={s.confirmDeleteRow}>
+              <span style={s.confirmDeleteText}>Clear all ingested {title.toLowerCase()}?</span>
+              <button style={s.confirmDeleteCancelBtn} onClick={() => setConfirmingDelete(false)} disabled={deleting}>
+                Cancel
+              </button>
+              <button style={{ ...s.confirmDeleteYesBtn, opacity: deleting ? 0.6 : 1 }} onClick={handleDeleteDataset} disabled={deleting}>
+                {deleting ? 'Clearing…' : 'Yes, clear it'}
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+      {deleteError && <p style={s.errorLine}>⚠ {deleteError}</p>}
     </div>
   );
 }
@@ -321,28 +395,43 @@ function formatElapsed(startedIso, nowMs) {
   return `${mm}:${ss}`;
 }
 
+const PHASE_LABEL = { analyze: 'Analyze', confirm: 'Ingest' };
+
 function IngestJobRow({ job, nowMs }) {
-  const isRunning = job.status === 'running';
-  const isFailed  = job.status === 'failed';
-  const dotStyle  = isRunning ? s.jobDotRunning : isFailed ? s.jobDotFailed : s.jobDotSuccess;
-  const pillStyle = isRunning ? s.jobStatusRunning : isFailed ? s.jobStatusFailed : s.jobStatusSuccess;
+  const isRunning  = job.status === 'running';
+  const isFailed   = job.status === 'failed';
+  const isAnalyze  = job.phase === 'analyze';
+  const dotStyle   = isRunning ? s.jobDotRunning : isFailed ? s.jobDotFailed : s.jobDotSuccess;
+  const pillStyle  = isRunning ? s.jobStatusRunning : isFailed ? s.jobStatusFailed : s.jobStatusSuccess;
 
   return (
     <div style={s.jobRow}>
       <div style={s.jobRowTop}>
         <span style={{ ...s.jobDot, ...dotStyle }} />
         <span style={s.jobKind}>{KIND_LABEL[job.kind] || job.kind}</span>
+        <span style={s.jobPhaseTag}>{PHASE_LABEL[job.phase] || job.phase}</span>
         <span style={s.jobFilename}>{job.filename}</span>
         <span style={{ ...s.jobStatusPill, ...pillStyle }}>
-          {isRunning ? 'Processing…' : isFailed ? 'Failed' : 'Completed'}
+          {isRunning
+            ? (isAnalyze ? 'Analyzing…' : 'Processing…')
+            : isFailed ? 'Failed'
+            : (isAnalyze ? 'Analyzed' : 'Completed')}
         </span>
       </div>
       <div style={s.jobRowMeta}>
         {isRunning
-          ? <>Started by {job.started_by} — running {formatElapsed(job.started_at, nowMs)}. You'll be notified here (and in the sidebar) once it finishes — feel free to navigate away.</>
+          ? isAnalyze
+            ? <>Started by {job.started_by} — analyzing {formatElapsed(job.started_at, nowMs)}. Safe to navigate away — it'll be here waiting to confirm once done.</>
+            : <>Started by {job.started_by} — running {formatElapsed(job.started_at, nowMs)}. You'll be notified here (and in the sidebar) once it finishes — feel free to navigate away.</>
           : <>Started by {job.started_by} · {timeAgo(job.finished_at || job.started_at, nowMs)}</>}
       </div>
-      {job.status === 'success' && job.result && job.kind === 'capstone' && (
+      {isAnalyze && job.status === 'success' && job.result && (
+        <div style={s.jobResult}>
+          <span><strong>{job.result.row_count?.toLocaleString()}</strong> rows detected</span>
+          <span>Waiting to be confirmed</span>
+        </div>
+      )}
+      {!isAnalyze && job.status === 'success' && job.result && job.kind === 'capstone' && (
         <div style={s.jobResult}>
           <span><strong>{job.result.row_count?.toLocaleString()}</strong> rows</span>
           <span>Subjects reclassified: <strong>{job.result.subjects_reclassified}</strong></span>
@@ -353,20 +442,20 @@ function IngestJobRow({ job, nowMs }) {
           </span>
         </div>
       )}
-      {job.status === 'success' && job.result && job.kind === 'attendance' && (
+      {!isAnalyze && job.status === 'success' && job.result && job.kind === 'attendance' && (
         <div style={s.jobResult}>
           <span><strong>{job.result.row_count?.toLocaleString()}</strong> enrolments</span>
           <span>Match rate: <strong>{job.result.match_rate}%</strong></span>
         </div>
       )}
-      {job.status === 'success' && job.result?.merge_stats && (
+      {!isAnalyze && job.status === 'success' && job.result?.merge_stats && (
         <div style={s.jobMergeStats}>
           Incremental merge — <strong>{job.result.merge_stats.new_rows.toLocaleString()}</strong> new,{' '}
           <strong>{job.result.merge_stats.updated_rows.toLocaleString()}</strong> updated,{' '}
           <strong>{job.result.merge_stats.redundant_rows.toLocaleString()}</strong> redundant rows found and skipped
         </div>
       )}
-      {isFailed && <div style={s.jobError}>⚠ {job.error_detail || 'Ingestion failed.'}</div>}
+      {isFailed && <div style={s.jobError}>⚠ {job.error_detail || (isAnalyze ? 'Analysis failed.' : 'Ingestion failed.')}</div>}
     </div>
   );
 }
@@ -378,7 +467,7 @@ function IngestJobsPanel({ jobs, nowMs }) {
       <style>{`@keyframes ingestPulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.4; transform: scale(0.7); } }`}</style>
       <h3 style={s.cardTitle}>Ingestion Activity</h3>
       <div style={s.jobList}>
-        {jobs.map(job => <IngestJobRow key={job.id} job={job} nowMs={nowMs} />)}
+        {jobs.map(job => <IngestJobRow key={`${job.phase}-${job.id}`} job={job} nowMs={nowMs} />)}
       </div>
     </div>
   );
@@ -480,15 +569,31 @@ export default function DataIngestion() {
     } catch { /* history is best-effort; leave the prior list showing */ }
   }, []);
 
-  useEffect(() => { fetchJobs(); }, [fetchJobs]);
+  // Analyze jobs (see AnalyzeJob in backend/app/db/models.py) merged into
+  // the same Ingestion Activity timeline as confirm jobs, tagged by phase,
+  // so the analyze step itself shows up in history too — not just confirm.
+  const [analyzeJobsHistory, setAnalyzeJobsHistory] = useState([]);
+  const fetchAnalyzeJobsHistory = useCallback(async () => {
+    try {
+      const res = await api.get('/api/ingest/analyze-jobs', { params: { limit: 20 } });
+      setAnalyzeJobsHistory(res.data.jobs);
+    } catch { /* history is best-effort; leave the prior list showing */ }
+  }, []);
+
+  useEffect(() => { fetchJobs(); fetchAnalyzeJobsHistory(); }, [fetchJobs, fetchAnalyzeJobsHistory]);
   useEffect(() => {
-    const timer = setInterval(fetchJobs, 5000);
+    const timer = setInterval(() => { fetchJobs(); fetchAnalyzeJobsHistory(); }, 5000);
     return () => clearInterval(timer);
-  }, [fetchJobs]);
+  }, [fetchJobs, fetchAnalyzeJobsHistory]);
   useEffect(() => {
     const timer = setInterval(() => setNowMs(Date.now()), 1000);
     return () => clearInterval(timer);
   }, []);
+
+  const activity = [
+    ...jobs.map(j => ({ ...j, phase: 'confirm' })),
+    ...analyzeJobsHistory.map(j => ({ ...j, phase: 'analyze' })),
+  ].sort((a, b) => new Date(b.started_at) - new Date(a.started_at));
 
   // Persistent per-kind status ("Ingested — 327,501 rows, updated 2 min ago"
   // vs "Not yet ingested") — server-derived (GET /api/ingest/dataset-summary),
@@ -508,53 +613,154 @@ export default function DataIngestion() {
     return () => clearInterval(timer);
   }, [fetchDatasetSummary]);
 
+  // Clears the ingested override for one kind server-side (reverts to the
+  // bundled sample or nothing) — admin-only, see DELETE
+  // /api/ingest/datasets/{kind}. Re-throws on failure so UploadCard's own
+  // handler can show the error inline next to the button that triggered it.
+  const handleDeleteDataset = async (kind) => {
+    await api.delete(`/api/ingest/datasets/${kind}`);
+    await fetchDatasetSummary();
+  };
+
   // Incremental-vs-override wizard — only shown for a kind that already has
   // live data to merge into or replace; wizardPending is null when the
   // modal isn't open.
   const [wizardPending, setWizardPending] = useState(null); // [{kind, filename, rowCount, existingRowCount}] | null
   const [wizardModes, setWizardModes] = useState({});
 
-  // The server keeps an analyzed-but-not-yet-confirmed upload for 30 minutes
-  // (PendingIngest / PENDING_INGEST_TTL_MINUTES in main.py) so it survives a
-  // page refresh — but only the frontend knowing about it saves the user
-  // from re-uploading a file that can be up to 200MB just to get back here.
+  // Analyze now runs as a background job too (see AnalyzeJob in
+  // backend/app/db/models.py) — the same fix already applied to confirm,
+  // extended to the earlier step, so a page refresh (or navigating to any
+  // other menu item) while a large file is still being parsed doesn't lose
+  // it. analyzeJobs[kind] is null once nothing is running/recently-failed;
+  // {status:'running', job_id, filename} while a job is in flight (whether
+  // started in this tab or discovered on mount); {status:'failed', ...}
+  // once one finishes badly.
+  const [analyzeJobs, setAnalyzeJobs] = useState({ capstone: null, attendance: null });
+  const analyzePollTimers = useRef({ capstone: null, attendance: null });
+  const mountedRef = useRef(true);
   useEffect(() => {
-    let cancelled = false;
-    const restore = async (kind, setAnalysis, setRestored) => {
+    // Must reset to true in the effect body, not just as useRef's initial
+    // value — React 18 StrictMode (see index.js) deliberately double-fires
+    // effects in dev (mount -> cleanup -> mount) to catch exactly this bug:
+    // without this line, the first simulated cleanup below sets this false
+    // permanently, and every `if (!mountedRef.current) return` guard in
+    // pollAnalyzeJob/checkResume silently no-ops for the rest of the page's
+    // real life — analyze jobs finish successfully server-side, but the
+    // result never reaches capstoneAnalysis/restoredCapstone, so Confirm
+    // never becomes available. Was a real, confirmed bug, not just a
+    // hypothetical one.
+    mountedRef.current = true;
+    const timers = analyzePollTimers.current; // same object reference — mutated in place elsewhere, so this stays current
+    return () => {
+      mountedRef.current = false;
+      Object.values(timers).forEach(t => t && clearTimeout(t));
+    };
+  }, []);
+
+  const kindSetters = (kind) => ({
+    setAnalysis: kind === 'capstone' ? setCapstoneAnalysis   : setAttendanceAnalysis,
+    setFile:     kind === 'capstone' ? setCapstoneFile       : setAttendanceFile,
+    setRestored: kind === 'capstone' ? setRestoredCapstone   : setRestoredAttendance,
+  });
+
+  // Poll one analyze job to completion, updating analyzeJobs[kind] as it
+  // goes, and resolving the result into *Analysis/*File/*Restored exactly
+  // like the old synchronous analyze() response used to. `file` is the
+  // local File object if this was picked in this tab, or null if it's
+  // being resumed from a page refresh (no bytes held client-side).
+  const pollAnalyzeJob = useCallback(async (kind, jobId, file) => {
+    const { setAnalysis, setFile, setRestored } = kindSetters(kind);
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      let job;
+      try {
+        job = (await api.get(`/api/ingest/analyze-jobs/${jobId}`)).data;
+      } catch {
+        if (mountedRef.current) {
+          setAnalyzeJobs(s => ({ ...s, [kind]: { status: 'failed', filename: file?.name, error_detail: 'Lost track of this analysis. Please try again.' } }));
+        }
+        return;
+      }
+      if (job.status === 'running') {
+        await new Promise(resolve => {
+          analyzePollTimers.current[kind] = setTimeout(resolve, 2000);
+        });
+        if (!mountedRef.current) return;
+        continue;
+      }
+      if (!mountedRef.current) return;
+      if (job.status === 'success') {
+        setAnalysis(job.result);
+        if (file) { setFile(file); setRestored(null); }
+        else      { setFile(null); setRestored(job.result); }
+        setAnalyzeJobs(s => ({ ...s, [kind]: null }));
+      } else {
+        setAnalyzeJobs(s => ({ ...s, [kind]: { status: 'failed', filename: job.filename, error_detail: job.error_detail || 'Analysis failed.' } }));
+      }
+      return;
+    }
+  }, []);
+
+  const handleJobStarted = (kind, jobId, file) => {
+    const { setAnalysis, setFile, setRestored } = kindSetters(kind);
+    setAnalysis(null); setFile(null); setRestored(null);
+    setAnalyzeJobs(s => ({ ...s, [kind]: { status: 'running', job_id: jobId, filename: file?.name } }));
+    pollAnalyzeJob(kind, jobId, file);
+  };
+
+  // On mount: has an analyze from before a refresh (or from switching to
+  // another menu item and back) left something running or freshly failed?
+  // If not, fall back to checking for an already-analyzed, still-pending
+  // upload — same PendingIngest / PENDING_INGEST_TTL_MINUTES restore this
+  // page has always done, just no longer the only thing it checks.
+  useEffect(() => {
+    const checkResume = async (kind) => {
+      const { setAnalysis, setRestored } = kindSetters(kind);
+      try {
+        const res = await api.get(`/api/ingest/${kind}/analyze-status`);
+        if (!mountedRef.current) return;
+        if (res.data.active) {
+          setAnalyzeJobs(s => ({ ...s, [kind]: { status: res.data.status, job_id: res.data.job_id, filename: res.data.filename, error_detail: res.data.error_detail } }));
+          if (res.data.status === 'running') pollAnalyzeJob(kind, res.data.job_id, null);
+          return;
+        }
+      } catch { /* analyze-status check failed — fall through to the pending-upload check below */ }
+
       try {
         const res = await api.get(`/api/ingest/${kind}/status`);
-        if (cancelled || !res.data.pending) return;
+        if (!mountedRef.current || !res.data.pending) return;
         setAnalysis(res.data);
         setRestored(res.data);
       } catch { /* nothing to resume, or the check itself failed — safe to ignore */ }
     };
-    restore('capstone', setCapstoneAnalysis, setRestoredCapstone);
-    restore('attendance', setAttendanceAnalysis, setRestoredAttendance);
-    return () => { cancelled = true; };
-  }, []);
+    checkResume('capstone');
+    checkResume('attendance');
+  }, [pollAnalyzeJob]);
 
-  const handleAnalyzed = (kind, data, file) => {
-    if (kind === 'capstone') { setCapstoneAnalysis(data); setCapstoneFile(data ? file : null); setRestoredCapstone(null); }
-    else                     { setAttendanceAnalysis(data); setAttendanceFile(data ? file : null); setRestoredAttendance(null); }
-  };
   const handleCleared = (kind) => {
-    if (kind === 'capstone') {
-      setCapstoneAnalysis(null); setCapstoneFile(null); setRestoredCapstone(null);
-    } else {
-      setAttendanceAnalysis(null); setAttendanceFile(null); setRestoredAttendance(null);
-    }
+    if (analyzePollTimers.current[kind]) { clearTimeout(analyzePollTimers.current[kind]); analyzePollTimers.current[kind] = null; }
+    setAnalyzeJobs(s => ({ ...s, [kind]: null }));
+    const { setAnalysis, setFile, setRestored } = kindSetters(kind);
+    setAnalysis(null); setFile(null); setRestored(null);
   };
 
   const reanalyze = async (kind) => {
     const file = kind === 'capstone' ? capstoneFile : attendanceFile;
+    const { setAnalysis } = kindSetters(kind);
     try {
       if (file) {
         const url = kind === 'capstone' ? '/api/ingest/capstone/analyze' : '/api/ingest/attendance/analyze';
         const form = new FormData();
         form.append('file', file);
-        const res = await api.post(url, form, { headers: { 'Content-Type': 'multipart/form-data' } });
-        if (kind === 'capstone') setCapstoneAnalysis(res.data);
-        else setAttendanceAnalysis(res.data);
+        const jobRes = await api.post(url, form, { headers: { 'Content-Type': 'multipart/form-data' } });
+        // eslint-disable-next-line no-constant-condition
+        while (true) {
+          const job = (await api.get(`/api/ingest/analyze-jobs/${jobRes.data.job_id}`)).data;
+          if (job.status === 'running') { await new Promise(r => setTimeout(r, 1500)); continue; }
+          if (job.status === 'success') setAnalysis(job.result);
+          break;
+        }
       } else {
         // No local File held for this kind — this upload was resumed from a
         // page refresh. Reclassify from the bytes the server already has
@@ -562,8 +768,7 @@ export default function DataIngestion() {
         // one column decision.
         const res = await api.get(`/api/ingest/${kind}/status`);
         if (!res.data.pending) return;
-        if (kind === 'capstone') setCapstoneAnalysis(res.data);
-        else setAttendanceAnalysis(res.data);
+        setAnalysis(res.data);
       }
     } catch { /* leave prior analysis in place on failure */ }
   };
@@ -662,9 +867,12 @@ export default function DataIngestion() {
           hint="Supported: .csv — Max 50MB"
           maxSizeMB={50}
           analyzeUrl="/api/ingest/capstone/analyze"
-          onAnalyzed={handleAnalyzed}
+          onJobStarted={handleJobStarted}
           onCleared={handleCleared}
+          onDeleteDataset={handleDeleteDataset}
+          analysis={capstoneAnalysis}
           restored={restoredCapstone}
+          activeJob={analyzeJobs.capstone}
           datasetSummary={datasetSummary?.capstone}
           runningJob={jobs.find(j => j.kind === 'capstone' && j.status === 'running')}
           nowMs={nowMs}
@@ -675,9 +883,12 @@ export default function DataIngestion() {
           hint="Supported: .csv — Max 200MB"
           maxSizeMB={200}
           analyzeUrl="/api/ingest/attendance/analyze"
-          onAnalyzed={handleAnalyzed}
+          onJobStarted={handleJobStarted}
           onCleared={handleCleared}
+          onDeleteDataset={handleDeleteDataset}
+          analysis={attendanceAnalysis}
           restored={restoredAttendance}
+          activeJob={analyzeJobs.attendance}
           datasetSummary={datasetSummary?.attendance}
           runningJob={jobs.find(j => j.kind === 'attendance' && j.status === 'running')}
           nowMs={nowMs}
@@ -704,8 +915,9 @@ export default function DataIngestion() {
         </button>
       </div>
 
-      {/* ── Ingestion activity — real background job status, not an estimate ── */}
-      <IngestJobsPanel jobs={jobs} nowMs={nowMs} />
+      {/* ── Ingestion activity — real background job status, not an estimate.
+          Covers both phases: analyze (parse/classify) and confirm (commit). ── */}
+      <IngestJobsPanel jobs={activity} nowMs={nowMs} />
 
       {wizardPending && (
         <IngestModeWizard
@@ -768,6 +980,38 @@ const s = {
     background: '#fff', color: '#64748B', fontSize: 12, cursor: 'pointer',
   },
 
+  currentDatasetBox: {
+    marginTop: 10, padding: '10px 12px', borderRadius: 8,
+    background: '#F8FAFC', border: '0.5px solid #E2E8F0',
+    display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12,
+  },
+  currentDatasetInfo: { minWidth: 0 },
+  currentDatasetTop: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' },
+  currentDatasetFilename: { fontSize: 12.5, fontWeight: 600, color: '#1A2E40', wordBreak: 'break-all' },
+  currentDatasetMeta: { margin: '3px 0 0', fontSize: 11, color: '#94A3B8' },
+  modeBadgeOverride: {
+    fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 20,
+    background: '#E2E8F0', color: '#475569', textTransform: 'uppercase', letterSpacing: 0.4,
+  },
+  modeBadgeIncremental: {
+    fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 20,
+    background: '#CCFBF1', color: '#0F766E', textTransform: 'uppercase', letterSpacing: 0.4,
+  },
+  deleteDatasetBtn: {
+    flexShrink: 0, padding: '6px 14px', borderRadius: 7, border: '0.5px solid #FECACA',
+    background: '#fff', color: '#DC2626', fontSize: 12, fontWeight: 600, cursor: 'pointer',
+  },
+  confirmDeleteRow: { flexShrink: 0, display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 6 },
+  confirmDeleteText: { fontSize: 11, color: '#64748B', textAlign: 'right' },
+  confirmDeleteCancelBtn: {
+    padding: '5px 12px', borderRadius: 7, border: '0.5px solid #C5D2DC',
+    background: '#fff', color: '#475569', fontSize: 11.5, cursor: 'pointer', marginRight: 6,
+  },
+  confirmDeleteYesBtn: {
+    padding: '5px 12px', borderRadius: 7, border: 'none',
+    background: '#DC2626', color: '#fff', fontSize: 11.5, fontWeight: 600, cursor: 'pointer',
+  },
+
   card:      { background: '#fff', border: '0.5px solid #DDE4EA', borderRadius: 12, padding: '20px', marginBottom: 20 },
   cardTitle: { margin: '0 0 16px', fontSize: 14, fontWeight: 600, color: '#1A2E40' },
   colGrid:   { display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 20 },
@@ -825,6 +1069,10 @@ const s = {
   jobDotSuccess: { background: '#059669' },
   jobDotFailed:  { background: '#DC2626' },
   jobKind:     { fontSize: 13, fontWeight: 700, color: '#1A2E40' },
+  jobPhaseTag: {
+    fontSize: 10.5, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.3,
+    color: '#8BA5B8', background: '#F1F5F9', borderRadius: 5, padding: '2px 7px',
+  },
   jobFilename: { fontSize: 12.5, color: '#5A7A8A', fontFamily: "'SF Mono','Fira Code',monospace" },
   jobStatusPill: {
     marginLeft: 'auto', fontSize: 11, fontWeight: 700, borderRadius: 999,

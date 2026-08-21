@@ -70,6 +70,28 @@ async def _confirm_and_get_job(client, headers, kind: str, token: str) -> dict:
     return job
 
 
+async def _analyze_and_get_job(client, headers, kind: str, filename: str, csv_bytes: bytes) -> dict:
+    """
+    Analyze now returns 202 + a job id immediately (the actual parse/
+    classify work runs via FastAPI BackgroundTasks, same reasoning as
+    _confirm_and_get_job above — a page refresh mid-analysis must not lose
+    the upload). Fetches the finished job via GET /api/ingest/analyze-jobs/{id}
+    so tests can assert on job["result"], the same shape the old
+    synchronous 200 response used to return directly.
+    """
+    res = await client.post(
+        f"/api/ingest/{kind}/analyze", headers=headers,
+        files={"file": (filename, csv_bytes, "text/csv")},
+    )
+    assert res.status_code == 202, f"expected 202-accepted, got {res.status_code}: {res.text}"
+    job_id = res.json()["job_id"]
+    job_res = await client.get(f"/api/ingest/analyze-jobs/{job_id}", headers=headers)
+    assert job_res.status_code == 200
+    job = job_res.json()
+    assert job["status"] != "running", "background analyze job did not finish synchronously as expected under ASGITransport"
+    return job
+
+
 def _lock_contention_worker(role: str, hold_seconds: float, result_path: str) -> None:
     """
     Runs in a genuinely separate OS process (see the test below) — the
@@ -255,9 +277,9 @@ def _isolate_ml_paths(seed_live_period: str | None = None):
 async def _preserve_app_state():
     """
     Snapshot + restore app.main's live in-memory dataset globals around a
-    test, clean up any pending_ingests / ingest_jobs DB rows the test
-    created (both are SHARED, cross-worker Postgres tables — see
-    PendingIngest and IngestJob in app/db/models.py — so leftover test rows
+    test, clean up any pending_ingests / ingest_jobs / analyze_jobs DB rows
+    the test created (all SHARED, cross-worker Postgres tables — see
+    PendingIngest, IngestJob and AnalyzeJob in app/db/models.py — so leftover test rows
     would show up in the real dev server's own pending-upload flow and
     ingestion notification badge too, not just this process), and delete
     backend/app/ml/ingested_capstone.csv if a test left synthetic data
@@ -279,9 +301,10 @@ async def _preserve_app_state():
         main_mod._DATA       = original_data
         main_mod._ATTENDANCE = original_attendance
         async with main_mod._AsyncSession() as session:
-            from app.db.models import IngestJob, PendingIngest
+            from app.db.models import AnalyzeJob, IngestJob, PendingIngest
             await session.execute(delete(PendingIngest))
             await session.execute(delete(IngestJob))
+            await session.execute(delete(AnalyzeJob))
             await session.commit()
         # Restore, not just delete — a real admin's previously-ingested
         # real data (if this file existed before the test touched it) must
@@ -474,12 +497,9 @@ async def test_column_classification_flags_unexpected_column_as_new():
         token = await _login(client)
         headers = {"Authorization": f"Bearer {token}"}
         async with _preserve_app_state():
-            res = await client.post(
-                "/api/ingest/capstone/analyze", headers=headers,
-                files={"file": ("nine_case.csv", csv_bytes, "text/csv")},
-            )
-    assert res.status_code == 200
-    cols = res.json()["columns"]
+            job = await _analyze_and_get_job(client, headers, "capstone", "nine_case.csv", csv_bytes)
+    assert job["status"] == "success", job.get("error_detail")
+    cols = job["result"]["columns"]
     assert set(cols["keep"]) == set(CAPSTONE_COLUMNS)
     skip_names = {s["column"] for s in cols["skip"]}
     assert skip_names == set()  # none of the 4 known-skip columns are present in this synthetic file
@@ -495,11 +515,9 @@ async def test_resit_collapsing_combines_across_attempts_at_type_level():
         token = await _login(client)
         headers = {"Authorization": f"Bearer {token}"}
         async with _preserve_app_state():
-            analyze = await client.post(
-                "/api/ingest/capstone/analyze", headers=headers,
-                files={"file": ("nine_case.csv", csv_bytes, "text/csv")},
-            )
-            token_id = analyze.json()["token"]
+            analyze_job = await _analyze_and_get_job(client, headers, "capstone", "nine_case.csv", csv_bytes)
+            assert analyze_job["status"] == "success", analyze_job.get("error_detail")
+            token_id = analyze_job["result"]["token"]
             with _isolate_ml_paths(seed_live_period="99.9"):  # newer than 99.2 -> no retrain triggered
                 job = await _confirm_and_get_job(client, headers, "capstone", token_id)
             assert job["status"] == "success"
@@ -551,11 +569,9 @@ async def test_dashboard_reflects_newly_ingested_data():
         token = await _login(client)
         headers = {"Authorization": f"Bearer {token}"}
         async with _preserve_app_state():
-            analyze = await client.post(
-                "/api/ingest/capstone/analyze", headers=headers,
-                files={"file": ("nine_case.csv", csv_bytes, "text/csv")},
-            )
-            token_id = analyze.json()["token"]
+            analyze_job = await _analyze_and_get_job(client, headers, "capstone", "nine_case.csv", csv_bytes)
+            assert analyze_job["status"] == "success", analyze_job.get("error_detail")
+            token_id = analyze_job["result"]["token"]
             with _isolate_ml_paths(seed_live_period="99.9"):
                 job = await _confirm_and_get_job(client, headers, "capstone", token_id)
             assert job["status"] == "success"
@@ -580,11 +596,9 @@ async def test_retrain_trigger_same_period_vs_new_period():
         # ── Case A: same period as the seeded live model — must NOT retrain ──
         csv_bytes = _build_nine_case_csv(include_unexpected_column=False)  # max period 99.2
         async with _preserve_app_state():
-            analyze = await client.post(
-                "/api/ingest/capstone/analyze", headers=headers,
-                files={"file": ("same_period.csv", csv_bytes, "text/csv")},
-            )
-            token_id = analyze.json()["token"]
+            analyze_job = await _analyze_and_get_job(client, headers, "capstone", "same_period.csv", csv_bytes)
+            assert analyze_job["status"] == "success", analyze_job.get("error_detail")
+            token_id = analyze_job["result"]["token"]
             with _isolate_ml_paths(seed_live_period="99.2"):  # same as the data's latest period
                 job_same = await _confirm_and_get_job(client, headers, "capstone", token_id)
         assert job_same["status"] == "success"
@@ -610,12 +624,9 @@ async def test_retrain_trigger_same_period_vs_new_period():
         new_period_csv_bytes = buf.getvalue().encode()
 
         async with _preserve_app_state():
-            analyze_b = await client.post(
-                "/api/ingest/capstone/analyze", headers=headers,
-                files={"file": ("new_period.csv", new_period_csv_bytes, "text/csv")},
-            )
-            assert analyze_b.status_code == 200
-            token_id_b = analyze_b.json()["token"]
+            analyze_job_b = await _analyze_and_get_job(client, headers, "capstone", "new_period.csv", new_period_csv_bytes)
+            assert analyze_job_b["status"] == "success", analyze_job_b.get("error_detail")
+            token_id_b = analyze_job_b["result"]["token"]
             with _isolate_ml_paths(seed_live_period=real_latest) as (_tmp_dir, isolated_registry_path):
                 job_new = await _confirm_and_get_job(client, headers, "capstone", token_id_b)
                 assert job_new["status"] == "success", job_new.get("error_detail")

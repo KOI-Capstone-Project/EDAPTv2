@@ -2,34 +2,12 @@
 // what-if simulator for hypothetical scenarios. Shared by admin (all subjects)
 // and lecturer (assigned subjects only) via the isAdmin prop.
 import { useState, useEffect } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { getUser } from '../utils/auth';
 import api from '../services/api';
+import { RiskBadge, MidTermTag, resolveSafeFloor } from '../components/RiskBadge';
 
 // ── Sub-components ─────────────────────────────────────────────────────────────
-
-function RiskBadge({ band, insufficientData }) {
-  // A gray "not enough data" badge is deliberately its own branch, not a
-  // map[band] fallback — falling through to a risk color (even amber) for a
-  // student with no prediction would read as a risk signal that isn't there.
-  if (insufficientData) {
-    return (
-      <span style={{ fontSize: 12, fontWeight: 600, padding: '4px 12px', borderRadius: 20, whiteSpace: 'nowrap', background: '#F1F5F9', color: '#64748B' }}>
-        Not enough data yet
-      </span>
-    );
-  }
-  const map = {
-    Safe:        { bg: '#DCFCE7', color: '#166534' },
-    'At Risk':   { bg: '#FEF9C3', color: '#854D0E' },
-    'High Risk': { bg: '#FEE2E2', color: '#991B1B' },
-  };
-  const c = map[band] || map['At Risk'];
-  return (
-    <span style={{ fontSize: 12, fontWeight: 600, padding: '4px 12px', borderRadius: 20, whiteSpace: 'nowrap', background: c.bg, color: c.color }}>
-      {band || '—'}
-    </span>
-  );
-}
 
 // Real per-feature SHAP contributions for one prediction — the actual model
 // math, not a Gemini-generated guess. `factors`: [{feature, value, contribution,
@@ -46,11 +24,24 @@ const FEATURE_LABELS = {
   PARTIAL_WEIGHT_COVERAGE:  'Assessment coverage recorded so far',
   SUBJECT_DIFFICULTY:       'Subject historical fail rate',
   TRIMESTER_NUM:            'Study period',
+  ATTENDANCE_RATE:          'Attendance rate',
 };
 
 function ShapFactorBars({ shap }) {
   if (!shap || !shap.top_factors || shap.top_factors.length === 0) return null;
-  const maxAbs = Math.max(...shap.top_factors.map(f => Math.abs(f.contribution)), 1);
+  // Attendance is a real model input (see ATTENDANCE_RATE in FEATURE_LABELS)
+  // but its SHAP contribution is usually small relative to assessment marks
+  // — top_factors (top 3 by |contribution|) can easily omit it entirely,
+  // which reads as "the model ignored attendance" when it didn't. Pull it
+  // from all_factors (every feature, always present) and append it if it's
+  // not already one of the naturally top-ranked factors, so it's never
+  // silently invisible regardless of how small its pull was.
+  const attendanceInTop = shap.top_factors.some(f => f.feature === 'ATTENDANCE_RATE');
+  const attendanceFactor = !attendanceInTop
+    ? (shap.all_factors || []).find(f => f.feature === 'ATTENDANCE_RATE')
+    : null;
+  const displayFactors = attendanceFactor ? [...shap.top_factors, attendanceFactor] : shap.top_factors;
+  const maxAbs = Math.max(...displayFactors.map(f => Math.abs(f.contribution)), 1);
   return (
     <div style={{ marginBottom: 14 }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
@@ -61,13 +52,20 @@ function ShapFactorBars({ shap }) {
         )}
       </div>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-        {shap.top_factors.map((f, i) => {
+        {displayFactors.map((f, i) => {
           const pct   = Math.min(100, (Math.abs(f.contribution) / maxAbs) * 100);
           const color = f.direction === 'Pass' ? '#059669' : f.direction === 'Fail' ? '#DC2626' : '#94A3B8';
+          const isAppendedAttendance = attendanceFactor && f.feature === 'ATTENDANCE_RATE';
           return (
             <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
               <span style={{ fontSize: 11, color: '#475569', width: 190, flexShrink: 0 }}>
                 {FEATURE_LABELS[f.feature] || f.feature}
+                {isAppendedAttendance && (
+                  <span title="Always shown regardless of rank, since attendance is otherwise easy to assume the model ignored."
+                    style={{ marginLeft: 4, fontSize: 9, color: '#94A3B8' }}>
+                    (always shown)
+                  </span>
+                )}
               </span>
               <div style={{ flex: 1, height: 8, background: '#F1F5F9', borderRadius: 4, position: 'relative', overflow: 'hidden' }}>
                 <div style={{ width: `${pct}%`, height: '100%', background: color, borderRadius: 4 }} />
@@ -247,21 +245,6 @@ export function InterventionPanel({ studentId, subject, studyPeriod }) {
   );
 }
 
-function MidTermTag() {
-  return (
-    <span
-      title="Mid-term estimate — based on partial data"
-      style={{
-        fontSize: 11, fontWeight: 600, padding: '3px 8px', borderRadius: 20, whiteSpace: 'nowrap',
-        background: '#EEF2FF', color: '#4338CA', border: '0.5px solid #C7D2FE',
-        display: 'inline-flex', alignItems: 'center', gap: 4,
-      }}
-    >
-      ⏳ Mid-term estimate
-    </span>
-  );
-}
-
 function Gauge({ pct }) {
   const cx = 110, cy = 100, r = 82, sw = 14;
   const C      = Math.PI * r;
@@ -326,13 +309,25 @@ export function PredictionResultPanel({ result, geminiLoading, geminiInsight }) 
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           {isMidTerm && <MidTermTag />}
-          <RiskBadge band={result.risk_band} insufficientData={isInsufficientData} />
+          <RiskBadge band={result.risk_band} insufficientData={isInsufficientData} probability={result.probability} safeFloor={safeFloor} />
         </div>
       </div>
 
-      {result.attendance_rate_is_default && result.attendance_rate_used != null && (
+      {/* Always shown, not just when defaulted — ATTENDANCE_RATE is a real
+          model input (see FEATURE_LABELS/ShapFactorBars), but with nothing
+          on this screen ever labeled "Attendance," it read as though the
+          model ignored it entirely. This is the one place that number is
+          visible at all. */}
+      {result.attendance_rate_used != null ? (
+        <p style={{ margin: '-12px 0 16px', fontSize: 12, color: '#475569' }}>
+          📊 Attendance rate used: <strong>{(result.attendance_rate_used * 100).toFixed(0)}%</strong>
+          {result.attendance_rate_is_default
+            ? " — this subject's average (no individual attendance record for this student)"
+            : " — this student's own attendance record"}
+        </p>
+      ) : (
         <p style={{ margin: '-12px 0 16px', fontSize: 11, color: '#94A3B8', fontStyle: 'italic' }}>
-          ℹ Attendance rate defaulted to this subject's real average ({(result.attendance_rate_used * 100).toFixed(0)}%) — not a value you entered.
+          Attendance rate: not available for this student.
         </p>
       )}
 
@@ -488,8 +483,16 @@ export default function PredictorView({ isAdmin }) {
   const [allSubjects, setAllSubjects] = useState([]);
   const subjects = isAdmin ? allSubjects : (getUser()?.subjects || []);
 
-  const [subject,     setSubject]     = useState('');
-  const [studyPeriod, setStudyPeriod] = useState('');
+  // Pre-selected when arriving from Students at Risk (?subject=X&period=Y) —
+  // read once on mount so the roster loads straight away instead of making
+  // the admin/lecturer re-pick a subject+period they already chose there.
+  // &student=ID (also from Students at Risk) additionally jumps straight to
+  // that student's detail view once the roster loads — see the effect
+  // right after openStudentDetail's definition below.
+  const [searchParams] = useSearchParams();
+  const [subject,     setSubject]     = useState(() => searchParams.get('subject') || '');
+  const [studyPeriod, setStudyPeriod] = useState(() => searchParams.get('period') || '');
+  const [studentIdParam, setStudentIdParam] = useState(() => searchParams.get('student') || null);
   const [periods,     setPeriods]     = useState([]);
 
   // view: 'roster' (default) | 'detail' (a real student clicked) | 'whatif' (hypothetical scenario)
@@ -702,6 +705,20 @@ export default function PredictorView({ isAdmin }) {
       .catch(() => setDetailError('Failed to load this student\'s assessment history. Please try again.'))
       .finally(() => setDetailLoading(false));
   };
+
+  // Deep-linked straight to one student (?student=ID, from Students at
+  // Risk) — once the roster for that subject/period has loaded, jump
+  // directly to their detail view instead of leaving the admin/lecturer to
+  // find and click the row themselves. Consumed once (cleared right after)
+  // so going back to the roster and staying on this page doesn't re-fire it.
+  useEffect(() => {
+    if (!studentIdParam || roster.length === 0) return;
+    if (roster.some(r => r.student_id === studentIdParam)) {
+      openStudentDetail(studentIdParam);
+    }
+    setStudentIdParam(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [roster, studentIdParam]);
 
   const backToRoster = () => {
     setView('roster');
@@ -1008,7 +1025,12 @@ export default function PredictorView({ isAdmin }) {
                         <td style={s.td}>
                           <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                             {r.estimate_type === 'mid-term estimate' && <MidTermTag />}
-                            <RiskBadge band={r.risk_band} insufficientData={r.coverage_status === 'insufficient_data'} />
+                            <RiskBadge
+                              band={r.risk_band}
+                              insufficientData={r.coverage_status === 'insufficient_data'}
+                              probability={r.probability}
+                              safeFloor={resolveSafeFloor(r)}
+                            />
                           </div>
                         </td>
                       </tr>

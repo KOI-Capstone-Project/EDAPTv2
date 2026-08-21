@@ -1,13 +1,12 @@
-// Google and Microsoft sign-in buttons for the login page. Each provider
-// only renders once its client ID is configured — an unset client ID hides
-// that button rather than showing one that can only ever fail.
-import { useState } from 'react';
+// Google and Microsoft sign-in buttons for the login page. Which providers
+// are configured/enabled is fetched at runtime from the backend (Settings >
+// OAuth Providers, GET /api/oauth-providers/public) rather than baked in at
+// build time — an unconfigured or disabled provider simply doesn't appear,
+// the same as an unset client ID used to hide it.
+import { useState, useEffect } from 'react';
 import { GoogleLogin, GoogleOAuthProvider } from '@react-oauth/google';
 import api from '../services/api';
-import { msalInstance, ensureMsalInitialized, MICROSOFT_ENABLED } from '../utils/msal';
-
-const GOOGLE_CLIENT_ID = process.env.REACT_APP_GOOGLE_CLIENT_ID || '';
-const GOOGLE_ENABLED   = Boolean(GOOGLE_CLIENT_ID);
+import { getMsalInstance } from '../utils/msal';
 
 const MicrosoftIcon = () => (
   <svg width="16" height="16" viewBox="0 0 21 21" aria-hidden="true">
@@ -19,9 +18,22 @@ const MicrosoftIcon = () => (
 );
 
 export default function OAuthButtons({ onSuccess, onError, disabled }) {
+  const [providers, setProviders] = useState(null); // null = still loading
   const [msLoading, setMsLoading] = useState(false);
 
-  if (!GOOGLE_ENABLED && !MICROSOFT_ENABLED) return null;
+  useEffect(() => {
+    let cancelled = false;
+    api.get('/api/oauth-providers/public')
+      .then(r => { if (!cancelled) setProviders(r.data.providers); })
+      .catch(() => { if (!cancelled) setProviders([]); });
+    return () => { cancelled = true; };
+  }, []);
+
+  if (!providers || providers.length === 0) return null;
+
+  const google    = providers.find(p => p.provider === 'google');
+  const microsoft = providers.find(p => p.provider === 'microsoft');
+  if (!google && !microsoft) return null;
 
   const exchangeToken = async (path, idToken) => {
     const res = await api.post(path, { id_token: idToken });
@@ -39,8 +51,8 @@ export default function OAuthButtons({ onSuccess, onError, disabled }) {
   const handleMicrosoft = async () => {
     setMsLoading(true);
     try {
-      await ensureMsalInitialized();
-      const result = await msalInstance.loginPopup({ scopes: ['openid', 'profile', 'email'] });
+      const instance = await getMsalInstance(microsoft.client_id, microsoft.tenant_id);
+      const result = await instance.loginPopup({ scopes: ['openid', 'profile', 'email'] });
       await exchangeToken('/api/auth/microsoft', result.idToken);
     } catch (err) {
       if (err?.errorCode !== 'user_cancelled') {
@@ -59,7 +71,7 @@ export default function OAuthButtons({ onSuccess, onError, disabled }) {
         <span style={s.dividerLine} />
       </div>
       <div style={s.row}>
-        {GOOGLE_ENABLED && (
+        {google && (
           <div style={s.googleWrap}>
             <GoogleLogin
               onSuccess={handleGoogleSuccess}
@@ -71,7 +83,7 @@ export default function OAuthButtons({ onSuccess, onError, disabled }) {
             />
           </div>
         )}
-        {MICROSOFT_ENABLED && (
+        {microsoft && (
           <button
             type="button"
             style={s.msBtn}
@@ -86,8 +98,8 @@ export default function OAuthButtons({ onSuccess, onError, disabled }) {
     </div>
   );
 
-  return GOOGLE_ENABLED
-    ? <GoogleOAuthProvider clientId={GOOGLE_CLIENT_ID}>{body}</GoogleOAuthProvider>
+  return google
+    ? <GoogleOAuthProvider clientId={google.client_id}>{body}</GoogleOAuthProvider>
     : body;
 }
 

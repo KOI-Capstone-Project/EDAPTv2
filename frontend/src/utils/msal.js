@@ -1,29 +1,28 @@
-// Lazily-initialized MSAL singleton for Microsoft sign-in. Only constructed
-// when REACT_APP_MICROSOFT_CLIENT_ID is configured — pages that import this
-// must not assume Microsoft sign-in is available (see MICROSOFT_ENABLED).
+// Lazily-initialized MSAL singleton for Microsoft sign-in. clientId/tenantId
+// come from the backend's OAuth provider config (Settings > OAuth Providers,
+// fetched at runtime via GET /api/oauth-providers/public) rather than a
+// REACT_APP_MICROSOFT_CLIENT_ID build-time env var — the instance is built
+// the first time a caller actually has that config in hand, not at module
+// load.
 import { PublicClientApplication } from '@azure/msal-browser';
 
-export const MICROSOFT_CLIENT_ID = process.env.REACT_APP_MICROSOFT_CLIENT_ID || '';
-export const MICROSOFT_TENANT_ID = process.env.REACT_APP_MICROSOFT_TENANT_ID || 'common';
-export const MICROSOFT_ENABLED   = Boolean(MICROSOFT_CLIENT_ID);
+let _instance = null;
+let _initPromise = null;
 
-export const msalInstance = MICROSOFT_ENABLED
-  ? new PublicClientApplication({
+// msal-browser v3 requires an explicit async initialize() before any other
+// instance method is called — this memoizes both the instance and that
+// initialize() call so callers can just await it every time.
+export function getMsalInstance(clientId, tenantId) {
+  if (!_instance) {
+    _instance = new PublicClientApplication({
       auth: {
-        clientId:    MICROSOFT_CLIENT_ID,
-        authority:   `https://login.microsoftonline.com/${MICROSOFT_TENANT_ID}`,
+        clientId,
+        authority:   `https://login.microsoftonline.com/${tenantId || 'common'}`,
         redirectUri: window.location.origin,
       },
       cache: { cacheLocation: 'sessionStorage' },
-    })
-  : null;
-
-// msal-browser v3 requires an explicit async initialize() before any other
-// instance method is called — this memoizes that so callers can just await
-// it every time without re-initializing.
-let initPromise = null;
-export function ensureMsalInitialized() {
-  if (!msalInstance) return Promise.resolve();
-  if (!initPromise) initPromise = msalInstance.initialize();
-  return initPromise;
+    });
+  }
+  if (!_initPromise) _initPromise = _instance.initialize();
+  return _initPromise.then(() => _instance);
 }
