@@ -83,12 +83,17 @@ def build_attendance_features(
     print(f"Loading {capstone_path} for subject/year scope …")
     capstone = pd.read_csv(capstone_path)
     capstone_subjects = set(capstone["SUBJECTCODE"].unique())
-    capstone_years = set(capstone["YEAR"].astype(str).unique())
+    # capstone["YEAR"] is float64 (NaN forces the whole column to float), so
+    # a plain .astype(str) yields "2026.0" while the attendance side's year
+    # (an int64 column, no NaNs) yields "2026" for the same year — every row
+    # would be dropped by the mismatch below even when the years genuinely
+    # overlap. Normalize both sides to int-string form first.
+    capstone_years = set(capstone["YEAR"].dropna().astype(int).astype(str).unique())
     print(f"  Capstone subjects: {len(capstone_subjects)}  years: {sorted(capstone_years)}")
 
     # ── Filter ────────────────────────────────────────────────────────────
     before = len(att)
-    att["year"] = att["year"].astype(str)
+    att["year"] = att["year"].astype(int).astype(str)
     mask = (
         att["study_period_code"].isin(VALID_PERIOD_CODES)
         & att["course"].isin(capstone_subjects)
