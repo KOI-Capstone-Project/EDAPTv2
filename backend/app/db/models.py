@@ -570,6 +570,61 @@ class AnalyzeJob(Base):
     error_detail: str | None = Column(Text, nullable=True)
 
 
+class MailServer(AuditMixin, Base):
+    """
+    Admin-configurable outgoing SMTP server (Settings > Outgoing Mail
+    Servers) — replaces the single hardcoded GMAIL_SENDER/GMAIL_APP_PASSWORD
+    env var pair (Gmail-only, one server, no way to swap providers) with
+    admin-editable, multiple servers, modeled on Odoo's ir.mail_server:
+    name/host/port/connection-security/username/password/priority/active.
+
+    Multiple rows, not a singleton config row like AIProviderConfig or
+    RiskEmailTemplate — an org may genuinely want more than one outgoing
+    server (e.g. a primary provider and a fallback), so this follows
+    ApiKey's shape instead (autoincrement id, admin-chosen name,
+    created_by/timestamps via AuditMixin) rather than the fixed id=1
+    pattern. `priority` picks which ACTIVE server is actually used to send
+    (lowest number wins) — the same "sequence" convention Odoo's mail
+    server list uses, just without Odoo's per-server failover-on-send
+    (this app only ever needs one server to actually send from at a time).
+
+    encrypted_password is Fernet-encrypted (see app.crypto_utils), same as
+    AIProviderConfig.encrypted_api_key — a genuine secret this app sends on
+    the wire on the admin's behalf, so GET never returns it in plaintext,
+    only whether one is set and a short masked preview.
+    """
+
+    __tablename__ = "mail_servers"
+
+    id: int = Column(Integer, primary_key=True, autoincrement=True)
+
+    name: str = Column(String(120), nullable=False, comment="Admin-chosen label, e.g. 'Gmail SMTP'")
+
+    host: str = Column(String(255), nullable=False)
+    port: int = Column(Integer, nullable=False, default=587, server_default="587")
+    security: str = Column(
+        String(20), nullable=False, default="starttls", server_default="starttls",
+        comment="'none' | 'starttls' | 'ssl'",
+    )
+
+    username: str | None = Column(String(255), nullable=True)
+    encrypted_password: str | None = Column(Text, nullable=True)
+
+    from_email: str | None = Column(
+        String(254), nullable=True,
+        comment="Envelope From address — falls back to username at send time if blank",
+    )
+
+    priority: int = Column(
+        Integer, nullable=False, default=10, server_default="10",
+        comment="Lower number = tried first among active servers (Odoo's 'sequence' convention)",
+    )
+    active: bool = Column(Boolean, nullable=False, default=True, server_default="true")
+
+    created_by: str = Column(String(254), nullable=False)
+    updated_by: str | None = Column(String(254), nullable=True)
+
+
 class UploadBatch(Base):
     """
     Tracks a large file upload split into small sequential chunks from the

@@ -22,6 +22,7 @@ from pathlib import Path
 
 import secrets
 import smtplib
+import time
 import uuid
 from typing import Annotated, Optional
 
@@ -40,7 +41,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
-from app.db.models import AIProviderConfig, AnalyzeJob, ApiKey, AuditLog, Base, IngestJob, Intervention, OAuthProviderConfig, PendingIngest, Prediction, RiskEmailTemplate, UploadBatch, User as UserModel
+from app.db.models import AIProviderConfig, AnalyzeJob, ApiKey, AuditLog, Base, IngestJob, Intervention, MailServer, OAuthProviderConfig, PendingIngest, Prediction, RiskEmailTemplate, UploadBatch, User as UserModel
 from app import oauth_providers
 from app.crypto_utils import encrypt_secret, decrypt_secret
 # Light module — pure functions over an already-computed SHAP dict, no model
@@ -357,6 +358,26 @@ async def _seed_ai_provider_config() -> None:
         ))
         await db.commit()
 
+
+async def _seed_mail_server_from_env() -> None:
+    """One-time migration seed: if GMAIL_SENDER/GMAIL_APP_PASSWORD are
+    already set and no MailServer row exists yet, seed one active Gmail SSL
+    server from them — same reasoning as _seed_ai_provider_config, so an
+    existing deployment keeps sending real emails after this migration with
+    nothing to re-enter. A fresh deployment with no env vars seeds nothing;
+    Settings > Outgoing Mail Servers just starts empty."""
+    async with _AsyncSession() as db:
+        existing = (await db.execute(select(MailServer).limit(1))).scalars().first()
+        if existing is not None or not GMAIL_SENDER or not GMAIL_APP_PASSWORD:
+            return
+        db.add(MailServer(
+            name="Gmail (migrated)", host="smtp.gmail.com", port=465, security="ssl",
+            username=GMAIL_SENDER, from_email=GMAIL_SENDER,
+            encrypted_password=encrypt_secret(GMAIL_APP_PASSWORD, SECRET_KEY),
+            priority=10, active=True, created_by="system",
+        ))
+        await db.commit()
+
 # ─────────────────────────────────────────────────────────────────────────────
 # In-Memory State
 # ─────────────────────────────────────────────────────────────────────────────
@@ -407,22 +428,49 @@ def _record_failed_attempt(email: str) -> None:
 # Email and OTP Helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _send_otp_email(to_email: str, otp: str) -> None:
-    """Send OTP via Gmail SMTP. Raises RuntimeError if email service is not configured."""
-    if not GMAIL_SENDER or not GMAIL_APP_PASSWORD:
+def _send_via_mail_server(server: "MailServer", to_email: str, subject: str, body: str) -> None:
+    """Actually sends one email through a configured MailServer row — shared
+    by every real sender in the app (currently just OTP email), so adding a
+    second kind of outbound email later doesn't mean a second copy of this
+    connect/login/send dance. Raises on any SMTP/connection failure; the
+    caller decides how to surface that."""
+    password  = decrypt_secret(server.encrypted_password, SECRET_KEY) if server.encrypted_password else None
+    from_addr = server.from_email or server.username or ""
+    msg = MIMEText(body, "plain")
+    msg["Subject"] = subject
+    msg["From"]    = from_addr
+    msg["To"]      = to_email
+
+    if server.security == "ssl":
+        smtp = smtplib.SMTP_SSL(server.host, server.port, timeout=15)
+    else:
+        smtp = smtplib.SMTP(server.host, server.port, timeout=15)
+    with smtp:
+        if server.security == "starttls":
+            smtp.starttls()
+        if server.username:
+            smtp.login(server.username, password or "")
+        smtp.sendmail(from_addr, to_email, msg.as_string())
+
+
+async def _send_otp_email(db: AsyncSession, to_email: str, otp: str) -> None:
+    """Send OTP via the active outgoing mail server (Settings > Outgoing
+    Mail Servers — see MailServer's docstring), instead of the single
+    hardcoded GMAIL_SENDER/GMAIL_APP_PASSWORD env var pair this replaced.
+    "Active" = lowest-priority row with active=True; ties broken by id.
+    Raises RuntimeError if no active server is configured."""
+    result = await db.execute(
+        select(MailServer).where(MailServer.active.is_(True)).order_by(MailServer.priority, MailServer.id)
+    )
+    server = result.scalars().first()
+    if server is None:
         raise RuntimeError("Email service not configured")
-    msg = MIMEText(
+    _send_via_mail_server(
+        server, to_email, "EDAPT — Password Reset Code",
         f"Your EDAPT password reset code is: {otp}\n\n"
         f"This code expires in {OTP_EXPIRY_MINUTES} minutes.\n\n"
         "If you did not request a password reset, you can ignore this email.",
-        "plain",
     )
-    msg["Subject"] = "EDAPT — Password Reset Code"
-    msg["From"]    = GMAIL_SENDER
-    msg["To"]      = to_email
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-        server.login(GMAIL_SENDER, GMAIL_APP_PASSWORD)
-        server.sendmail(GMAIL_SENDER, to_email, msg.as_string())
 
 
 def _generate_otp(email: str) -> str:
@@ -995,8 +1043,13 @@ async def _startup():
     await _seed_oauth_provider_configs()
     await _seed_ai_provider_config()
     await _refresh_ai_config_cache()
+    await _seed_mail_server_from_env()
     logger.info("Database ready")
-    if GMAIL_SENDER and GMAIL_APP_PASSWORD:
+    async with _AsyncSession() as db:
+        has_active_mail_server = (await db.execute(
+            select(MailServer).where(MailServer.active.is_(True)).limit(1)
+        )).scalars().first() is not None
+    if has_active_mail_server:
         logger.info("Email service configured")
     else:
         logger.warning("Email service not configured — forgot password will not work")
@@ -1367,7 +1420,7 @@ async def forgot_password(req: ForgotPasswordRequest, db: AsyncSession = Depends
     otp = _generate_otp(req.email)
 
     try:
-        _send_otp_email(req.email, otp)
+        await _send_otp_email(db, req.email, otp)
         await _append_audit_db(db, user_uid=req.email, action_type="Password Reset Requested",
                                status="Success", detail="OTP sent to registered email")
     except RuntimeError:
@@ -3667,6 +3720,252 @@ async def update_ai_config(
         "updated_by":  user["sub"],
         "updated_at":  now.isoformat(),
     }
+
+
+class MailServerCreate(BaseModel):
+    name:       str            = Field(..., min_length=1, max_length=120)
+    host:       str            = Field(..., min_length=1, max_length=255)
+    port:       int            = Field(..., ge=1, le=65535)
+    security:   str            = Field("starttls", max_length=20)
+    username:   Optional[str] = Field(None, max_length=255)
+    password:   Optional[str] = Field(None, max_length=500)
+    from_email: Optional[str] = Field(None, max_length=254)
+    priority:   int            = Field(10, ge=0, le=999)
+    active:     bool           = True
+
+
+class MailServerUpdate(BaseModel):
+    name:       str            = Field(..., min_length=1, max_length=120)
+    host:       str            = Field(..., min_length=1, max_length=255)
+    port:       int            = Field(..., ge=1, le=65535)
+    security:   str            = Field(..., max_length=20)
+    username:   Optional[str] = Field(None, max_length=255)
+    # Blank/omitted keeps whatever password is already stored — see
+    # update_mail_server's docstring.
+    password:   Optional[str] = Field(None, max_length=500)
+    from_email: Optional[str] = Field(None, max_length=254)
+    priority:   int            = Field(10, ge=0, le=999)
+    active:     bool           = True
+
+
+class MailServerTestRequest(BaseModel):
+    server_id: Optional[int] = None
+    host:      Optional[str] = Field(None, max_length=255)
+    port:      Optional[int] = Field(None, ge=1, le=65535)
+    security:  Optional[str] = Field(None, max_length=20)
+    username:  Optional[str] = Field(None, max_length=255)
+    password:  Optional[str] = Field(None, max_length=500)
+
+
+_MAIL_SECURITY_OPTIONS = ("none", "starttls", "ssl")
+
+
+def _mail_server_to_dict(s: MailServer) -> dict:
+    return {
+        "id":         s.id,
+        "name":       s.name,
+        "host":       s.host,
+        "port":       s.port,
+        "security":   s.security,
+        "username":   s.username,
+        "has_password": bool(s.encrypted_password),
+        "from_email": s.from_email,
+        "priority":   s.priority,
+        "active":     s.active,
+        "created_by": s.created_by,
+        "updated_by": s.updated_by,
+        "created_at": s.created_at.isoformat() if s.created_at else None,
+        "updated_at": s.updated_at.isoformat() if s.updated_at else None,
+    }
+
+
+def _test_smtp_connection(
+    host: str, port: int, security: str, username: Optional[str], password: Optional[str],
+) -> dict:
+    """Connects (and authenticates, if credentials are given) to an SMTP
+    server WITHOUT sending any mail — a real, live connectivity/credential
+    check for the "Test Connection" button, not a dry validation of form
+    fields. Never raises: every failure mode (DNS, connection refused,
+    timeout, TLS handshake, bad credentials) is caught and turned into a
+    {success, message} pair the frontend shows immediately. Runs on a
+    worker thread (see asyncio.to_thread at the call sites) since smtplib
+    is fully blocking and a slow/unreachable host must not stall the event
+    loop for every other request."""
+    started = time.monotonic()
+    try:
+        smtp = smtplib.SMTP_SSL(host, port, timeout=10) if security == "ssl" else smtplib.SMTP(host, port, timeout=10)
+        try:
+            smtp.ehlo()
+            if security == "starttls":
+                smtp.starttls()
+                smtp.ehlo()
+            if username:
+                smtp.login(username, password or "")
+            else:
+                smtp.noop()
+        finally:
+            with contextlib.suppress(Exception):
+                smtp.quit()
+        elapsed = round(time.monotonic() - started, 2)
+        message = (
+            f"Connected and authenticated as {username} in {elapsed}s."
+            if username else f"Connected in {elapsed}s (no credentials to verify)."
+        )
+        return {"success": True, "message": message, "elapsed_seconds": elapsed}
+    except smtplib.SMTPAuthenticationError as exc:
+        detail = exc.smtp_error.decode(errors="ignore") if isinstance(exc.smtp_error, bytes) else str(exc.smtp_error)
+        return {
+            "success": False, "message": f"Authentication failed ({exc.smtp_code}): {detail}",
+            "elapsed_seconds": round(time.monotonic() - started, 2),
+        }
+    except (smtplib.SMTPException, OSError, TimeoutError) as exc:
+        return {
+            "success": False, "message": str(exc) or exc.__class__.__name__,
+            "elapsed_seconds": round(time.monotonic() - started, 2),
+        }
+
+
+@app.post("/api/mail-servers/test", tags=["Mail Servers"])
+async def test_mail_server(
+    req:  MailServerTestRequest,
+    user: dict = Depends(require_head_of_school),
+    db:   AsyncSession = Depends(get_db),
+):
+    """Live connection test, no email actually sent — used both for a
+    not-yet-saved form (host/port/etc passed directly, no server_id) and
+    for an already-saved server (server_id pulls its stored host/port/
+    username/decrypted-password as the baseline; any field also passed
+    directly overrides just that one, e.g. testing a new password before
+    committing it). This is the one thing with genuinely no existing
+    pattern anywhere else in the app — everything else here is a live,
+    real-time result, not a dry validation of the form fields."""
+    host, port, security, username, password = None, None, None, None, None
+    if req.server_id is not None:
+        row = await db.get(MailServer, req.server_id)
+        if row is None:
+            raise HTTPException(404, "Mail server not found.")
+        host, port, security, username = row.host, row.port, row.security, row.username
+        password = decrypt_secret(row.encrypted_password, SECRET_KEY) if row.encrypted_password else None
+
+    host     = req.host if req.host is not None else host
+    port     = req.port if req.port is not None else port
+    security = req.security if req.security is not None else (security or "starttls")
+    username = req.username if req.username is not None else username
+    password = req.password if req.password else password
+
+    if not host or not port:
+        raise HTTPException(422, "host and port are required to test a connection.")
+    if security not in _MAIL_SECURITY_OPTIONS:
+        raise HTTPException(422, f"security must be one of: {', '.join(_MAIL_SECURITY_OPTIONS)}")
+
+    return await asyncio.to_thread(_test_smtp_connection, host, port, security, username, password)
+
+
+@app.get("/api/mail-servers", tags=["Mail Servers"])
+async def list_mail_servers(
+    user: dict = Depends(require_head_of_school),
+    db:   AsyncSession = Depends(get_db),
+):
+    """All configured outgoing mail servers, priority order (lowest first,
+    ties by id) — the first row here with active=True is the one
+    _send_otp_email actually uses."""
+    result = await db.execute(select(MailServer).order_by(MailServer.priority, MailServer.id))
+    return {"servers": [_mail_server_to_dict(s) for s in result.scalars().all()]}
+
+
+@app.post("/api/mail-servers", status_code=201, tags=["Mail Servers"])
+async def create_mail_server(
+    req:  MailServerCreate,
+    user: dict = Depends(require_head_of_school),
+    db:   AsyncSession = Depends(get_db),
+):
+    """Add a new outgoing mail server — admin only. Multiple servers are
+    allowed (see MailServer's docstring); this doesn't replace any existing
+    row, just adds another one to the priority-ordered list."""
+    if req.security not in _MAIL_SECURITY_OPTIONS:
+        raise HTTPException(422, f"security must be one of: {', '.join(_MAIL_SECURITY_OPTIONS)}")
+
+    row = MailServer(
+        name=req.name.strip(), host=req.host.strip(), port=req.port, security=req.security,
+        username=(req.username or None), from_email=(req.from_email or None),
+        priority=req.priority, active=req.active, created_by=user["sub"],
+    )
+    if req.password:
+        row.encrypted_password = encrypt_secret(req.password, SECRET_KEY)
+    db.add(row)
+    await db.flush()
+
+    await _append_audit_db(db, user_uid=user["sub"], action_type="Settings Changed", status="Success",
+                           detail=f"Outgoing mail server created: {row.name} ({row.host}:{row.port})")
+    await db.commit()
+    # Reading row.created_at/updated_at straight after commit — without this
+    # explicit, awaited refresh — hits SQLAlchemy's async-unsafe implicit
+    # lazy-reload on those two server-computed columns (onupdate=func.now()/
+    # server_default=func.now()): a real, confirmed 500 on this exact
+    # endpoint (MissingGreenlet-class crash inside _load_expired), not a
+    # hypothetical one. Same commit-then-refresh pairing already used for
+    # AnalyzeJob/IngestJob elsewhere in this file.
+    await db.refresh(row)
+    return _mail_server_to_dict(row)
+
+
+@app.put("/api/mail-servers/{server_id}", tags=["Mail Servers"])
+async def update_mail_server(
+    server_id: int,
+    req:  MailServerUpdate,
+    user: dict = Depends(require_head_of_school),
+    db:   AsyncSession = Depends(get_db),
+):
+    """Edit an existing outgoing mail server — admin only. A blank/omitted
+    password keeps whatever is already stored, same convention as
+    PUT /api/ai-config's api_key field, so switching, say, just the port
+    doesn't force re-entering the same password."""
+    row = await db.get(MailServer, server_id)
+    if row is None:
+        raise HTTPException(404, "Mail server not found.")
+    if req.security not in _MAIL_SECURITY_OPTIONS:
+        raise HTTPException(422, f"security must be one of: {', '.join(_MAIL_SECURITY_OPTIONS)}")
+
+    row.name       = req.name.strip()
+    row.host       = req.host.strip()
+    row.port       = req.port
+    row.security   = req.security
+    row.username   = req.username or None
+    row.from_email = req.from_email or None
+    row.priority   = req.priority
+    row.active     = req.active
+    if req.password:
+        row.encrypted_password = encrypt_secret(req.password, SECRET_KEY)
+    row.updated_by = user["sub"]
+
+    await _append_audit_db(db, user_uid=user["sub"], action_type="Settings Changed", status="Success",
+                           detail=f"Outgoing mail server updated: {row.name} ({row.host}:{row.port})")
+    await db.commit()
+    # See create_mail_server's comment on the same pattern — reading
+    # row.updated_at right after commit without this refresh crashes.
+    await db.refresh(row)
+    return _mail_server_to_dict(row)
+
+
+@app.delete("/api/mail-servers/{server_id}", tags=["Mail Servers"])
+async def delete_mail_server(
+    server_id: int,
+    user: dict = Depends(require_head_of_school),
+    db:   AsyncSession = Depends(get_db),
+):
+    """Remove an outgoing mail server — admin only. Hard delete: unlike
+    ApiKey (soft-revoked, kept for audit history since a leaked key's past
+    usage matters), a removed SMTP config has nothing worth retaining —
+    the audit log entry below is the durable record that it existed."""
+    row = await db.get(MailServer, server_id)
+    if row is None:
+        raise HTTPException(404, "Mail server not found.")
+    name = row.name
+    await db.delete(row)
+    await _append_audit_db(db, user_uid=user["sub"], action_type="Settings Changed", status="Success",
+                           detail=f"Outgoing mail server deleted: {name}")
+    await db.commit()
+    return {"deleted": True}
 
 
 @app.post("/api/predict", tags=["ML"])
