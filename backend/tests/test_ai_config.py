@@ -91,12 +91,12 @@ async def test_update_ai_config_persists_and_masks_key():
 
             r = await client.put(
                 "/api/ai-config", headers=admin_headers,
-                json={"provider": "openai", "model": "gpt-4o", "api_key": "sk-test-abcd1234"},
+                json={"provider": "openai", "model": "gpt-5.5", "api_key": "sk-test-abcd1234"},
             )
             assert r.status_code == 200
             body = r.json()
             assert body["provider"] == "openai"
-            assert body["model"] == "gpt-4o"
+            assert body["model"] == "gpt-5.5"
             assert body["has_key"] is True
             assert body["key_preview"] == "••••1234"
             assert "sk-test-abcd1234" not in str(body)
@@ -104,7 +104,7 @@ async def test_update_ai_config_persists_and_masks_key():
 
             r_get = await client.get("/api/ai-config", headers=admin_headers)
             assert r_get.json()["provider"] == "openai"
-            assert r_get.json()["model"] == "gpt-4o"
+            assert r_get.json()["model"] == "gpt-5.5"
 
 
 @pytest.mark.asyncio
@@ -116,18 +116,18 @@ async def test_update_ai_config_blank_key_keeps_existing_one():
         async with _preserve_ai_config():
             await client.put(
                 "/api/ai-config", headers=headers,
-                json={"provider": "gemini", "model": "gemini-1.5-pro", "api_key": "AIzaTestKey1111"},
+                json={"provider": "gemini", "model": "gemini-3.1-pro-preview", "api_key": "AIzaTestKey1111"},
             )
             # Switch model only, no api_key in the request — the key set
             # above must survive, not be wiped.
             r = await client.put(
                 "/api/ai-config", headers=headers,
-                json={"provider": "gemini", "model": "gemini-2.0-flash"},
+                json={"provider": "gemini", "model": "gemini-3.7-flash"},
             )
             assert r.status_code == 200
             assert r.json()["has_key"] is True
             assert r.json()["key_preview"] == "••••1111"
-            assert r.json()["model"] == "gemini-2.0-flash"
+            assert r.json()["model"] == "gemini-3.7-flash"
 
 
 @pytest.mark.asyncio

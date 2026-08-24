@@ -304,19 +304,19 @@ except Exception:
 # a new model, an admin just won't see it here until this list is updated.
 AI_MODELS_BY_PROVIDER: dict[str, list[dict]] = {
     "anthropic": [
-        {"id": "claude-3-5-sonnet-latest", "label": "Claude 3.5 Sonnet"},
-        {"id": "claude-3-5-haiku-latest",  "label": "Claude 3.5 Haiku"},
-        {"id": "claude-3-opus-latest",     "label": "Claude 3 Opus"},
+        {"id": "claude-sonnet-5",           "label": "Claude Sonnet 5"},
+        {"id": "claude-opus-5",             "label": "Claude Opus 5"},
+        {"id": "claude-haiku-4-5-20251001", "label": "Claude Haiku 4.5"},
     ],
     "gemini": [
-        {"id": "gemini-2.0-flash", "label": "Gemini 2.0 Flash"},
-        {"id": "gemini-1.5-flash", "label": "Gemini 1.5 Flash"},
-        {"id": "gemini-1.5-pro",  "label": "Gemini 1.5 Pro"},
+        {"id": "gemini-3.7-flash",         "label": "Gemini 3.7 Flash"},
+        {"id": "gemini-3.6-flash",         "label": "Gemini 3.6 Flash"},
+        {"id": "gemini-3.1-pro-preview",   "label": "Gemini 3.1 Pro (Preview)"},
     ],
     "openai": [
-        {"id": "gpt-4o",      "label": "GPT-4o"},
-        {"id": "gpt-4o-mini", "label": "GPT-4o mini"},
-        {"id": "gpt-4-turbo", "label": "GPT-4 Turbo"},
+        {"id": "gpt-5.6-terra", "label": "GPT-5.6 Terra"},
+        {"id": "gpt-5.5",       "label": "GPT-5.5"},
+        {"id": "gpt-5-mini",    "label": "GPT-5 mini"},
     ],
 }
 _AI_PROVIDERS = tuple(AI_MODELS_BY_PROVIDER.keys())
@@ -342,7 +342,7 @@ async def _refresh_ai_config_cache() -> None:
 async def _seed_ai_provider_config() -> None:
     """One-time migration seed: if the GEMINI_API_KEY env var is already set
     and no AIProviderConfig row exists yet, seed provider=gemini/
-    model=gemini-1.5-pro from it, so an existing deployment
+    model=gemini-3.7-flash from it, so an existing deployment
     keeps working after this migration with nothing to re-enter beyond what
     Settings > AI Config already shows. A fresh deployment with no env var
     seeds an empty (no key) gemini-default row, ready to be filled in from
@@ -353,7 +353,7 @@ async def _seed_ai_provider_config() -> None:
         gemini_key = os.getenv("GEMINI_API_KEY", "")
         has_real_key = bool(gemini_key) and "your-gemini" not in gemini_key
         db.add(AIProviderConfig(
-            id=1, provider="gemini", model="gemini-1.5-pro",
+            id=1, provider="gemini", model="gemini-3.7-flash",
             encrypted_api_key=encrypt_secret(gemini_key, SECRET_KEY) if has_real_key else None,
         ))
         await db.commit()
@@ -3725,7 +3725,7 @@ async def get_ai_config(
     api_key = decrypt_secret(row.encrypted_api_key, SECRET_KEY) if row and row.encrypted_api_key else None
     return {
         "provider":          row.provider if row else "gemini",
-        "model":             row.model if row else "gemini-1.5-pro",
+        "model":             row.model if row else "gemini-3.7-flash",
         "has_key":           bool(api_key),
         "key_preview":       _mask_key_preview(api_key),
         "updated_by":        row.updated_by if row else None,
