@@ -26,7 +26,6 @@ import time
 import uuid
 from typing import Annotated, Optional
 
-import joblib
 import pandas as pd
 from dotenv import load_dotenv
 from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, Query, Request, Response, UploadFile, status
@@ -97,23 +96,6 @@ MAX_UPLOAD_BYTES:     int       = 50 * 1024 * 1024
 # what a user UPLOADS (a plain CSV); the checked-in copy is stored gzipped
 # (masked_attendance.csv.gz, ~9MB) and read directly by pandas.
 MAX_ATTENDANCE_UPLOAD_BYTES: int = 200 * 1024 * 1024
-
-# ── ML model (loaded once at startup) ────────────────────────────────────────
-
-_ML_DIR:         Path            = Path(__file__).parent / "ml"
-_MODEL_NAME:      str            = "Random Forest"
-_MODEL_ACCURACY:  float          = 0.0
-_SAFE_SUBJECTS:   list[str]      = []
-
-try:
-    _model_package    = joblib.load(_ML_DIR / "best_model.pkl")
-    _MODEL_NAME       = _model_package.get("model_name", "Random Forest")
-    _MODEL_ACCURACY   = _model_package.get("accuracy", 0.0)
-    _SAFE_SUBJECTS    = _model_package.get("safe_subjects", [])
-    logger.info("ML model loaded: %s (accuracy %.4f, %d safe subjects)",
-                _MODEL_NAME, _MODEL_ACCURACY, len(_SAFE_SUBJECTS))
-except Exception as _e:
-    logger.warning("ML model not loaded — %s. Run train_model.py first.", _e)
 
 # ── Subject reliability (loaded once at startup) ─────────────────────────────
 
@@ -4136,10 +4118,10 @@ async def predict_outcome(
     if not is_admin and req.subject not in subj_list:
         raise HTTPException(403, "You are not assigned to that subject.")
 
-    # Always derive from subject_reliability.json directly — _SAFE_SUBJECTS is the
-    # model's *training* subject list (fully_clean + mostly_clean) and is not a
-    # reliable proxy for "no warning needed": a mostly_clean subject is safe to
-    # train on but should still show the yellow warning below.
+    # Always derive from subject_reliability.json directly rather than a model
+    # package's *training* subject list (fully_clean + mostly_clean) — that
+    # list isn't a reliable proxy for "no warning needed": a mostly_clean
+    # subject is safe to train on but should still show the yellow warning below.
     reliability = _subject_reliability_category(req.subject)
     if reliability == "unreliable":
         return {
@@ -4773,7 +4755,8 @@ async def subject_assessments(
         raise HTTPException(404, "Subject not found.")
 
     # Always derive from subject_reliability.json directly — see the /api/predict
-    # comment above for why _SAFE_SUBJECTS membership isn't a valid shortcut here.
+    # comment above for why a model package's training subject list isn't a
+    # valid shortcut here.
     reliability = _subject_reliability_category(subject)
     if reliability == "unreliable":
         return {
@@ -4856,7 +4839,8 @@ async def subject_roster(
         raise HTTPException(404, "Subject not found.")
 
     # Always derive from subject_reliability.json directly — see the /api/predict
-    # comment above for why _SAFE_SUBJECTS membership isn't a valid shortcut here.
+    # comment above for why a model package's training subject list isn't a
+    # valid shortcut here.
     reliability = _subject_reliability_category(subject)
     if reliability == "unreliable":
         return {

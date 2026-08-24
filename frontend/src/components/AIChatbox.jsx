@@ -5,8 +5,62 @@
 // refuses anything outside that scope instead of answering from outside
 // knowledge. Nothing here is persisted server-side; `messages` is just
 // replayed back per-request as `history` for conversational continuity.
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, Fragment } from 'react';
 import api from '../services/api';
+
+// Gemini's answers routinely come back as light Markdown (**bold**, "- "
+// bullet lists, paragraph breaks) — rendered as literal asterisks/dashes
+// before this, since message bubbles just printed {m.text}. A dependency
+// (react-markdown) felt heavy for what these answers actually use, so this
+// is a small, dependency-free renderer for exactly that subset — real React
+// elements, never dangerouslySetInnerHTML, so an assistant reply can't
+// inject markup even though it's arbitrary model output.
+function renderInline(text, keyPrefix) {
+  return text.split(/(\*\*[^*]+\*\*)/g).map((part, i) => (
+    part.startsWith('**') && part.endsWith('**') && part.length > 4
+      ? <strong key={`${keyPrefix}-${i}`}>{part.slice(2, -2)}</strong>
+      : <Fragment key={`${keyPrefix}-${i}`}>{part}</Fragment>
+  ));
+}
+
+function renderMarkdownLite(text) {
+  const lines = String(text ?? '').split('\n');
+  const blocks = [];
+  let i = 0;
+  while (i < lines.length) {
+    if (/^\s*[-*]\s+/.test(lines[i])) {
+      const items = [];
+      while (i < lines.length && /^\s*[-*]\s+/.test(lines[i])) {
+        items.push(lines[i].replace(/^\s*[-*]\s+/, ''));
+        i++;
+      }
+      blocks.push(
+        <ul key={`ul-${blocks.length}`} style={{ margin: '4px 0', paddingLeft: 18 }}>
+          {items.map((it, idx) => <li key={idx} style={{ marginBottom: 2 }}>{renderInline(it, `li-${blocks.length}-${idx}`)}</li>)}
+        </ul>
+      );
+    } else if (lines[i].trim() === '') {
+      i++;
+    } else {
+      const para = [];
+      while (i < lines.length && lines[i].trim() !== '' && !/^\s*[-*]\s+/.test(lines[i])) {
+        para.push(lines[i]);
+        i++;
+      }
+      blocks.push(
+        <p key={`p-${blocks.length}`} style={{ margin: '0 0 6px' }}>
+          {para.map((l, idx) => (
+            <Fragment key={idx}>
+              {renderInline(l, `p-${blocks.length}-${idx}`)}
+              {idx < para.length - 1 && <br />}
+            </Fragment>
+          ))}
+        </p>
+      );
+    }
+  }
+  return blocks;
+}
 
 // Each of these is verified to answer from real data (not refuse) against
 // the context chatbot_ask() builds — see backend/app/main.py's
@@ -128,7 +182,7 @@ export default function AIChatbox() {
                       color: m.role === 'user' ? '#fff' : (m.refusal ? '#A32D2D' : '#1E293B'),
                       fontSize: 13, lineHeight: 1.55,
                     }}>
-                      {m.text}
+                      {m.role === 'user' ? m.text : renderMarkdownLite(m.text)}
                     </div>
                   </div>
                 ))}
