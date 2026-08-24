@@ -29,6 +29,11 @@ function matchesTab(row, tab) {
 
 const rowKey = (r) => `${r.subject}::${r.student_id}`;
 
+// "Log as Emailed" only makes sense for students actually flagged at risk —
+// a Safe row has nothing to intervene on, so it gets no checkbox at all
+// (not just a disabled one) whichever tab it's viewed from (e.g. "All").
+const isRiskRow = (r) => r.risk_band === 'At Risk' || r.risk_band === 'High Risk';
+
 // attendance_rate_used is a 0-1 fraction (or null — no attendance data
 // matched this enrolment, e.g. a subject with no attendance rows ingested
 // at all); probability is already a 0-100 "chance of passing" percentage
@@ -130,14 +135,15 @@ export default function StudentsAtRisk() {
     });
   };
 
-  const allFilteredSelected = filtered.length > 0 && filtered.every(r => selected.has(rowKey(r)));
+  const selectableFiltered = filtered.filter(isRiskRow);
+  const allFilteredSelected = selectableFiltered.length > 0 && selectableFiltered.every(r => selected.has(rowKey(r)));
   const toggleSelectAllFiltered = () => {
     setSelected(prev => {
       const next = new Set(prev);
       if (allFilteredSelected) {
-        filtered.forEach(r => next.delete(rowKey(r)));
+        selectableFiltered.forEach(r => next.delete(rowKey(r)));
       } else {
-        filtered.forEach(r => next.add(rowKey(r)));
+        selectableFiltered.forEach(r => next.add(rowKey(r)));
       }
       return next;
     });
@@ -227,12 +233,14 @@ export default function StudentsAtRisk() {
               <thead>
                 <tr>
                   <th style={{ ...s.th, width: 32 }}>
-                    <input
-                      type="checkbox"
-                      checked={allFilteredSelected}
-                      onChange={toggleSelectAllFiltered}
-                      aria-label="Select all filtered students"
-                    />
+                    {selectableFiltered.length > 0 && (
+                      <input
+                        type="checkbox"
+                        checked={allFilteredSelected}
+                        onChange={toggleSelectAllFiltered}
+                        aria-label="Select all filtered students"
+                      />
+                    )}
                   </th>
                   {['Student', 'Subject', 'Attendance', 'Assessments Recorded', 'Weighted Score', 'Pass Probability', 'Risk'].map(h => (
                     <th key={h} style={s.th}>{h}</th>
@@ -248,12 +256,14 @@ export default function StudentsAtRisk() {
                     title="Open in Predictor for the full breakdown"
                   >
                     <td style={s.td} onClick={e => e.stopPropagation()}>
-                      <input
-                        type="checkbox"
-                        checked={selected.has(rowKey(r))}
-                        onChange={e => toggleRow(r, e)}
-                        aria-label={`Select ${r.student_id}`}
-                      />
+                      {isRiskRow(r) && (
+                        <input
+                          type="checkbox"
+                          checked={selected.has(rowKey(r))}
+                          onChange={e => toggleRow(r, e)}
+                          aria-label={`Select ${r.student_id}`}
+                        />
+                      )}
                     </td>
                     <td style={{ ...s.td, fontWeight: 700, color: '#1A2E40' }}>{r.student_id}</td>
                     <td style={s.td}>{r.subject}</td>
