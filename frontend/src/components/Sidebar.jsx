@@ -201,6 +201,7 @@ export default function Sidebar() {
     ...(isAdmin || isHoS ? [{ label: 'OAuth Providers', icon: <I.Shield />, to: '/oauth-providers' }] : []),
     ...(isAdmin || isHoS ? [{ label: 'AI Config', icon: <I.AI />, to: '/ai-config' }] : []),
     ...(isAdmin || isHoS ? [{ label: 'Outgoing Mail Servers', icon: <I.Mail />, to: '/mail-servers' }] : []),
+    ...(isAdmin || isHoS ? [{ label: 'Email Logs', icon: <I.AuditLog />, to: '/email-logs' }] : []),
     ...(isAdmin ? [{ label: 'API Console', icon: <I.ApiKey />, to: '/api-console' }] : []),
     ...(isAdmin && isSuperAdmin ? [
       { label: 'User Management', icon: <I.Users />,    to: '/users'     },

@@ -625,6 +625,55 @@ class MailServer(AuditMixin, Base):
     updated_by: str | None = Column(String(254), nullable=True)
 
 
+class EmailLog(Base):
+    """
+    Record of one email this app tried to send — every attempt, not just
+    the ones that worked, via a configured MailServer (Settings > Outgoing
+    Mail Servers). Powers Settings > Email Logs.
+
+    status is only ever 'sent' (handed off to the SMTP server without the
+    send call raising) or 'failed' (with the real exception text in
+    failure_reason) — deliberately NOT a three-way sent/delivered/failed
+    split. Plain SMTP has no way to confirm actual mailbox delivery
+    (that needs bounce/webhook infrastructure this app doesn't have, e.g.
+    reading IMAP bounces or an ESP's delivery webhooks) — claiming
+    "delivered" here would just be a guess dressed up as a fact.
+
+    mail_server_id is nullable with ON DELETE SET NULL, same reasoning as
+    Intervention.prediction_id: if the server config is later edited away
+    or deleted, the historical record that this email was sent (and how)
+    must survive it.
+    """
+
+    __tablename__ = "email_logs"
+
+    id: int = Column(BigInteger, primary_key=True, autoincrement=True)
+
+    mail_server_id: int | None = Column(
+        Integer, ForeignKey("mail_servers.id", ondelete="SET NULL"), nullable=True, index=True,
+    )
+
+    from_email: str = Column(String(254), nullable=False)
+    to_email:   str = Column(String(254), nullable=False, index=True)
+    subject:    str | None = Column(String(255), nullable=True)
+    body:       str = Column(Text, nullable=False)
+    is_html:    bool = Column(Boolean, nullable=False, default=False, server_default="false")
+
+    kind: str = Column(
+        String(30), nullable=False, default="test", server_default="test", index=True,
+        comment="'test' (Send Test Email) | 'password_reset' (forgot-password OTP)",
+    )
+
+    status: str = Column(String(20), nullable=False, index=True, comment="'sent' | 'failed'")
+    failure_reason: str | None = Column(Text, nullable=True)
+
+    sent_by: str | None = Column(
+        String(254), nullable=True,
+        comment="Admin who triggered this (test emails) — NULL for system-triggered emails like password resets",
+    )
+    sent_at: datetime = Column(DateTime(timezone=True), server_default=func.now(), nullable=False, index=True)
+
+
 class UploadBatch(Base):
     """
     Tracks a large file upload split into small sequential chunks from the

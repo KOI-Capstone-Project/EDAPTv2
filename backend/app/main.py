@@ -41,7 +41,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
-from app.db.models import AIProviderConfig, AnalyzeJob, ApiKey, AuditLog, Base, IngestJob, Intervention, MailServer, OAuthProviderConfig, PendingIngest, Prediction, RiskEmailTemplate, UploadBatch, User as UserModel
+from app.db.models import AIProviderConfig, AnalyzeJob, ApiKey, AuditLog, Base, EmailLog, IngestJob, Intervention, MailServer, OAuthProviderConfig, PendingIngest, Prediction, RiskEmailTemplate, UploadBatch, User as UserModel
 from app import oauth_providers
 from app.crypto_utils import encrypt_secret, decrypt_secret
 # Light module — pure functions over an already-computed SHAP dict, no model
@@ -428,15 +428,18 @@ def _record_failed_attempt(email: str) -> None:
 # Email and OTP Helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _send_via_mail_server(server: "MailServer", to_email: str, subject: str, body: str) -> None:
-    """Actually sends one email through a configured MailServer row — shared
-    by every real sender in the app (currently just OTP email), so adding a
-    second kind of outbound email later doesn't mean a second copy of this
-    connect/login/send dance. Raises on any SMTP/connection failure; the
-    caller decides how to surface that."""
-    password  = decrypt_secret(server.encrypted_password, SECRET_KEY) if server.encrypted_password else None
-    from_addr = server.from_email or server.username or ""
-    msg = MIMEText(body, "plain")
+def _send_via_mail_server(
+    server: "MailServer", from_addr: str, to_email: str, subject: str, body: str, is_html: bool,
+) -> None:
+    """Actually sends one email through a configured MailServer row — the
+    one place that opens a real SMTP connection, shared by every sender in
+    the app (OTP email, Send Test Email) so there's only one copy of this
+    connect/login/send dance. Fully synchronous/blocking (smtplib) — always
+    called via asyncio.to_thread, never awaited directly. Raises on any
+    SMTP/connection failure; _send_and_log_email is what turns that into a
+    logged {status, failure_reason} instead of propagating it raw."""
+    password = decrypt_secret(server.encrypted_password, SECRET_KEY) if server.encrypted_password else None
+    msg = MIMEText(body, "html" if is_html else "plain")
     msg["Subject"] = subject
     msg["From"]    = from_addr
     msg["To"]      = to_email
@@ -453,24 +456,65 @@ def _send_via_mail_server(server: "MailServer", to_email: str, subject: str, bod
         smtp.sendmail(from_addr, to_email, msg.as_string())
 
 
+async def _send_and_log_email(
+    db: AsyncSession, server: "MailServer", from_email: str, to_email: str,
+    subject: str, body: str, is_html: bool, kind: str, sent_by: Optional[str],
+) -> dict:
+    """Sends one email through `server` and ALWAYS records the attempt in
+    EmailLog (Settings > Email Logs) — success or failure — so that page is
+    a complete, honest record of every email this app has tried to send,
+    not just the ones that happened to work. See EmailLog's docstring for
+    why status is only ever 'sent' or 'failed', never 'delivered'."""
+    log = EmailLog(
+        mail_server_id=server.id, from_email=from_email, to_email=to_email,
+        subject=subject, body=body, is_html=is_html, kind=kind, sent_by=sent_by,
+        status="sent",
+    )
+    try:
+        await asyncio.to_thread(_send_via_mail_server, server, from_email, to_email, subject, body, is_html)
+    except Exception as exc:
+        log.status = "failed"
+        log.failure_reason = str(exc) or exc.__class__.__name__
+    db.add(log)
+    await db.commit()
+    await db.refresh(log)  # see MailServer create/update's comment on the same post-commit-attribute pattern
+    return {"status": log.status, "failure_reason": log.failure_reason, "log_id": log.id}
+
+
+async def _get_active_mail_server(db: AsyncSession) -> Optional["MailServer"]:
+    """The server _send_otp_email/Send-Test-Email-with-no-server_id actually
+    use: lowest-priority row with active=True, ties broken by id."""
+    result = await db.execute(
+        select(MailServer).where(MailServer.active.is_(True)).order_by(MailServer.priority, MailServer.id)
+    )
+    return result.scalars().first()
+
+
 async def _send_otp_email(db: AsyncSession, to_email: str, otp: str) -> None:
     """Send OTP via the active outgoing mail server (Settings > Outgoing
     Mail Servers — see MailServer's docstring), instead of the single
     hardcoded GMAIL_SENDER/GMAIL_APP_PASSWORD env var pair this replaced.
-    "Active" = lowest-priority row with active=True; ties broken by id.
-    Raises RuntimeError if no active server is configured."""
-    result = await db.execute(
-        select(MailServer).where(MailServer.active.is_(True)).order_by(MailServer.priority, MailServer.id)
-    )
-    server = result.scalars().first()
+    Raises RuntimeError if no active server is configured (the caller falls
+    back to a dev_otp response for that specific case — see
+    forgot_password) — a real SEND failure once a server IS configured
+    raises a plain Exception instead, so those two cases stay
+    distinguishable exactly as they were before this changed."""
+    server = await _get_active_mail_server(db)
     if server is None:
         raise RuntimeError("Email service not configured")
-    _send_via_mail_server(
-        server, to_email, "EDAPT — Password Reset Code",
-        f"Your EDAPT password reset code is: {otp}\n\n"
-        f"This code expires in {OTP_EXPIRY_MINUTES} minutes.\n\n"
-        "If you did not request a password reset, you can ignore this email.",
+    from_addr = server.from_email or server.username or ""
+    result = await _send_and_log_email(
+        db, server, from_email=from_addr, to_email=to_email,
+        subject="EDAPT — Password Reset Code", is_html=False,
+        body=(
+            f"Your EDAPT password reset code is: {otp}\n\n"
+            f"This code expires in {OTP_EXPIRY_MINUTES} minutes.\n\n"
+            "If you did not request a password reset, you can ignore this email."
+        ),
+        kind="password_reset", sent_by=None,
     )
+    if result["status"] == "failed":
+        raise Exception(result["failure_reason"])
 
 
 def _generate_otp(email: str) -> str:
@@ -3966,6 +4010,95 @@ async def delete_mail_server(
                            detail=f"Outgoing mail server deleted: {name}")
     await db.commit()
     return {"deleted": True}
+
+
+class SendTestEmailRequest(BaseModel):
+    server_id:  Optional[int] = None
+    from_email: str = Field(..., min_length=1, max_length=254)
+    to_email:   str = Field(..., min_length=1, max_length=254)
+    subject:    str = Field("EDAPT Test Email", max_length=255)
+    # HTML content — the frontend's Send Test Email form is an HTML field,
+    # not a plain-text one (unlike the OTP email, which stays plain text).
+    body:       str = Field(..., min_length=1, max_length=20000)
+
+
+@app.post("/api/mail-servers/send-test-email", tags=["Mail Servers"])
+async def send_test_email(
+    req:  SendTestEmailRequest,
+    user: dict = Depends(require_head_of_school),
+    db:   AsyncSession = Depends(get_db),
+):
+    """Sends a REAL email — not just a connection test — through a chosen
+    server (or whichever is active, if server_id is omitted), with an
+    admin-supplied From/To/HTML body. Every attempt is recorded in
+    EmailLog (Settings > Email Logs), success or failure, same as any other
+    email this app sends. Returns 200 either way — a send failure is a
+    normal, expected outcome to show inline (see EmailLog's docstring),
+    not a 500; only a genuinely missing/unknown server is an HTTP error."""
+    if req.server_id is not None:
+        server = await db.get(MailServer, req.server_id)
+        if server is None:
+            raise HTTPException(404, "Mail server not found.")
+    else:
+        server = await _get_active_mail_server(db)
+        if server is None:
+            raise HTTPException(400, "No active mail server configured.")
+
+    return await _send_and_log_email(
+        db, server, from_email=req.from_email, to_email=req.to_email,
+        subject=req.subject, body=req.body, is_html=True,
+        kind="test", sent_by=user["sub"],
+    )
+
+
+def _email_log_to_dict(log: EmailLog) -> dict:
+    return {
+        "id":             log.id,
+        "mail_server_id": log.mail_server_id,
+        "from_email":     log.from_email,
+        "to_email":       log.to_email,
+        "subject":        log.subject,
+        "is_html":        log.is_html,
+        "kind":           log.kind,
+        "status":         log.status,
+        "failure_reason": log.failure_reason,
+        "sent_by":        log.sent_by,
+        "sent_at":        log.sent_at.isoformat() if log.sent_at else None,
+    }
+
+
+@app.get("/api/email-logs", tags=["Email Logs"])
+async def list_email_logs(
+    limit:  int            = Query(50, ge=1, le=200),
+    status: Optional[str]  = Query(None),
+    kind:   Optional[str]  = Query(None),
+    user:   dict            = Depends(require_head_of_school),
+    db:     AsyncSession    = Depends(get_db),
+):
+    """Every email this app has tried to send, most recent first — the body
+    itself is left out of this list shape (can be large; see GET
+    /api/email-logs/{id} for the full content) so the table stays light to
+    load."""
+    stmt = select(EmailLog).order_by(EmailLog.sent_at.desc()).limit(limit)
+    if status:
+        stmt = stmt.where(EmailLog.status == status)
+    if kind:
+        stmt = stmt.where(EmailLog.kind == kind)
+    result = await db.execute(stmt)
+    return {"logs": [_email_log_to_dict(r) for r in result.scalars().all()]}
+
+
+@app.get("/api/email-logs/{log_id}", tags=["Email Logs"])
+async def get_email_log(
+    log_id: int,
+    user:   dict         = Depends(require_head_of_school),
+    db:     AsyncSession = Depends(get_db),
+):
+    """Full detail for one logged email, including the actual body sent."""
+    log = await db.get(EmailLog, log_id)
+    if log is None:
+        raise HTTPException(404, "Email log not found.")
+    return {**_email_log_to_dict(log), "body": log.body}
 
 
 @app.post("/api/predict", tags=["ML"])

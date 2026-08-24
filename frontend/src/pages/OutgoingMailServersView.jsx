@@ -23,10 +23,10 @@ function Spinner() {
   return <span style={s.spinner} />;
 }
 
-function TestResultBanner({ result }) {
+function TestResultBanner({ result, runningLabel = 'Testing connection…' }) {
   if (!result) return null;
   if (result.status === 'running') {
-    return <div style={s.testBanner}><Spinner /> Testing connection…</div>;
+    return <div style={s.testBanner}><Spinner /> {runningLabel}</div>;
   }
   const ok = result.status === 'success';
   return (
@@ -36,6 +36,8 @@ function TestResultBanner({ result }) {
     </div>
   );
 }
+
+const EMPTY_SEND_FORM = { server_id: '', from_email: '', to_email: '', subject: 'EDAPT Test Email', body: '<p>This is a test email from EDAPT.</p>' };
 
 export default function OutgoingMailServersView() {
   const [servers, setServers] = useState([]);
@@ -50,6 +52,11 @@ export default function OutgoingMailServersView() {
   const [testing, setTesting]     = useState(false);
 
   const [rowTest, setRowTest] = useState({}); // {[id]: {status, message, elapsed_seconds}}
+
+  const [showSendTest, setShowSendTest]   = useState(false);
+  const [sendForm, setSendForm]           = useState(EMPTY_SEND_FORM);
+  const [sending, setSending]             = useState(false);
+  const [sendResult, setSendResult]       = useState(null); // {status:'running'|'success'|'failed', message} | null
 
   const fetchServers = useCallback(() => {
     setLoading(true);
@@ -166,6 +173,41 @@ export default function OutgoingMailServersView() {
     }
   };
 
+  const openSendTest = () => {
+    setSendForm(EMPTY_SEND_FORM);
+    setSendResult(null);
+    setShowSendTest(true);
+  };
+  const closeSendTest = () => { setShowSendTest(false); setSendResult(null); };
+
+  const handleSendTest = async () => {
+    if (!sendForm.from_email.trim() || !sendForm.to_email.trim() || !sendForm.body.trim()) {
+      setSendResult({ status: 'failed', message: 'From, To, and Body are all required.' });
+      return;
+    }
+    setSending(true);
+    setSendResult({ status: 'running' });
+    try {
+      const res = await api.post('/api/mail-servers/send-test-email', {
+        server_id:  sendForm.server_id || null,
+        from_email: sendForm.from_email.trim(),
+        to_email:   sendForm.to_email.trim(),
+        subject:    sendForm.subject.trim() || 'EDAPT Test Email',
+        body:       sendForm.body,
+      });
+      setSendResult({
+        status: res.data.status === 'sent' ? 'success' : 'failed',
+        message: res.data.status === 'sent'
+          ? `Sent — logged as #${res.data.log_id}. See Email Logs for details.`
+          : (res.data.failure_reason || 'Send failed.'),
+      });
+    } catch (err) {
+      setSendResult({ status: 'failed', message: err.response?.data?.detail || 'Failed to send test email.' });
+    } finally {
+      setSending(false);
+    }
+  };
+
   const securityLabel = (value) => SECURITY_OPTIONS.find(o => o.value === value)?.label || value;
 
   return (
@@ -177,10 +219,62 @@ export default function OutgoingMailServersView() {
           <h1 style={s.pageTitle}>Outgoing Mail Servers</h1>
           <p style={s.pageSub}>Configure SMTP servers used to send email from EDAPT (e.g. password reset codes)</p>
         </div>
-        <button style={s.createBtn} onClick={showForm && editingId === null ? closeForm : openCreate}>
-          {showForm && editingId === null ? '✕ Cancel' : '+ Add Mail Server'}
-        </button>
+        <div style={{ display: 'flex', gap: 10 }}>
+          <button style={s.testBtn} onClick={showSendTest ? closeSendTest : openSendTest}>
+            {showSendTest ? '✕ Cancel' : 'Send Test Email'}
+          </button>
+          <button style={s.createBtn} onClick={showForm && editingId === null ? closeForm : openCreate}>
+            {showForm && editingId === null ? '✕ Cancel' : '+ Add Mail Server'}
+          </button>
+        </div>
       </div>
+
+      {/* ── Send test email ─────────────────────────────────────────── */}
+      {showSendTest && (
+        <div style={s.formPanel}>
+          <h3 style={s.formTitle}>Send Test Email</h3>
+          <div style={s.formGrid}>
+            <div style={{ ...s.field, gridColumn: '1 / -1' }}>
+              <label style={s.label}>Send Through</label>
+              <select style={s.select} value={sendForm.server_id} onChange={e => setSendForm(f => ({ ...f, server_id: e.target.value }))}>
+                <option value="">Active server (lowest priority)</option>
+                {servers.map(srv => (
+                  <option key={srv.id} value={srv.id}>{srv.name} ({srv.host})</option>
+                ))}
+              </select>
+            </div>
+            <div style={s.field}>
+              <label style={s.label}>From *</label>
+              <input style={s.input} value={sendForm.from_email} onChange={e => setSendForm(f => ({ ...f, from_email: e.target.value }))} placeholder="sender@yourdomain.com" />
+            </div>
+            <div style={s.field}>
+              <label style={s.label}>To *</label>
+              <input style={s.input} value={sendForm.to_email} onChange={e => setSendForm(f => ({ ...f, to_email: e.target.value }))} placeholder="recipient@example.com" />
+            </div>
+            <div style={{ ...s.field, gridColumn: '1 / -1' }}>
+              <label style={s.label}>Subject</label>
+              <input style={s.input} value={sendForm.subject} onChange={e => setSendForm(f => ({ ...f, subject: e.target.value }))} />
+            </div>
+            <div style={{ ...s.field, gridColumn: '1 / -1' }}>
+              <label style={s.label}>Body (HTML) *</label>
+              <textarea
+                style={s.textarea} rows={6} value={sendForm.body}
+                onChange={e => setSendForm(f => ({ ...f, body: e.target.value }))}
+                placeholder="<p>Your HTML email content…</p>"
+              />
+            </div>
+          </div>
+
+          <TestResultBanner result={sendResult} runningLabel="Sending…" />
+
+          <div style={{ display: 'flex', gap: 12, marginTop: 18 }}>
+            <button style={{ ...s.createBtn, opacity: sending ? 0.6 : 1 }} disabled={sending} onClick={handleSendTest}>
+              {sending ? 'Sending…' : 'Send'}
+            </button>
+            <button style={s.cancelLink} onClick={closeSendTest}>Cancel</button>
+          </div>
+        </div>
+      )}
 
       {/* ── Create / edit form ─────────────────────────────────────── */}
       {showForm && (
@@ -348,6 +442,11 @@ const s = {
     height: 36, padding: '0 12px', borderRadius: 8, border: '0.5px solid #C5D2DC',
     fontSize: 13, color: '#1A2E40', background: '#fff', cursor: 'pointer',
     width: '100%', boxSizing: 'border-box', outline: 'none',
+  },
+  textarea: {
+    padding: '10px 12px', borderRadius: 8, border: '0.5px solid #C5D2DC',
+    fontSize: 12.5, color: '#1A2E40', outline: 'none', width: '100%', boxSizing: 'border-box',
+    fontFamily: "'SF Mono','Fira Code',monospace", resize: 'vertical',
   },
   checkboxRow: { display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, fontWeight: 500, color: '#334155', cursor: 'pointer' },
 
