@@ -5161,7 +5161,10 @@ async def _chatbot_risk_context(study_period: str, user: dict, db: AsyncSession)
     is_admin = user.get("role") in {"Head of Technology", "Head of School"}
     subjects = user.get("subjects", []) if not is_admin else None
     if subjects is not None and not subjects:
-        return {"subjects_included": 0, "total_scored_enrolments": 0, "subjects_by_risk_desc": [], "has_any_predictions": False}
+        return {
+            "subjects_included": 0, "total_scored_enrolments": 0, "subjects_by_risk_desc": [],
+            "total_high_risk": 0, "total_at_risk": 0, "total_safe": 0, "has_any_predictions": False,
+        }
 
     latest = (
         select(Prediction.subject_code, Prediction.risk_band)
@@ -5194,12 +5197,17 @@ async def _chatbot_risk_context(study_period: str, user: dict, db: AsyncSession)
 
     # Capped the same way _institution_stats caps subjects_below_50 — an
     # admin can have well over a hundred visible subjects, and the chatbot
-    # only ever needs to reason about the extremes, not a full dump.
+    # only ever needs to reason about the extremes, not a full dump. The
+    # totals below are summed BEFORE capping, so "how many students total
+    # are High Risk" stays correct even for an admin with 100+ subjects.
     ranked = sorted(by_subject.values(), key=lambda b: (b["high_risk"] + b["at_risk"]), reverse=True)
 
     return {
         "subjects_included":       len(by_subject),
         "total_scored_enrolments": sum(b["total_scored"] for b in by_subject.values()),
+        "total_high_risk":         sum(b["high_risk"] for b in by_subject.values()),
+        "total_at_risk":           sum(b["at_risk"] for b in by_subject.values()),
+        "total_safe":              sum(b["safe"] for b in by_subject.values()),
         "subjects_by_risk_desc":   ranked[:15],
         "has_any_predictions":     bool(by_subject),
     }
@@ -5241,9 +5249,15 @@ async def chatbot_ask(
             {
                 "subjects_included":       risk["subjects_included"],
                 "total_scored_enrolments": risk["total_scored_enrolments"],
+                "total_high_risk":         risk["total_high_risk"],
+                "total_at_risk":           risk["total_at_risk"],
+                "total_safe":              risk["total_safe"],
                 "subjects_by_risk_desc":   risk["subjects_by_risk_desc"],
                 "risk_band_meaning": (
-                    "'High Risk' and 'At Risk' are struggling students; 'Safe' is on track."
+                    "'High Risk' and 'At Risk' are struggling students; 'Safe' is on track. "
+                    "total_high_risk/total_at_risk/total_safe are exact totals across every "
+                    "visible subject; subjects_by_risk_desc is only the top 15 subjects by "
+                    "risk count, not the full list."
                 ),
             }
             if risk["has_any_predictions"] else

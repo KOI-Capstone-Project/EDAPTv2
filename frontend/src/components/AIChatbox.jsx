@@ -8,10 +8,19 @@
 import { useState, useRef, useEffect } from 'react';
 import api from '../services/api';
 
+// Each of these is verified to answer from real data (not refuse) against
+// the context chatbot_ask() builds — see backend/app/main.py's
+// _chatbot_risk_context/_subject_stats for exactly what's available to
+// answer from. Keep this list in sync with that context: a prompt that
+// asks for something not in it (e.g. a per-subject trend) gets refused,
+// not answered.
 const FAQ_PROMPTS = [
   'Which subject currently has the most students at risk?',
   "What's the overall pass rate this period?",
-  'How is my weakest subject trending compared to last period?',
+  'How has the pass rate changed compared to last period?',
+  'How many students are currently in the High Risk band?',
+  "What's the weakest assessment type this period?",
+  'Give me a quick summary of student performance this period.',
 ];
 
 const REFUSAL = "I'm restricted to answering questions about this system's student data and can't help with that.";
