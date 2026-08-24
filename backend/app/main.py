@@ -5226,9 +5226,19 @@ async def chatbot_ask(
     risk     = await _chatbot_risk_context(study_period, user, db)
 
     context = {
-        "study_period":        study_period,
-        "scope":               "institution-wide (all subjects)" if is_admin else "only the subjects assigned to this lecturer",
-        "overall_performance": overall or {"note": "No mark data recorded for this period."},
+        "study_period": study_period,
+        "scope":        "institution-wide (all subjects)" if is_admin else "only the subjects assigned to this lecturer",
+        "overall_performance": (
+            {
+                **overall,
+                "at_risk_count_meaning": (
+                    "at_risk_count counts individual graded assessment ITEMS scoring below "
+                    "50% (not distinct students, and unrelated to the risk_band ML "
+                    "classification below) — do not call this a count of 'at-risk students'."
+                ),
+            }
+            if overall else {"note": "No mark data recorded for this period."}
+        ),
         "risk_by_subject": (
             {
                 "subjects_included":       risk["subjects_included"],
