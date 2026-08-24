@@ -1,41 +1,30 @@
-// Floating AI assistant widget with Chat and Insights tabs powered by Gemini.
+// Floating AI assistant widget with Chat and FAQ tabs. Chat is answered by
+// POST /api/chatbot/ask, which is scoped STRICTLY to this system's own
+// student performance/attendance/risk data (same visibility rule as
+// Students at Risk — a lecturer only ever sees their own subjects) and
+// refuses anything outside that scope instead of answering from outside
+// knowledge. Nothing here is persisted server-side; `messages` is just
+// replayed back per-request as `history` for conversational continuity.
 import { useState, useRef, useEffect } from 'react';
-import { getUser } from '../utils/auth';
 import api from '../services/api';
 
-const ALL_PERIODS = ['23.1','23.2','23.3','24.1','24.2','24.3','25.1','25.2','25.3'];
+const FAQ_PROMPTS = [
+  'Which subject currently has the most students at risk?',
+  "What's the overall pass rate this period?",
+  'How is my weakest subject trending compared to last period?',
+];
+
+const REFUSAL = "I'm restricted to answering questions about this system's student data and can't help with that.";
 
 export default function AIChatbox() {
   const [open,       setOpen]       = useState(false);
   const [fullscreen, setFullscreen] = useState(false);
   const [tab,        setTab]        = useState('chat');
 
-  // Chat
   const [messages,    setMessages]    = useState([]);
   const [chatInput,   setChatInput]   = useState('');
   const [chatLoading, setChatLoading] = useState(false);
   const chatEndRef = useRef(null);
-
-  // Subjects (for Insights tab)
-  const [subjects, setSubjects] = useState([]);
-
-  // Insights
-  const [insSubject,   setInsSubject]   = useState('');
-  const [insTrimester, setInsTrimester] = useState('');
-  const [alertText,    setAlertText]    = useState('');
-  const [analysisText, setAnalysisText] = useState('');
-  const [insLoading,   setInsLoading]   = useState(null);
-
-  const user    = getUser();
-  const isAdmin = user?.role === 'Head of Technology' || user?.role === 'Head of School';
-
-  useEffect(() => {
-    if (isAdmin) {
-      api.get('/api/subjects/list').then(r => setSubjects(r.data)).catch(() => {});
-    } else {
-      setSubjects(user?.subjects || []);
-    }
-  }, [isAdmin, user?.subjects]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (open && chatEndRef.current) {
@@ -43,51 +32,26 @@ export default function AIChatbox() {
     }
   }, [messages, open]);
 
-  const sendMessage = async () => {
-    if (!chatInput.trim() || chatLoading) return;
-    const q = chatInput.trim();
+  const sendMessage = async (text) => {
+    const q = (text ?? chatInput).trim();
+    if (!q || chatLoading) return;
+
+    const history = messages.slice(-8).map(m => ({ role: m.role === 'ai' ? 'assistant' : 'user', content: m.text }));
     setChatInput('');
+    setTab('chat');
     setMessages(prev => [...prev, { role: 'user', text: q }]);
     setChatLoading(true);
     try {
-      const res = await api.post('/api/gemini/ask', { question: q });
-      setMessages(prev => [...prev, { role: 'ai', text: res.data.answer }]);
+      // Overrides the client's global timeout — the very first question
+      // about a study period with no cached predictions yet can take a
+      // moment; every question after that reads straight off the
+      // Predictions table (fast, no live ML inference).
+      const res = await api.post('/api/chatbot/ask', { question: q, history }, { timeout: 30000 });
+      setMessages(prev => [...prev, { role: 'ai', text: res.data.answer, refusal: res.data.answer === REFUSAL }]);
     } catch {
       setMessages(prev => [...prev, { role: 'ai', text: 'Sorry, something went wrong. Please try again.' }]);
     } finally {
       setChatLoading(false);
-    }
-  };
-
-  const handleAlert = async () => {
-    setInsLoading('alert');
-    setAlertText('');
-    try {
-      const res = await api.post('/api/gemini/alert', {
-        ...(insSubject   ? { subject:   insSubject }   : {}),
-        ...(insTrimester ? { trimester: insTrimester } : {}),
-      });
-      setAlertText(res.data.alert);
-    } catch {
-      setAlertText('Failed to get alert.');
-    } finally {
-      setInsLoading(null);
-    }
-  };
-
-  const handleAnalysis = async () => {
-    setInsLoading('analysis');
-    setAnalysisText('');
-    try {
-      const res = await api.post('/api/gemini/analyse', {
-        ...(insSubject   ? { subject:   insSubject }   : {}),
-        ...(insTrimester ? { trimester: insTrimester } : {}),
-      });
-      setAnalysisText(res.data.analysis);
-    } catch {
-      setAnalysisText('Failed to get analysis.');
-    } finally {
-      setInsLoading(null);
     }
   };
 
@@ -120,7 +84,7 @@ export default function AIChatbox() {
 
           {/* Tabs */}
           <div style={{ display: 'flex', borderBottom: '0.5px solid #E2E8F0', flexShrink: 0, background: '#fff' }}>
-            {['Chat', 'Insights'].map(t => (
+            {['Chat', 'FAQ'].map(t => (
               <button
                 key={t}
                 onClick={() => setTab(t.toLowerCase())}
@@ -143,7 +107,7 @@ export default function AIChatbox() {
               <div style={{ flex: 1, overflowY: 'auto', padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: 8 }}>
                 {messages.length === 0 && (
                   <div style={{ textAlign: 'center', padding: '28px 0', color: '#94A3B8', fontSize: 12 }}>
-                    Ask me anything about student performance.
+                    Ask me about student performance, attendance, or risk — or check the FAQ tab for ideas.
                   </div>
                 )}
                 {messages.map((m, i) => (
@@ -151,8 +115,8 @@ export default function AIChatbox() {
                     <div style={{
                       maxWidth: '82%', padding: '8px 12px',
                       borderRadius: m.role === 'user' ? '12px 12px 2px 12px' : '12px 12px 12px 2px',
-                      background: m.role === 'user' ? '#2E6E8E' : '#F0F4F8',
-                      color: m.role === 'user' ? '#fff' : '#1E293B',
+                      background: m.role === 'user' ? '#2E6E8E' : (m.refusal ? '#FCEBEB' : '#F0F4F8'),
+                      color: m.role === 'user' ? '#fff' : (m.refusal ? '#A32D2D' : '#1E293B'),
                       fontSize: 13, lineHeight: 1.55,
                     }}>
                       {m.text}
@@ -179,7 +143,7 @@ export default function AIChatbox() {
                   style={{ flex: 1, padding: '8px 12px', borderRadius: 8, border: '0.5px solid #C5D2DC', fontSize: 13, outline: 'none', fontFamily: 'inherit' }}
                 />
                 <button
-                  onClick={sendMessage}
+                  onClick={() => sendMessage()}
                   disabled={!chatInput.trim() || chatLoading}
                   style={{ padding: '8px 14px', borderRadius: 8, border: 'none', background: '#2E6E8E', color: '#fff', fontSize: 12, fontWeight: 600, cursor: 'pointer', opacity: (!chatInput.trim() || chatLoading) ? 0.55 : 1 }}
                 >
@@ -189,49 +153,27 @@ export default function AIChatbox() {
             </>
           )}
 
-          {/* ── Insights tab ── */}
-          {tab === 'insights' && (
+          {/* ── FAQ tab ── */}
+          {tab === 'faq' && (
             <div style={{ flex: 1, overflowY: 'auto', padding: '14px' }}>
-              <div style={fld}>
-                <label style={lbl}>Subject</label>
-                <select value={insSubject} onChange={e => setInsSubject(e.target.value)} style={sel}>
-                  <option value="">All Subjects</option>
-                  {subjects.map(sv => <option key={sv} value={sv}>{sv}</option>)}
-                </select>
+              <p style={{ margin: '0 0 12px', fontSize: 11.5, color: '#94A3B8' }}>
+                Tap a question to ask it in Chat:
+              </p>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                {FAQ_PROMPTS.map(q => (
+                  <button
+                    key={q}
+                    onClick={() => sendMessage(q)}
+                    style={{
+                      textAlign: 'left', padding: '10px 12px', borderRadius: 8,
+                      border: '0.5px solid #DDE4EA', background: '#F8FAFC',
+                      color: '#1A2E40', fontSize: 12.5, cursor: 'pointer', lineHeight: 1.4,
+                    }}
+                  >
+                    {q}
+                  </button>
+                ))}
               </div>
-              <div style={{ ...fld, marginBottom: 14 }}>
-                <label style={lbl}>Trimester</label>
-                <select value={insTrimester} onChange={e => setInsTrimester(e.target.value)} style={sel}>
-                  <option value="">All Trimesters</option>
-                  {ALL_PERIODS.map(p => <option key={p} value={p}>{p}</option>)}
-                </select>
-              </div>
-              <div style={{ display: 'flex', gap: 8, marginBottom: 14 }}>
-                <button
-                  onClick={handleAlert}
-                  disabled={insLoading === 'alert'}
-                  style={{ flex: 1, padding: '9px', borderRadius: 8, border: '0.5px solid #DDE4EA', background: '#F8FAFC', color: '#1A2E40', fontSize: 12, fontWeight: 600, cursor: 'pointer', opacity: insLoading === 'alert' ? 0.6 : 1 }}
-                >
-                  {insLoading === 'alert' ? '…' : '⚠ Get Alert'}
-                </button>
-                <button
-                  onClick={handleAnalysis}
-                  disabled={insLoading === 'analysis'}
-                  style={{ flex: 1, padding: '9px', borderRadius: 8, border: 'none', background: '#2E6E8E', color: '#fff', fontSize: 12, fontWeight: 600, cursor: 'pointer', opacity: insLoading === 'analysis' ? 0.6 : 1 }}
-                >
-                  {insLoading === 'analysis' ? '…' : '✦ Deep Analysis'}
-                </button>
-              </div>
-              {alertText && (
-                <div style={{ background: '#FEF9C3', border: '0.5px solid #FDE68A', borderRadius: 8, padding: '10px 12px', marginBottom: 10, fontSize: 12, color: '#78350F', lineHeight: 1.55 }}>
-                  <strong>Alert:</strong> {alertText}
-                </div>
-              )}
-              {analysisText && (
-                <div style={{ background: '#EFF6FF', border: '0.5px solid #BFDBFE', borderRadius: 8, padding: '10px 12px', fontSize: 12, color: '#1E293B', lineHeight: 1.55 }}>
-                  <strong>Analysis:</strong> {analysisText}
-                </div>
-              )}
             </div>
           )}
         </div>
@@ -269,7 +211,3 @@ const hdrBtn = {
   color: '#CBD5E1', borderRadius: 6, width: 26, height: 26,
   display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 13,
 };
-
-const fld = { marginBottom: 12 };
-const lbl = { display: 'block', fontSize: 11, fontWeight: 600, color: '#475569', textTransform: 'uppercase', letterSpacing: 0.4, marginBottom: 5 };
-const sel = { width: '100%', border: '0.5px solid #C5D2DC', borderRadius: 8, padding: '8px 10px', fontSize: 13, color: '#1E293B', background: '#fff', outline: 'none', cursor: 'pointer', boxSizing: 'border-box' };

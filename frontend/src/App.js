@@ -25,7 +25,6 @@ import OAuthProvidersView from './pages/OAuthProvidersView';
 import AIConfigView from './pages/AIConfigView';
 import OutgoingMailServersView from './pages/OutgoingMailServersView';
 import EmailLogsView from './pages/EmailLogsView';
-import AssistantView from './pages/AssistantView';
 
 // Auth utilities
 import { getToken, getUser } from './utils/auth';
@@ -105,10 +104,6 @@ export default function App() {
           scopes rows to whatever subjects the requesting user can see, so
           one shared route/guard is enough; no admin-only content lives here. */}
       <Route path="/students-at-risk"    element={<Protected><StudentsAtRisk /></Protected>} />
-      {/* Same shared visibility rule as Students at Risk: GET /api/students-at-risk
-          (and the _subject_stats it also draws on) already scopes to whatever
-          subjects the requesting user can see — the route/guard doesn't need to. */}
-      <Route path="/assistant"           element={<Protected><AssistantView /></Protected>} />
 
       {/* Admin dashboard */}
       <Route path="/dashboard/admin" element={
