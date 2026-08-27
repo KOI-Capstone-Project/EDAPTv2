@@ -124,7 +124,8 @@ export default function App() {
       <Route path="/users"              element={<HoTOnlyProtected><UserManagement /></HoTOnlyProtected>} />
       <Route path="/api-console"        element={<HoTOnlyProtected><ApiConsole /></HoTOnlyProtected>} />
       {/* Admin only (HoT or HoS) — matches the backend's require_head_of_school
-          gate on GET/PUT /api/risk-email-template. */}
+          gate on create/update/delete under /api/risk-email-templates (list/GET
+          is open to any authenticated role, for Students at Risk's dropdown). */}
       <Route path="/risk-email-template" element={<AdminProtected><RiskEmailTemplateView /></AdminProtected>} />
       {/* Admin only (HoT or HoS) — matches the backend's require_head_of_school
           gate on GET/PUT /api/oauth-providers. */}

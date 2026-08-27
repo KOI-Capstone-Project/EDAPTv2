@@ -79,7 +79,7 @@ Verified directly against `frontend/src/App.js`'s route table. `AdminProtected` 
 | Subject Analytics | `SubjectAnalytics.jsx` | `/subject-analytics` | `AdminProtected` |
 | Data Ingestion | `DataIngestion.jsx` | `/data-ingestion` | `AdminProtected` |
 | Model Health | `ModelHealth.jsx` | `/model-health` | `AdminProtected` — **read-only**, see [Model health](#model-health-dashboard-admin-only-read-only) |
-| Risk Email Template | `RiskEmailTemplateView.jsx` | `/risk-email-template` | `AdminProtected` — reference wording for the Students at Risk page's "Log as Emailed" bulk action |
+| Risk Email Templates | `RiskEmailTemplateView.jsx` | `/risk-email-template` | `AdminProtected` — a named list of reference-wording templates for the Students at Risk page's "Log as Emailed" bulk action, which picks one from a dropdown |
 | OAuth Providers | `OAuthProvidersView.jsx` | `/oauth-providers` | `AdminProtected` — configure Google/Microsoft sign-in client IDs, DB-backed (see [Environment Variables](#environment-variables)) |
 | AI Config | `AIConfigView.jsx` | `/ai-config` | `AdminProtected` — provider/model/API key for every AI insight endpoint and the Assistant chatbot, see [AI Insights & Assistant](#ai-insights--assistant) |
 | Outgoing Mail Servers | `OutgoingMailServersView.jsx` | `/mail-servers` | `AdminProtected` — see [Outgoing Mail & Email Logs](#outgoing-mail--email-logs) |
@@ -509,7 +509,7 @@ Beyond `predictions`/`interventions`/`users`/`audit_logs`, several more tables b
 | `upload_batches` | Data Ingestion's chunked-upload flow | One row per in-progress or completed large-file upload — `status`, `total_chunks`/`received_chunks`, `storage_path` for the assembled file, `analyze_job_id` once handed off. See [Loading Data](#loading-data) |
 | `ai_provider_configs` | Settings > AI Config | Single-row (`id=1`) config for whichever provider/model/key currently powers every AI-insight endpoint and the Assistant chatbot. See [AI Insights & Assistant](#ai-insights--assistant) |
 | `oauth_provider_configs` | Settings > OAuth Providers | One row per provider (`google`/`microsoft`) — client ID and, for Microsoft, tenant ID |
-| `risk_email_templates` | Settings > Risk Email Template | Reference subject/body wording for Students at Risk's "Log as Emailed" bulk action (see [Intervention tracking](#intervention-tracking) — this doesn't send email itself, it logs an `Intervention` row) |
+| `risk_email_templates` | Settings > Risk Email Templates | A named list of reference subject/body wording templates for Students at Risk's "Log as Emailed" bulk action, picked from a dropdown there (see [Intervention tracking](#intervention-tracking) — this doesn't send email itself, it logs an `Intervention` row) |
 | `api_keys` | API Console | Issued keys for the external `POST /api/v1/predict` integration |
 | `pending_ingests` | Two-phase ingestion (`analyze` → `confirm`) | See [Container drift](#source-control-note--a-claimed-fix-that-was-never-on-disk) era fix — Postgres-backed so `analyze`/`confirm` work regardless of which of prod's 4 gunicorn workers handles each request |
 

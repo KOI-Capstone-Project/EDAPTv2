@@ -312,12 +312,15 @@ export default function StudentsAtRisk() {
 
 // ── Bulk "Log as emailed" modal ────────────────────────────────────────────
 // Never sends a real email — this system has no real student email address
-// anywhere (see RiskEmailTemplate's backend docstring). Staff review/edit the
-// wording here, send the real email themselves outside this system, then
-// confirm — which logs one Intervention row per selected student
-// (action_type "email sent"), with {{placeholders}} rendered per-student
-// server-side (see POST /api/interventions/bulk).
+// anywhere (see RiskEmailTemplate's backend docstring). Staff pick one of
+// the saved templates (Settings > Risk Email Templates) from the dropdown
+// below, review/edit the wording, send the real email themselves outside
+// this system, then confirm — which logs one Intervention row per selected
+// student (action_type "email sent"), with {{placeholders}} rendered
+// per-student server-side (see POST /api/interventions/bulk).
 function RiskEmailModal({ targets, studyPeriod, onClose, onLogged }) {
+  const [templates,        setTemplates]        = useState([]);
+  const [selectedTemplate, setSelectedTemplate]  = useState('');
   const [subject, setSubject] = useState('');
   const [body,    setBody]    = useState('');
   const [templateLoading, setTemplateLoading] = useState(true);
@@ -325,11 +328,25 @@ function RiskEmailModal({ targets, studyPeriod, onClose, onLogged }) {
   const [error,  setError]  = useState(null);
 
   useEffect(() => {
-    api.get('/api/risk-email-template')
-      .then(r => { setSubject(r.data.subject); setBody(r.data.body); })
-      .catch(() => setError('Could not load the email template. You can still edit and send below.'))
+    api.get('/api/risk-email-templates')
+      .then(r => {
+        const list = r.data.templates || [];
+        setTemplates(list);
+        if (list.length > 0) {
+          setSelectedTemplate(String(list[0].id));
+          setSubject(list[0].subject);
+          setBody(list[0].body);
+        }
+      })
+      .catch(() => setError('Could not load email templates. You can still edit and send below.'))
       .finally(() => setTemplateLoading(false));
   }, []);
+
+  const handleTemplateChange = (id) => {
+    setSelectedTemplate(id);
+    const tpl = templates.find(t => String(t.id) === id);
+    if (tpl) { setSubject(tpl.subject); setBody(tpl.body); }
+  };
 
   const preview = targets[0]
     ? body
@@ -372,10 +389,24 @@ function RiskEmailModal({ targets, studyPeriod, onClose, onLogged }) {
         </p>
 
         {templateLoading ? (
-          <p style={{ fontSize: 12, color: '#64748B' }}>Loading template…</p>
+          <p style={{ fontSize: 12, color: '#64748B' }}>Loading templates…</p>
         ) : (
           <>
-            <div style={s.fieldGroup}>
+            {templates.length > 0 && (
+              <div style={s.fieldGroup}>
+                <label style={s.label}>Template</label>
+                <select
+                  style={s.select}
+                  value={selectedTemplate}
+                  onChange={e => handleTemplateChange(e.target.value)}
+                >
+                  {templates.map(t => (
+                    <option key={t.id} value={t.id}>{t.name}</option>
+                  ))}
+                </select>
+              </div>
+            )}
+            <div style={{ ...s.fieldGroup, marginTop: templates.length > 0 ? 12 : 0 }}>
               <label style={s.label}>Subject</label>
               <input style={{ ...s.select, cursor: 'text' }} value={subject} onChange={e => setSubject(e.target.value)} />
             </div>

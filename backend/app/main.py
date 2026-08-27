@@ -775,13 +775,13 @@ DEFAULT_RISK_EMAIL_BODY = (
 
 
 async def _seed_risk_email_template() -> None:
-    """Insert the default Students-at-Risk email template if it's missing."""
+    """Insert the default Students-at-Risk email template if none exist yet."""
     async with _AsyncSession() as db:
-        existing = await db.get(RiskEmailTemplate, 1)
-        if existing is not None:
+        result = await db.execute(select(RiskEmailTemplate.id).limit(1))
+        if result.scalar_one_or_none() is not None:
             return
         db.add(RiskEmailTemplate(
-            id=1, subject=DEFAULT_RISK_EMAIL_SUBJECT, body=DEFAULT_RISK_EMAIL_BODY,
+            name="Default Template", subject=DEFAULT_RISK_EMAIL_SUBJECT, body=DEFAULT_RISK_EMAIL_BODY,
         ))
         await db.commit()
 
@@ -5966,58 +5966,116 @@ async def create_interventions_bulk(
     return {"created": len(created_ids), "ids": created_ids}
 
 
-class RiskEmailTemplateUpdate(BaseModel):
+class RiskEmailTemplateCreate(BaseModel):
+    name:    str = Field(..., min_length=1, max_length=120)
     subject: str = Field(..., min_length=1, max_length=255)
     body:    str = Field(..., min_length=1, max_length=5000)
 
 
-@app.get("/api/risk-email-template", tags=["Interventions"])
-async def get_risk_email_template(
-    user: dict         = Depends(get_current_user),
-    db:   AsyncSession = Depends(get_db),
-):
-    """The current Students-at-Risk bulk-email template — readable by any
-    authenticated role so the Students at Risk page can render a preview."""
-    row = await db.get(RiskEmailTemplate, 1)
+class RiskEmailTemplateUpdate(BaseModel):
+    name:    str = Field(..., min_length=1, max_length=120)
+    subject: str = Field(..., min_length=1, max_length=255)
+    body:    str = Field(..., min_length=1, max_length=5000)
+
+
+def _risk_email_template_to_dict(row: RiskEmailTemplate) -> dict:
     return {
-        "subject":     row.subject,
-        "body":        row.body,
-        "updated_by":  row.updated_by,
-        "updated_at":  row.updated_at.isoformat() if row.updated_at else None,
+        "id":         row.id,
+        "name":       row.name,
+        "subject":    row.subject,
+        "body":       row.body,
+        "updated_by": row.updated_by,
+        "created_at": row.created_at.isoformat() if row.created_at else None,
+        "updated_at": row.updated_at.isoformat() if row.updated_at else None,
     }
 
 
-@app.put("/api/risk-email-template", tags=["Interventions"])
+@app.get("/api/risk-email-templates", tags=["Interventions"])
+async def list_risk_email_templates(
+    user: dict         = Depends(get_current_user),
+    db:   AsyncSession = Depends(get_db),
+):
+    """Every saved Students-at-Risk email template, oldest first — readable
+    by any authenticated role so the Students at Risk page's template
+    picker and preview work for lecturers too, not just admins."""
+    result = await db.execute(select(RiskEmailTemplate).order_by(RiskEmailTemplate.id))
+    return {"templates": [_risk_email_template_to_dict(r) for r in result.scalars().all()]}
+
+
+@app.post("/api/risk-email-templates", status_code=201, tags=["Interventions"])
+async def create_risk_email_template(
+    req:  RiskEmailTemplateCreate,
+    user: dict         = Depends(require_head_of_school),
+    db:   AsyncSession = Depends(get_db),
+):
+    """Add a new named template — admin-only (Head of Technology / Head of
+    School). Doesn't replace any existing template, just adds another one
+    to the list the Students at Risk page's dropdown offers."""
+    row = RiskEmailTemplate(
+        name=req.name.strip(), subject=req.subject, body=req.body, updated_by=user["sub"],
+    )
+    db.add(row)
+    await db.flush()
+    await _append_audit_db(db, user_uid=user["sub"], action_type="Settings Changed", status="Success",
+                           detail=f"Risk email template created: {row.name}")
+    await db.commit()
+    # See update_mail_server's comment on the identical pattern elsewhere in
+    # this file — reading row.created_at/updated_at right after commit
+    # without this refresh hits an async-unsafe implicit lazy-reload on
+    # those server-computed columns.
+    await db.refresh(row)
+    return _risk_email_template_to_dict(row)
+
+
+@app.put("/api/risk-email-templates/{template_id}", tags=["Interventions"])
 async def update_risk_email_template(
+    template_id: int,
     req:  RiskEmailTemplateUpdate,
     user: dict         = Depends(require_head_of_school),
     db:   AsyncSession = Depends(get_db),
 ):
-    """Update the shared template — admin-only (Head of Technology / Head of
+    """Edit an existing template — admin-only (Head of Technology / Head of
     School), matching how other institution-wide config is gated in this app."""
-    row = await db.get(RiskEmailTemplate, 1)
-    now = datetime.now(timezone.utc)
+    row = await db.get(RiskEmailTemplate, template_id)
+    if row is None:
+        raise HTTPException(404, "Template not found.")
+    row.name       = req.name.strip()
     row.subject    = req.subject
     row.body       = req.body
     row.updated_by = user["sub"]
-    row.updated_at = now
 
-    # _append_audit_db commits, which expires every attribute on `row` —
-    # reading req.subject/user["sub"]/now (already-known values, not a
-    # re-read of the now-expired ORM object) avoids the async lazy-load
-    # that a post-commit `row.x` access would otherwise trigger outside a
-    # valid greenlet context (a real, confirmed MissingGreenlet crash here,
-    # not a hypothetical one).
     await _append_audit_db(
         db, user_uid=user["sub"], action_type="Settings Changed", status="Success",
-        detail="Updated the Students-at-Risk email template",
+        detail=f"Risk email template updated: {row.name}",
     )
-    return {
-        "subject":     req.subject,
-        "body":        req.body,
-        "updated_by":  user["sub"],
-        "updated_at":  now.isoformat(),
-    }
+    await db.commit()
+    await db.refresh(row)
+    return _risk_email_template_to_dict(row)
+
+
+@app.delete("/api/risk-email-templates/{template_id}", tags=["Interventions"])
+async def delete_risk_email_template(
+    template_id: int,
+    user: dict         = Depends(require_head_of_school),
+    db:   AsyncSession = Depends(get_db),
+):
+    """Remove a template — admin-only. Blocked if it's the last remaining
+    one, so the Students at Risk page's dropdown is never left with
+    nothing to pick — same reasoning as blocking deletion of the last
+    active mail server would follow, if this app enforced that too."""
+    row = await db.get(RiskEmailTemplate, template_id)
+    if row is None:
+        raise HTTPException(404, "Template not found.")
+    count = (await db.execute(select(func.count()).select_from(RiskEmailTemplate))).scalar_one()
+    if count <= 1:
+        raise HTTPException(400, "Cannot delete the last remaining template — at least one must exist.")
+
+    name = row.name
+    await db.delete(row)
+    await _append_audit_db(db, user_uid=user["sub"], action_type="Settings Changed", status="Success",
+                           detail=f"Risk email template deleted: {name}")
+    await db.commit()
+    return {"message": "Template deleted"}
 
 
 # ═══════════════════════════════════════════════════════════════════════════

@@ -203,7 +203,7 @@ export default function Sidebar() {
   ];
   const settingsChildren  = [
     { label: 'My Profile', icon: <I.Settings />, to: '/settings' },
-    ...(isAdmin || isHoS ? [{ label: 'Risk Email Template', icon: <I.AlertTriangle />, to: '/risk-email-template' }] : []),
+    ...(isAdmin || isHoS ? [{ label: 'Risk Email Templates', icon: <I.AlertTriangle />, to: '/risk-email-template' }] : []),
     ...(isAdmin || isHoS ? [{ label: 'OAuth Providers', icon: <I.Shield />, to: '/oauth-providers' }] : []),
     ...(isAdmin || isHoS ? [{ label: 'AI Config', icon: <I.AI />, to: '/ai-config' }] : []),
     ...(isAdmin || isHoS ? [{ label: 'Outgoing Mail Servers', icon: <I.Mail />, to: '/mail-servers' }] : []),
