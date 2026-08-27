@@ -277,19 +277,28 @@ def _isolate_ml_paths(seed_live_period: str | None = None):
 async def _preserve_app_state():
     """
     Snapshot + restore app.main's live in-memory dataset globals around a
-    test, clean up any pending_ingests / ingest_jobs / analyze_jobs DB rows
-    the test created (all SHARED, cross-worker Postgres tables — see
-    PendingIngest, IngestJob and AnalyzeJob in app/db/models.py — so leftover test rows
-    would show up in the real dev server's own pending-upload flow and
-    ingestion notification badge too, not just this process), and delete
-    backend/app/ml/ingested_capstone.csv if a test left synthetic data
-    there. That file is now train_model.DATA_PATH's
+    test, clean up any pending_ingests / ingest_jobs / analyze_jobs / (any
+    referencing) upload_batches DB rows the test created (all SHARED,
+    cross-worker Postgres tables — see PendingIngest, IngestJob, AnalyzeJob
+    and UploadBatch in app/db/models.py — so leftover test rows would show
+    up in the real dev server's own pending-upload flow, ingestion
+    notification badge, and Batch Uploads tab too, not just this process),
+    and delete backend/app/ml/ingested_capstone.csv if a test left
+    synthetic data there. That file is now train_model.DATA_PATH's
     real, persistent override target (see train_model.py) — read fresh by
     ANY independent process, including the real scheduler and a real
     admin's manual check_new_period.py run — so leaving fake test rows
     (STUDYPERIOD 99.1/99.2, subjects TEST100/TEST101) there after a test
     run would silently corrupt what the real dev environment resolves as
     "the current data" until someone noticed or re-ingested real data.
+
+    upload_batches must be deleted BEFORE analyze_jobs — UploadBatch.
+    analyze_job_id FKs into it, so any batch upload left over from a real
+    chunked upload (this dev server's own, or another test's) makes the
+    blanket `DELETE FROM analyze_jobs` below fail with a foreign-key
+    violation otherwise. Confirmed live: this exact ForeignKeyViolationError
+    broke test_students_at_risk.py's teardown once real UploadBatch rows
+    existed in this shared dev database.
     """
     original_data       = main_mod._DATA
     original_attendance = main_mod._ATTENDANCE
@@ -301,9 +310,10 @@ async def _preserve_app_state():
         main_mod._DATA       = original_data
         main_mod._ATTENDANCE = original_attendance
         async with main_mod._AsyncSession() as session:
-            from app.db.models import AnalyzeJob, IngestJob, PendingIngest
+            from app.db.models import AnalyzeJob, IngestJob, PendingIngest, UploadBatch
             await session.execute(delete(PendingIngest))
             await session.execute(delete(IngestJob))
+            await session.execute(delete(UploadBatch))
             await session.execute(delete(AnalyzeJob))
             await session.commit()
         # Restore, not just delete — a real admin's previously-ingested
