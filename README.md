@@ -1,12 +1,12 @@
 # EDAPT v2 — Educational Data Analytics and Predictive Tool
 
-[![CI](https://github.com/KOI-Capstone-Project/EDAPTv2/actions/workflows/ci.yml/badge.svg?branch=ml_model)](https://github.com/KOI-Capstone-Project/EDAPTv2/actions/workflows/ci.yml)
+[![CI](https://github.com/KOI-Capstone-Project/EDAPTv2/actions/workflows/ci.yml/badge.svg?branch=api_console_branch)](https://github.com/KOI-Capstone-Project/EDAPTv2/actions/workflows/ci.yml)
 
 > King's Own Institute (KOI) — Capstone Project (Second Year)
 
-EDAPT v2 is a role-based academic analytics platform. It predicts whether a student will pass or fail a subject from their recorded assessment marks — both once a subject is complete and, separately, from genuinely mid-semester partial records — and surfaces those predictions, along with real per-feature explanations, through role-scoped dashboards, an assessment-record explorer, and a roster-first predictor tool.
+EDAPT v2 is a role-based academic analytics platform. It predicts whether a student will pass or fail a subject from their recorded assessment marks — both once a subject is complete and, separately, from genuinely mid-semester partial records — and surfaces those predictions, along with real per-feature explanations, through role-scoped dashboards, an assessment-record explorer, and a roster-first predictor tool. A free-text Assistant chatbot, restricted to answering from this system's own data (never outside knowledge), sits alongside those pages for ad-hoc questions — see [AI Insights & Assistant](#ai-insights--assistant).
 
-> **Note on repository state**: this README describes what is in the working tree right now, on branch **`ml_model`** — committed and pushed to `origin/ml_model`. A substantial amount of what's documented below — the data-reliability fix, current ML pipeline, automated retraining infrastructure, outcome reconciliation, fairness auditing, SHAP explainability, and the frontend page merges — is **not yet merged to `main`** (`origin/main` is 10 commits behind `ml_model`). If you're reading this from `main`, expect an older version of the system. `sangam_dev` is an earlier development branch and is **not** where this work lives.
+> **Note on repository state**: this README describes what is in the working tree right now, on branch **`api_console_branch`** — pushed and in sync with `origin/api_console_branch` (`git rev-list --left-right --count origin/api_console_branch...api_console_branch` → `0  0`). **`ml_model` is fully merged into `main` now** (`git merge-base --is-ancestor origin/ml_model origin/main` → true, 0 commits left unique to `ml_model`; `main` has moved 24 commits ahead of it since) — the "not yet merged to `main`" warning this note used to carry is resolved and no longer applies. `api_console_branch` has itself already been merged into `main` three times (PRs #9, #10, #11 — the only 3 commits `main` has that `api_console_branch` doesn't are exactly those three merge commits, confirmed via `git log api_console_branch..origin/main`), and currently sits **15 commits ahead of what's in `main`** (`git log origin/main..api_console_branch --oneline`) — this is the newer feature set this update documents and nothing else: multi-provider AI Config, the AI Assistant chatbot, chunked large-file upload (plus the attendance year-format fix it surfaced), Outgoing Mail Servers + Email Logs, the Students at Risk checkbox fix, and the sidebar animation (see [AI Insights & Assistant](#ai-insights--assistant) and [Outgoing Mail & Email Logs](#outgoing-mail--email-logs) onward). **Whether a 4th PR is already open for these 15 commits was not checked** — no `gh` CLI or GitHub API access was available while writing this update, so this was verified only via local git graph commands (`git log`, `git merge-base`, `git rev-list`), not against GitHub's actual PR state. Check the repo's PR list directly rather than assuming either way from this note. `sangam_dev` is an earlier development branch, fully contained in `ml_model` (see [Branch Strategy](#branch-strategy)), and is **not** where current work lives. Several other topic branches exist on `origin` (`api_design_arch`, `database-changes`, `gantt-chart`, `role_based_acl`) — not investigated as part of this update, so nothing here should be read as a claim about their contents.
 
 ---
 
@@ -17,7 +17,7 @@ EDAPT v2 is a role-based academic analytics platform. It predicts whether a stud
 | Backend     | Python 3.12 · FastAPI · Uvicorn (dev) / Gunicorn + Uvicorn workers (prod) |
 | Database    | PostgreSQL 16 · SQLAlchemy 2.0 (async) · asyncpg                    |
 | Data / ML   | Pandas · Scikit-Learn · XGBoost · Imbalanced-learn (SMOTE) · SHAP · Joblib · NumPy |
-| AI          | Google Gemini API (Flash + Pro models)                              |
+| AI          | Multi-provider — Gemini, Anthropic, or OpenAI — chosen and keyed at runtime via Settings > AI Config (DB-backed, no redeploy to switch) |
 | Auth        | JWT (python-jose) · Bcrypt (passlib)                                 |
 | Frontend    | React 18 · React Router v6 · Recharts · Axios                       |
 | Styling     | Inline styles (no CSS framework)                                    |
@@ -63,15 +63,29 @@ Verified directly against `frontend/src/App.js` and the current contents of `fro
 
 The two dashboards were measured, not assumed, before deciding: roughly **23% line-level overlap**, vs. 76–99% for the pairs that were merged — different chart sets and helper components on each side. Merging them would have glued two largely-disjoint render paths together behind a prop flag rather than produced real consolidation.
 
+### Shared pages (single component, scoped server-side — no role prop at all)
+
+| Page | File | Route | Differentiator |
+|------|------|-------|-----------------|
+| Students at Risk | `StudentsAtRisk.jsx` | `/students-at-risk` | Every authenticated role. `GET /api/students-at-risk` itself scopes rows to whatever subjects the caller can see (same rule `subject_roster()` already enforces per subject) — the page and its route guard don't need to know the difference |
+
 ### Admin-only pages
+
+Verified directly against `frontend/src/App.js`'s route table. `AdminProtected` = Head of Technology or Head of School; `HoTOnlyProtected` = Head of Technology only (Head of School is redirected away).
 
 | Page | File | Route | Gate |
 |------|------|-------|------|
-| Subject Analytics | `SubjectAnalytics.jsx` | `/subject-analytics` | Head of Technology or Head of School |
-| Data Ingestion | `DataIngestion.jsx` | `/data-ingestion` | Head of Technology or Head of School |
-| Model Health | `ModelHealth.jsx` | `/model-health` | Head of Technology or Head of School — **read-only**, see [Model health](#model-health-dashboard-admin-only-read-only) |
-| Audit Log | `AuditLog.jsx` | `/audit-log` | `is_super_admin` only |
-| User Management | `UserManagement.jsx` | `/users` | `is_super_admin` only |
+| Subject Analytics | `SubjectAnalytics.jsx` | `/subject-analytics` | `AdminProtected` |
+| Data Ingestion | `DataIngestion.jsx` | `/data-ingestion` | `AdminProtected` |
+| Model Health | `ModelHealth.jsx` | `/model-health` | `AdminProtected` — **read-only**, see [Model health](#model-health-dashboard-admin-only-read-only) |
+| Risk Email Template | `RiskEmailTemplateView.jsx` | `/risk-email-template` | `AdminProtected` — reference wording for the Students at Risk page's "Log as Emailed" bulk action |
+| OAuth Providers | `OAuthProvidersView.jsx` | `/oauth-providers` | `AdminProtected` — configure Google/Microsoft sign-in client IDs, DB-backed (see [Environment Variables](#environment-variables)) |
+| AI Config | `AIConfigView.jsx` | `/ai-config` | `AdminProtected` — provider/model/API key for every AI insight endpoint and the Assistant chatbot, see [AI Insights & Assistant](#ai-insights--assistant) |
+| Outgoing Mail Servers | `OutgoingMailServersView.jsx` | `/mail-servers` | `AdminProtected` — see [Outgoing Mail & Email Logs](#outgoing-mail--email-logs) |
+| Email Logs | `EmailLogsView.jsx` | `/email-logs` | `AdminProtected` — see [Outgoing Mail & Email Logs](#outgoing-mail--email-logs) |
+| Audit Log | `AuditLog.jsx` | `/audit-log` | `HoTOnlyProtected` route, backed by `require_admin` (any Head of Technology) |
+| User Management | `UserManagement.jsx` | `/users` | `HoTOnlyProtected` route, but every `/api/users*` call is backed by `require_super_admin` — stricter than the route guard alone: a Head of Technology who isn't the seeded super-admin account can reach the page but every API call on it 403s |
+| API Console | `ApiConsole.jsx` | `/api-console` | `HoTOnlyProtected` — API key issuance/testing for the external `POST /api/v1/predict` integration |
 
 ### Auth pages
 
@@ -119,10 +133,21 @@ EDAPTv2/
 │   │           └── model_<timestamp>.pkl
 │   ├── scripts/
 │   │   └── retrain_loop.sh            # Sidecar scheduler loop (scheduled_retrain.py → sleep 24h → repeat)
-│   ├── tests/
+│   ├── tests/                          # 94 tests across 13 files — see Running Tests
 │   │   ├── conftest.py                # runs the app's real startup handler for tests
 │   │   ├── test_smoke.py              # 24 tests
-│   │   └── test_ingestion_e2e.py      # 8 tests (32 total)
+│   │   ├── test_ingestion_e2e.py      # 8 tests
+│   │   ├── test_mail_servers.py       # 8 tests — Outgoing Mail Servers CRUD + test-connection
+│   │   ├── test_chatbot.py            # 8 tests — POST /api/chatbot/ask context/scoping/refusal
+│   │   ├── test_incremental_merge.py  # 7 tests
+│   │   ├── test_batch_upload.py       # 7 tests — chunked large-file upload
+│   │   ├── test_oauth_provider_config.py  # 6 tests
+│   │   ├── test_oauth_login.py        # 6 tests
+│   │   ├── test_email_logs.py         # 5 tests — send-test-email + email log listing/detail
+│   │   ├── test_ai_config.py          # 5 tests — multi-provider AI Config CRUD
+│   │   ├── test_risk_email_and_interventions.py  # 4 tests
+│   │   ├── test_ingested_dataset_registry.py     # 4 tests
+│   │   └── test_students_at_risk.py   # 2 tests
 │   ├── Dockerfile.dev
 │   └── Dockerfile.prod
 ├── frontend/
@@ -131,9 +156,10 @@ EDAPTv2/
 │       ├── components/
 │       │   ├── Layout.jsx
 │       │   ├── Sidebar.jsx
-│       │   ├── GeminiPanel.jsx
+│       │   ├── GeminiPanel.jsx        # Per-subject tiered AI insights, embedded in Lecturer Dashboard
+│       │   ├── AIChatbox.jsx          # Floating Chat/FAQ widget on every protected page — see AI Insights & Assistant
 │       │   └── ErrorBoundary.jsx
-│       ├── pages/                     # See Pages & Routes above (incl. ModelHealth.jsx)
+│       ├── pages/                     # See Pages & Routes above (incl. ModelHealth.jsx, OutgoingMailServersView.jsx, EmailLogsView.jsx)
 │       ├── services/api.js            # Axios instance with JWT interceptor
 │       └── utils/auth.js
 ├── data/
@@ -240,13 +266,29 @@ PGADMIN_DEFAULT_EMAIL=
 PGADMIN_DEFAULT_PASSWORD=
 
 # ── Google Gemini ───────────────────────────────────────────
+# One-time migration seed only, read on first startup if no
+# ai_provider_configs row exists yet — after that, configure provider,
+# model AND key from Settings > AI Config in the app instead (no redeploy
+# needed to switch). See AI Insights & Assistant below.
 GEMINI_API_KEY=
+
+# ── Outgoing mail (forgot-password OTP, test emails) ─────────
+# Same one-time-seed pattern as GEMINI_API_KEY above — read on first
+# startup only if no mail_servers row exists yet. After that, configure
+# (and add further servers) from Settings > Outgoing Mail Servers instead.
+GMAIL_SENDER=
+GMAIL_APP_PASSWORD=
+
+# ── OAuth sign-in (Google / Microsoft) ────────────────────────
+GOOGLE_CLIENT_ID=
+MICROSOFT_CLIENT_ID=
+MICROSOFT_TENANT_ID=
 
 # ── React ───────────────────────────────────────────────────
 REACT_APP_API_BASE_URL=
 ```
 
-**`GEMINI_API_KEY` is currently unset** (placeholder value in the working `.env`) — the backend detects this at startup and disables real Gemini calls, returning a fixed `"AI insight unavailable."` string instead of crashing. See [AI Insights](#ai-insights-gemini) below for what this currently blocks.
+**None of `GEMINI_API_KEY`, `GMAIL_SENDER`/`GMAIL_APP_PASSWORD`, or the OAuth vars are the live source of truth** — each is only a one-time migration seed, read once on the very first backend startup against an empty config table (`AIProviderConfig` / `MailServer` / `OAuthProviderConfig`) and never consulted again after that. The actual running configuration always lives in Postgres and is edited from **Settings > AI Config**, **Settings > Outgoing Mail Servers**, and **Settings > OAuth Providers** respectively — no redeploy needed to change a provider, model, API key, SMTP server, or OAuth client ID. **`GEMINI_API_KEY` itself is currently unset** (placeholder value in the working `.env`) — the deployment instead has a real key configured directly through Settings > AI Config (confirmed live via `GET /api/ai-config`: `provider: gemini, model: gemini-3.7-flash, has_key: true`). Without any key configured through either path, every AI call (insight tiers, chatbot) returns a fixed `"AI insight unavailable — no AI provider is configured."` string instead of crashing. See [AI Insights & Assistant](#ai-insights--assistant) below.
 
 ---
 
@@ -302,6 +344,16 @@ Two source files are loaded automatically into in-memory pandas DataFrames **at 
 To get a plain CSV back for inspection: `gunzip -c data/masked_attendance.csv.gz > /tmp/attendance.csv`.
 
 `POST /api/ingest` also still exists as a runtime override (upload a different CSV/XLSX without restarting the container), matching the original **Data Ingestion** page's behavior, but it's a secondary path now, not the only way data gets in. Uploads are plain CSVs — the gzip storage applies only to the checked-in copy.
+
+### Chunked upload for large files
+
+A single-request `POST /api/ingest` (or `/api/ingest/attendance`) holding a 100–200MB file can sit as a browser request that never resolves — root-caused to something intercepting/buffering the request client-side before it reaches the backend (a large single-shot upload to the same backend succeeded directly via `curl`), not a server or network limit. Rather than continue chasing that specific client-side cause, both ingestion kinds (capstone and attendance) got a **chunked, resumable upload path**:
+
+- `POST /api/ingest/{kind}/batch/init` — declares filename/total size, gets back a `batch_id` and a chunk size (`UPLOAD_CHUNK_MAX_BYTES`, 10MB)
+- `POST /api/ingest/{kind}/batch/{batch_id}/chunk` — one request per 10MB slice (`File.slice()` client-side), accepted **strictly in order** — re-sending the immediately-preceding chunk is treated as an idempotent retry (safe to retry after a dropped connection), but an out-of-order chunk is rejected
+- Once every chunk lands, the assembled file is hashed off to the existing `AnalyzeJob` pipeline exactly as a normal upload would be — chunking changes how the bytes arrive, not what happens to them afterward
+- `GET /api/ingest/{kind}/batch/{batch_id}` / `GET /api/ingest/batches` — progress, surfaced in the Data Ingestion page's **Batch Uploads** tab, polled independently of the existing Ingestion Activity tab
+- In-flight pieces land at `backend/app/ml/batch_uploads/*.part` — gitignored (see `UploadBatch` in `app/db/models.py`); assembled and deleted automatically on completion, so a `.part` file lying around just means an upload was abandoned mid-transfer, not a bug
 
 ### Data Handling — what this system processes, and what is *not* guaranteed
 
@@ -447,6 +499,23 @@ Deliberately its own table rather than columns on `predictions`. A prediction is
 | `notes` | Text, nullable | |
 | `created_by` | String(255) | Email/uid of whoever logged it |
 | `created_at` | DateTime | |
+
+### Other real, actively-used tables
+
+Beyond `predictions`/`interventions`/`users`/`audit_logs`, several more tables back real admin-configurable features — each editable at runtime from its own Settings page rather than via env vars or redeploys:
+
+| Table | Backs | Notes |
+|---|---|---|
+| `mail_servers` | Settings > Outgoing Mail Servers | One row per SMTP server (host/port/security/username/`encrypted_password`/`from_email`/`priority`/`active`). The lowest-`priority` active row is used for the forgot-password OTP and Send Test Email; `POST /api/mail-servers/test` checks connectivity without sending anything |
+| `email_logs` | Settings > Email Logs | One row per email the app has ever *tried* to send (`kind`: `test` or `password_reset`), `status` **`sent` or `failed` only** — never a fabricated `delivered`, since plain SMTP can't confirm actual mailbox delivery without bounce/webhook infrastructure this app doesn't have. `failure_reason` holds the real SMTP error on failure |
+| `upload_batches` | Data Ingestion's chunked-upload flow | One row per in-progress or completed large-file upload — `status`, `total_chunks`/`received_chunks`, `storage_path` for the assembled file, `analyze_job_id` once handed off. See [Loading Data](#loading-data) |
+| `ai_provider_configs` | Settings > AI Config | Single-row (`id=1`) config for whichever provider/model/key currently powers every AI-insight endpoint and the Assistant chatbot. See [AI Insights & Assistant](#ai-insights--assistant) |
+| `oauth_provider_configs` | Settings > OAuth Providers | One row per provider (`google`/`microsoft`) — client ID and, for Microsoft, tenant ID |
+| `risk_email_templates` | Settings > Risk Email Template | Reference subject/body wording for Students at Risk's "Log as Emailed" bulk action (see [Intervention tracking](#intervention-tracking) — this doesn't send email itself, it logs an `Intervention` row) |
+| `api_keys` | API Console | Issued keys for the external `POST /api/v1/predict` integration |
+| `pending_ingests` | Two-phase ingestion (`analyze` → `confirm`) | See [Container drift](#source-control-note--a-claimed-fix-that-was-never-on-disk) era fix — Postgres-backed so `analyze`/`confirm` work regardless of which of prod's 4 gunicorn workers handles each request |
+
+Secrets in all of the above (`mail_servers.encrypted_password`, `ai_provider_configs.encrypted_api_key`) use the same Fernet symmetric encryption (`app/crypto_utils.py`, keyed off `SECRET_KEY`) — never returned in plaintext by any `GET`, only a `has_key` boolean and a masked last-4-characters preview. Leaving `api_key`/`password` blank on an update keeps whatever is already stored, so switching models or servers doesn't force re-entering the same secret.
 
 No migration framework (Alembic is a dependency but unused) — schema changes are applied via `Base.metadata.create_all()` on an empty table, or direct `ALTER TABLE` for tables with real data.
 
@@ -645,11 +714,38 @@ The two CLI scripts gained `collect()`/`summarise()` functions that `main()` now
 docker exec edaptv2_backend pytest tests/ -v
 ```
 
-**32 tests, all passing** as of this README (regenerated via `pytest --collect-only`, not hand-typed — `test_smoke.py`'s 24 plus `test_ingestion_e2e.py`'s 8, on a container built `--no-cache` from `requirements.txt`) — covering health/auth, the three coverage-tier prediction paths, server-side recomputation of partial scores (regression test for the train/serve consistency bug), SHAP explanation consistency for both models, the Fail/Safe risk-band contradiction fix (both an HTTP-level reproduction of the reported bug and a pure unit-level invariant sweep across five threshold values), the roster's server-side feature-assembly path for both coverage tiers, cross-endpoint agreement on a real student's attendance rate, intervention scoping across two lecturers with disjoint subjects, actionable-factor selection (including that it skips larger non-actionable factors and never surfaces a demographic one), the admin-only read-only model-health endpoint, the honest-unavailable response for a subject with no attendance data, the two-phase ingestion flow's Postgres-backed pending-row handoff (including a real cross-process lock-contention test and a TTL-expiry test against a genuinely backdated row), and column classification.
+**94 tests across 13 files** as of this README (regenerated via `pytest --collect-only`, not hand-typed — see the file-by-file breakdown in [Project Structure](#project-structure) — on a container built `--no-cache` from `requirements.txt`). **92 pass; the 2 in `test_oauth_login.py` that assert "login rejected when no client ID is configured" fail specifically in an environment (like this one) that has real Google/Microsoft client IDs configured through Settings > OAuth Providers — that's the tests' own precondition no longer holding, not an application bug.**
+
+Beyond the original `test_smoke.py`/`test_ingestion_e2e.py` coverage (health/auth, the three coverage-tier prediction paths, server-side partial-score recomputation, SHAP explanation consistency, the Fail/Safe risk-band contradiction fix, cross-endpoint attendance agreement, intervention scoping, actionable-factor selection, the read-only model-health endpoint, and the two-phase ingestion flow's Postgres-backed pending-row handoff), later files added real coverage for each feature documented above:
+
+| File | Covers |
+|---|---|
+| `test_ai_config.py` | Multi-provider AI Config CRUD — never returns a plaintext key, blank key on update keeps the existing one, rejects an unknown provider/model pair |
+| `test_chatbot.py` | The Assistant's context-building and refusal routing — role scoping (a lecturer's prompt never contains another subject's data), dedup across model versions (a re-predicted student counts once, at their latest risk band), the honest "no predictions computed yet" case, refusal pass-through — faked `_ai_call`/seeded `Prediction` rows, so these don't depend on a real AI key or a full ML pipeline |
+| `test_mail_servers.py` | Outgoing Mail Servers CRUD (including the post-commit-refresh regression that once 500'd an update), test-connection against an unreachable host, lecturer rejection |
+| `test_email_logs.py` | Send Test Email logging a real SMTP failure reason (via a server pointed at a port nothing listens on — deterministic, no real credentials needed), status/kind filtering, the list view omitting `body` while the detail view includes it |
+| `test_batch_upload.py` | The chunked-upload flow end to end — full upload → analyze handoff, idempotent retry of the immediately-preceding chunk, out-of-order rejection, size-mismatch-at-finalize |
+| `test_students_at_risk.py` | Cross-subject risk aggregation, and that a lecturer only ever sees rows for subjects they're assigned to |
+| `test_oauth_provider_config.py` / `test_oauth_login.py` | OAuth provider config CRUD and the Google/Microsoft login flows themselves |
+| `test_incremental_merge.py` / `test_ingested_dataset_registry.py` / `test_risk_email_and_interventions.py` | Incremental data-merge behavior, the ingested-dataset registry, and Risk Email Template + intervention logging |
 
 ---
 
-## AI Insights (Gemini)
+## AI Insights & Assistant
+
+### Provider configuration — Settings > AI Config
+
+Every AI call in this app — the tiered insight endpoints below and the Assistant chatbot — is dispatched through one function, `_ai_call()`, which reads whichever **provider, model, and API key** is currently configured in `ai_provider_configs` (cached in memory, refreshed on every save — no per-call DB round trip). Three providers are supported, each with a curated model shortlist an admin picks from rather than free-typing a model id:
+
+| Provider | Models offered (Settings > AI Config dropdown) |
+|---|---|
+| Gemini | Gemini 3.7 Flash · Gemini 3.6 Flash · Gemini 3.1 Pro (Preview) |
+| Anthropic | Claude Sonnet 5 · Claude Opus 5 · Claude Haiku 4.5 |
+| OpenAI | GPT-5.6 Terra · GPT-5.5 · GPT-5 mini |
+
+Every endpoint below still lives under the `/api/gemini/*` route prefix for frontend backward-compatibility, even when a non-Gemini provider is actually configured — this is a naming artifact of the migration from a single hardcoded `GEMINI_API_KEY`, not a claim that Gemini is always what's being called. Switching provider/model/key takes effect immediately, no redeploy — see [Environment Variables](#environment-variables) for the one-time `GEMINI_API_KEY` migration-seed path this replaced.
+
+### Tiered per-subject insights
 
 | Tier | Endpoint | Trigger | Scope |
 |------|----------|---------|-------|
@@ -657,9 +753,34 @@ docker exec edaptv2_backend pytest tests/ -v
 | 2 — Deep Analysis | `POST /api/gemini/analyse` | Click button | Subject + trimester |
 | 3 — Free Q&A | `POST /api/gemini/ask` | User question, or auto-generated per-prediction question fed real SHAP factors | Subject + trimester |
 
-Admin-level equivalents (`/api/gemini/institution-*`) serve the Admin Dashboard with institution-wide context.
+Admin-level equivalents (`/api/gemini/institution-*`) serve the Admin Dashboard with institution-wide context. `GET /api/gemini/token-log` (Head of Technology / Head of School) returns the in-memory token-usage log for every AI call made, newest first.
 
-Set `GEMINI_API_KEY` before starting the backend. Without a real key, every call returns a fixed `"AI insight unavailable."` string rather than crashing — confirmed this is the current live state of this deployment.
+Without a real key configured (either path), every call above returns a fixed `"AI insight unavailable — no AI provider is configured."` string rather than crashing.
+
+### Assistant — a chatbot restricted to this system's own student data
+
+`POST /api/chatbot/ask`, surfaced as a floating "EDAPT AI Assistant" widget (`AIChatbox.jsx`) on every protected page, with a Chat tab and an FAQ tab of verified-working template prompts. Deliberately **not** a general-purpose chatbot:
+
+- **Scoped by role identically to Students at Risk** — an admin's context is institution-wide, a lecturer's is built only from their assigned subjects, using the same `_role_filter`/`user["subjects"]` rule as every other role-scoped endpoint in this app.
+- **Answers only from a JSON context built out of real data**, never invented numbers: `_subject_stats()` (the same raw-marks stats the tiered insights above use — average mark, pass rate, weakest assessment type, period-over-period change) plus per-subject risk-band counts (High Risk / At Risk / Safe) read directly off the `predictions` table.
+- **Reads `predictions` directly rather than recomputing risk bands live.** An early version called the same `subject_roster()`/`students_at_risk()` aggregation the Students at Risk page uses — real per-student ML/SHAP inference across every visible subject, confirmed 50s+ end-to-end on the full dataset, unworkable for an interactive chat reply. Rewritten to a single indexed `DISTINCT ON` query against `predictions` (deduplicated to each student's *most recent* row, so a student re-predicted under a newer model version is never double-counted) — confirmed live at ~4s total, almost entirely the AI provider round-trip itself, not the query.
+- **Honest about missing data, not silently wrong.** A study period nobody has opened Students at Risk or Predictor for yet has zero rows in `predictions` — the chatbot reports this explicitly ("no risk predictions computed for this period yet") rather than rendering an empty result as "zero students at risk," which would be a different and false claim.
+- **Refuses, with one fixed sentence, anything outside that scope** — a question the context can't answer, or one unrelated to this system's data entirely (general knowledge, coding help, an instruction to ignore these rules) — rather than answering from the model's outside knowledge. This is a **prompt-level restriction**, the same class of control as every other endpoint in this file: it constrains an honest model's behavior, it is not a sandbox, and a sufficiently adversarial prompt could still try to talk the model out of it.
+- **Small talk gets small talk.** An earlier prompt version had no branch for a plain greeting, so asking "Hi" produced a full unsolicited statistics dump — confirmed live, then fixed by adding an explicit instruction to reply with one short, friendly sentence for a greeting and reserve the data context for an actual question.
+- **Renders Markdown in the chat bubble**, not literal `**`/`-` characters — a small dependency-free renderer (`renderMarkdownLite` in `AIChatbox.jsx`) turns the model's bold/bullet-list output into real React elements, never `dangerouslySetInnerHTML`.
+
+---
+
+## Outgoing Mail & Email Logs
+
+Settings > Outgoing Mail Servers (multiple SMTP servers, lowest-`priority` active one wins) and Settings > Email Logs — replacing what used to be a single hardcoded Gmail account behind `GMAIL_SENDER`/`GMAIL_APP_PASSWORD` (still supported as a one-time migration seed, see [Environment Variables](#environment-variables)).
+
+- **`POST /api/mail-servers/test`** checks a server's connectivity (host/port/security/credentials) in real time and reports success/failure with the actual elapsed time — never raises, so a broken server can't 500 the settings page.
+- **`POST /api/mail-servers/send-test-email`** sends a real email (From/To/Subject/HTML body) through a chosen server or whichever is active, and always logs the attempt to `email_logs` — success or failure — via the same `_send_and_log_email()` helper the real forgot-password OTP flow uses. So Email Logs is a complete record of every email this app has tried to send, not just manual tests.
+- **Status is only ever `sent` or `failed` — deliberately, never a fabricated `delivered`.** Plain SMTP (`smtplib`) confirms the receiving server accepted the message, not that it reached an inbox — claiming "delivered" without bounce/webhook infrastructure this app doesn't have would be asserting something never actually confirmed. On failure, `failure_reason` holds the real SMTP error text (e.g. a provider's actual sender-verification rejection), not a generic message.
+- **The email body is rendered as escaped source text in the Email Logs detail view, never as live HTML** — `<pre>{log.body}</pre>`, not `dangerouslySetInnerHTML`. An admin-entered test-email body is arbitrary input; rendering it live would let one saved log entry execute script in another admin's session when they later view it.
+- **Blocking SMTP calls run via `asyncio.to_thread()`**, so a slow/unreachable mail server can't stall the event loop for other requests.
+- Encrypted at rest the same way as the AI provider API key — see [Other real, actively-used tables](#other-real-actively-used-tables).
 
 ---
 
@@ -679,13 +800,18 @@ Set `GEMINI_API_KEY` before starting the backend. Without a real key, every call
 | Auth | `POST /api/auth/login` · `logout` · `change-password` |
 | Dashboard | `GET /api/dashboard/summary` · `grade-distribution` · `performance-trend` · `assessment-comparison` · `pass-fail` · `international` · `difficulty-index` |
 | Explorer | `GET /api/explorer/records` · `filters` · `student/{id}` · `export` |
-| Subjects | `GET /api/subjects/list` · `analytics` · `{subject}/roster` · `{subject}/assessments` |
-| Ingest | `POST /api/ingest` · `GET /api/ingest/preview` |
+| Subjects | `GET /api/subjects/list` · `analytics` · `{subject}/roster` · `{subject}/assessments` · `GET /api/students-at-risk` |
+| Ingest | `POST /api/ingest` · `GET /api/ingest/preview` · chunked upload: `POST /api/ingest/{kind}/batch/init` · `.../batch/{id}/chunk` · `GET /api/ingest/{kind}/batch/{id}` · `GET /api/ingest/batches` |
 | ML | `POST /api/predict` (routes to complete-record, mid-term-estimate, or insufficient-data based on server-computed coverage; includes `shap_explanation` and, for a real student, `top_actionable_factor`) |
 | Interventions | `POST /api/interventions` · `GET /api/interventions` · `GET /api/interventions/action-types` |
 | Model health | `GET /api/admin/model-health` (admin only, read-only) |
 | Health | `GET /health` (liveness) · `GET /api/health` (readiness — 503 if DB, data or either live model is missing) |
-| Gemini | `POST /api/gemini/alert` · `analyse` · `ask` · `institution-alert` · `institution-analyse` · `institution-ask` · `GET /api/gemini/token-log` |
+| Gemini (tiered insights) | `POST /api/gemini/alert` · `analyse` · `ask` · `institution-alert` · `institution-analyse` · `institution-ask` · `GET /api/gemini/token-log` |
+| AI Config | `GET /api/ai-config` · `PUT /api/ai-config` (admin only — provider/model/key powering every Gemini/Chatbot endpoint) |
+| Chatbot | `POST /api/chatbot/ask` (any authenticated role, role-scoped — see [AI Insights & Assistant](#ai-insights--assistant)) |
+| Mail servers | `GET/POST /api/mail-servers` · `PUT/DELETE /api/mail-servers/{id}` · `POST /api/mail-servers/test` · `POST /api/mail-servers/send-test-email` (all admin only) |
+| Email logs | `GET /api/email-logs` · `GET /api/email-logs/{id}` (admin only) |
+| OAuth providers | `GET /api/oauth-providers` · `PUT /api/oauth-providers` (admin only) |
 | Users | `GET /api/users` · `POST /api/users` · `PUT /api/users/{email}` · `DELETE /api/users/{email}` |
 | Audit | `GET /api/audit-logs` |
 
@@ -697,11 +823,12 @@ Full interactive docs: `http://localhost:8000/docs`
 
 | Branch | Purpose |
 |--------|---------|
-| `main` | Stable, reviewed code — `origin/main` is currently **10 commits behind** `ml_model` |
-| `ml_model` | Active development — **currently ahead of `main` by all of the work described in this README**, committed and pushed to `origin/ml_model` |
-| `sangam_dev` | Earlier development branch, superseded — 9 commits behind `ml_model` and 0 ahead (fully contained, not divergent). Not where current work lives |
+| `main` | Stable, reviewed code. Has `ml_model` fully merged in (0 commits unique to `ml_model` — verified via `git merge-base --is-ancestor origin/ml_model origin/main`) plus 3 more merges of `api_console_branch` (PRs #9, #10, #11) |
+| `ml_model` | Superseded — fully merged into `main`, 0 commits ahead of it. Kept as a branch but no longer the frontier of active development |
+| `api_console_branch` | **Active development, currently checked out** — everything `ml_model` had, plus 36 more commits, 15 of which (this update's feature set) aren't in `main` yet as of this update. See the "Note on repository state" callout near the top of this file for the exact verification commands |
+| `sangam_dev` | Earlier development branch, fully contained in `ml_model` (and therefore in `main` too). Not where current work lives |
 
-PRs are opened from `ml_model` → `main`.
+Based on the merge history found in `main` (three merge commits, each named `Merge pull request #N from KOI-Capstone-Project/api_console_branch`), PRs for this line of work are opened from `api_console_branch` → `main` — a change from the `ml_model` → `main` flow this section previously described, presumably once `ml_model`'s own PR landed. Not confirmed against any project-management source, only inferred from the commit graph.
 
 ---
 
@@ -727,7 +854,7 @@ Stated plainly rather than rounded up or omitted:
 - **Deliberately left unverified: the other endpoints that assemble model features server-side.** Two real bugs this session lived in exactly that pattern — the roster returning `probability: null` for every student, and `/api/predict` disagreeing with the roster about the same student's attendance. Both were in code where *the server* builds the feature vector from stored data, rather than the client supplying it. **The same pattern is untested in `/api/subjects/{subject}/analytics`, the attendance analytics endpoints, and every dashboard endpoint beyond `/api/dashboard/summary`.** These are **not known to be broken** — no failure has been observed in any of them, and no claim is being made that one exists. They are named because they sit in the same blind spot that hid both confirmed bugs, which makes them the most likely place a similar issue would be found if one is there. **Checking them was a deliberate decision to stop, not an oversight** — the session's scope closed with the two known bugs fixed and the pattern documented, rather than expanding into an open-ended audit. Whoever picks this up next has a clear starting point: call each of those endpoints as a real client and assert on the values in the payload, not the status code. See [Testing Practices](#testing-practices--a-real-outage-the-suite-missed) for why HTTP 200 is not evidence here.
 - **No GitHub-hosted CI run has been observed yet.** The pipeline in `.github/workflows/ci.yml` was proven locally with `act` and by running each job's exact commands, including a deliberate failure and recovery for every gate (see [CI and quality gates](#ci-and-quality-gates--automating-what-used-to-depend-on-remembering)). But no `gh` CLI or API token existed in the environment where it was written, so the first real run on GitHub's runners is still unverified. Two things could plausibly differ there: the `services:` Postgres wiring, and `--network host` reaching it. **Check the CI badge at the top of this file** — that, not this paragraph, is the current truth.
 - **Type-checking is absent.** mypy was deliberately not added at close-out (rationale in the CI section). A real gap, named as one.
-- **This feature set is committed and pushed on `ml_model`, but not merged to `main`** — `origin/main` is 10 commits behind. See the note at the top of this file.
+- **Resolved since this item was first written: `ml_model` is now fully merged into `main`.** The work this bullet originally warned about is in `main`. What's genuinely unmerged now is different: `api_console_branch` (the branch this update was written from) sits 15 commits ahead of `main` — the feature set this update documents (AI Assistant, multi-provider AI Config, Outgoing Mail Servers, Email Logs, chunked upload). See the "Note on repository state" callout at the top of this file for the exact verification.
 
 ---
 
@@ -793,7 +920,7 @@ Every incident documented above was caught by a person deciding to check, not by
 | `ruff check` (backend lint) | `.github/workflows/ci.yml` → `backend-lint` | every push and PR |
 | Fresh `--no-cache` image build | `backend-tests` | every push and PR |
 | Image-vs-`requirements.txt` assertion | `backend-tests` | every push and PR |
-| Full backend suite (32 tests) inside that image | `backend-tests` | every push and PR |
+| Full backend suite (94 tests as of this update — see [Running Tests](#running-tests)) inside that image | `backend-tests` | every push and PR |
 | `npm ci` + eslint + frontend tests | `frontend` | every push and PR |
 | ruff, whitespace, YAML/JSON validity, large files, private keys, conflict markers | `.pre-commit-config.yaml` | every local commit |
 
