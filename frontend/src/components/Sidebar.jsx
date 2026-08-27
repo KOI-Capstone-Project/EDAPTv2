@@ -189,24 +189,27 @@ export default function Sidebar() {
   const user       = getUser();
   const isAdmin      = user?.role === 'Head of Technology';
   const isHoS        = user?.role === 'Head of School';
-  const isSuperAdmin = user?.email === 'admin';
   const roleKey      = isAdmin ? 'admin' : isHoS ? 'hos' : 'lecturer';
 
   // Same ACL as before per item — this only changes where each link lives
   // in the tree, not who can reach it (route guards in App.js are untouched).
   const reportingChildren = REPORTING_CHILDREN.filter(c => c.roles.includes(roleKey));
+  // Email Logs and Audit Logs live under one nested "Logs" group rather than
+  // as flat Settings entries — every Head of Technology account is a full
+  // administrator, so both are gated on role alone, same as the rest of Settings.
+  const logsChildren = [
+    ...(isAdmin || isHoS ? [{ label: 'Email Logs', icon: <I.Mail />,     to: '/email-logs' }] : []),
+    ...(isAdmin ? [{ label: 'Audit Logs', icon: <I.AuditLog />, to: '/audit-log' }] : []),
+  ];
   const settingsChildren  = [
     { label: 'My Profile', icon: <I.Settings />, to: '/settings' },
-    ...(isAdmin || isHoS ? [{ label: 'Risk Email Template', icon: <I.AlertTriangle />, to: '/risk-email-template' }] : []),
+    ...(isAdmin || isHoS ? [{ label: 'Risk Email Templates', icon: <I.AlertTriangle />, to: '/risk-email-template' }] : []),
     ...(isAdmin || isHoS ? [{ label: 'OAuth Providers', icon: <I.Shield />, to: '/oauth-providers' }] : []),
     ...(isAdmin || isHoS ? [{ label: 'AI Config', icon: <I.AI />, to: '/ai-config' }] : []),
     ...(isAdmin || isHoS ? [{ label: 'Outgoing Mail Servers', icon: <I.Mail />, to: '/mail-servers' }] : []),
-    ...(isAdmin || isHoS ? [{ label: 'Email Logs', icon: <I.AuditLog />, to: '/email-logs' }] : []),
     ...(isAdmin ? [{ label: 'API Console', icon: <I.ApiKey />, to: '/api-console' }] : []),
-    ...(isAdmin && isSuperAdmin ? [
-      { label: 'User Management', icon: <I.Users />,    to: '/users'     },
-      { label: 'Audit Logs',      icon: <I.AuditLog />, to: '/audit-log' },
-    ] : []),
+    ...(isAdmin ? [{ label: 'User Management', icon: <I.Users />, to: '/users' }] : []),
+    ...(logsChildren.length ? [{ label: 'Logs', icon: <I.AuditLog />, children: logsChildren }] : []),
   ];
 
   const rawNav = isAdmin ? ADMIN_NAV_BASE : isHoS ? HOS_NAV : LECTURER_NAV;
@@ -216,11 +219,18 @@ export default function Sidebar() {
     return item;
   });
 
-  const isChildActive = children => children.some(c => location.pathname === c.to);
+  // Recurses so a nested group (e.g. Logs inside Settings) counts as active
+  // whenever one of its own children matches the current route.
+  const isChildActive = children => children.some(c => c.children ? isChildActive(c.children) : location.pathname === c.to);
+
+  // Walks the tree collecting every group (top-level and nested) so their
+  // open/closed state can all live in the one flat openGroups map, keyed by
+  // each group's (unique) label.
+  const collectGroups = items => items.flatMap(item => item.children ? [item, ...collectGroups(item.children)] : []);
 
   const [openGroups, setOpenGroups] = useState(() => {
     const init = {};
-    navItems.forEach(item => { if (item.children) init[item.label] = isChildActive(item.children); });
+    collectGroups(navItems).forEach(group => { init[group.label] = isChildActive(group.children); });
     return init;
   });
 
@@ -229,8 +239,8 @@ export default function Sidebar() {
   useEffect(() => {
     setOpenGroups(prev => {
       const next = { ...prev };
-      navItems.forEach(item => {
-        if (item.children && isChildActive(item.children)) next[item.label] = true;
+      collectGroups(navItems).forEach(group => {
+        if (isChildActive(group.children)) next[group.label] = true;
       });
       return next;
     });
@@ -308,7 +318,56 @@ export default function Sidebar() {
                   <div style={{ display: 'grid', gridTemplateRows: isOpen ? '1fr' : '0fr', transition: 'grid-template-rows 0.25s cubic-bezier(0.4, 0, 0.2, 1)' }}>
                     <div style={{ overflow: 'hidden' }}>
                       <div style={{ ...s.subNav, opacity: isOpen ? 1 : 0, transition: 'opacity 0.2s ease' }}>
-                        {item.children.map(child => (
+                        {item.children.map(child => child.children ? (
+                          // Nested group (e.g. Logs under Settings) — only ever rendered
+                          // inside an already-expanded, already-visible parent, so it
+                          // needs none of the top-level group's collapsed-sidebar handling.
+                          <div key={child.label}>
+                            <button
+                              type="button"
+                              onClick={() => toggleGroup(child.label)}
+                              style={{
+                                ...s.item, ...s.subItem, ...s.groupHeader,
+                                ...(isChildActive(child.children) && !openGroups[child.label] ? s.itemActive : {}),
+                              }}
+                            >
+                              <span style={s.icon}>{child.icon}</span>
+                              <span style={{ flex: 1, textAlign: 'left' }}>{child.label}</span>
+                              <span style={{
+                                display: 'flex', transition: 'transform 0.2s ease',
+                                transform: openGroups[child.label] ? 'rotate(0deg)' : 'rotate(-90deg)',
+                              }}>
+                                <I.ChevronDown />
+                              </span>
+                            </button>
+                            <div style={{
+                              display: 'grid',
+                              gridTemplateRows: openGroups[child.label] ? '1fr' : '0fr',
+                              transition: 'grid-template-rows 0.25s cubic-bezier(0.4, 0, 0.2, 1)',
+                            }}>
+                              <div style={{ overflow: 'hidden' }}>
+                                <div style={{
+                                  ...s.subNav, margin: '2px 0 2px 16px',
+                                  opacity: openGroups[child.label] ? 1 : 0, transition: 'opacity 0.2s ease',
+                                }}>
+                                  {child.children.map(grandchild => (
+                                    <NavLink
+                                      key={grandchild.to}
+                                      to={grandchild.to}
+                                      style={({ isActive }) => ({
+                                        ...s.item, ...s.subItem,
+                                        ...(isActive ? s.itemActive : {}),
+                                      })}
+                                    >
+                                      <span style={s.icon}>{grandchild.icon}</span>
+                                      {grandchild.label}
+                                    </NavLink>
+                                  ))}
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        ) : (
                           <NavLink
                             key={child.to}
                             to={child.to}

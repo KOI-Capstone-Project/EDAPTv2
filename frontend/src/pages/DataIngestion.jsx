@@ -5,6 +5,7 @@
 // is shared across both slots in one panel, tagged by source dataset.
 import { useRef, useState, useCallback, useEffect } from 'react';
 import api from '../services/api';
+import { getErrorMessage } from '../utils/apiError';
 import { markIngestJobsSeen } from '../utils/ingestNotifications';
 
 const IconCloud = () => (
@@ -165,7 +166,7 @@ function UploadCard({ kind, title, hint, maxSizeMB, onJobStarted, onCleared, onD
       });
       onJobStarted(kind, analyze_job_id, f);
     } catch (err) {
-      setError(err.response?.data?.detail || 'Upload failed. Please try again.');
+      setError(getErrorMessage(err, 'Upload failed. Please try again.'));
       setFile(null);
     } finally {
       setUploading(false);
@@ -207,7 +208,7 @@ function UploadCard({ kind, title, hint, maxSizeMB, onJobStarted, onCleared, onD
       await onDeleteDataset(kind);
       setConfirmingDelete(false);
     } catch (err) {
-      setDeleteError(err.response?.data?.detail || 'Could not clear this dataset. Please try again.');
+      setDeleteError(getErrorMessage(err, 'Could not clear this dataset. Please try again.'));
     } finally {
       setDeleting(false);
     }
@@ -940,7 +941,7 @@ export default function DataIngestion() {
       // status show up right away instead of waiting for the next poll tick.
       await Promise.all([fetchJobs(), fetchDatasetSummary()]);
     } catch (err) {
-      setCommitError(err.response?.data?.detail || 'Could not start ingestion. Please try again.');
+      setCommitError(getErrorMessage(err, 'Could not start ingestion. Please try again.'));
     } finally {
       setCommitting(false);
     }

@@ -6,6 +6,7 @@
 import { useState, useRef } from 'react';
 import { getUser, getUserName, getUserInitials } from '../utils/auth';
 import api from '../services/api';
+import { getErrorMessage } from '../utils/apiError';
 
 const ALL_PERIODS = ['23.1','23.2','23.3','24.1','24.2','24.3','25.1','25.2','25.3'];
 
@@ -50,7 +51,7 @@ export default function SettingsView({ isLecturer }) {
       localStorage.setItem('edapt_user', JSON.stringify({ ...stored, name, phone, department, bio }));
       setProfileMsg({ type: 'success', text: 'Profile updated successfully.' });
     } catch (err) {
-      setProfileMsg({ type: 'error', text: err.response?.data?.detail || 'Failed to update profile.' });
+      setProfileMsg({ type: 'error', text: getErrorMessage(err, 'Failed to update profile.') });
     } finally {
       setProfSaving(false);
     }
@@ -91,7 +92,7 @@ export default function SettingsView({ isLecturer }) {
       setPwdMsg({ type: 'success', text: 'Password updated successfully.' });
       setCurPwd(''); setNewPwd(''); setConfPwd('');
     } catch (err) {
-      setPwdMsg({ type: 'error', text: err.response?.data?.detail || 'Failed to update password.' });
+      setPwdMsg({ type: 'error', text: getErrorMessage(err, 'Failed to update password.') });
     } finally {
       setPwdLoading(false);
     }

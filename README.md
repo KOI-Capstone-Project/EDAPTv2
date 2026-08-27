@@ -29,16 +29,17 @@ A PostgreSQL-backed relational schema now exists and is genuinely used for **use
 
 ## Roles
 
-Confirmed directly against `backend/app/main.py`'s role checks and the seeded default accounts. There are **three roles**, plus one orthogonal super-admin flag:
+Confirmed directly against `backend/app/main.py`'s role checks and the seeded default accounts. There are **three roles**:
 
 | Role                 | Access                                                                 |
 |-----------------------|-------------------------------------------------------------------------|
 | `Lecturer`            | Their assigned subjects only — dashboard, explorer, predictor, settings |
 | `Head of School`      | Institution-wide analytics, same scope as Head of Technology except audit log / user management |
-| `Head of Technology`  | Institution-wide analytics, data ingestion, predictive reports, all subjects |
-| `is_super_admin` flag | Independent of role — grants Audit Log and User Management access. Seeded only on the default `admin` account (a Head of Technology) |
+| `Head of Technology`  | Institution-wide analytics, data ingestion, predictive reports, all subjects, Audit Log, User Management, API Console — every Head of Technology account is a full administrator |
 
-`Head of Technology` and `Head of School` are treated identically almost everywhere in the codebase (`user.get("role") in {"Head of Technology", "Head of School"}` appears throughout `main.py`) — the meaningful three-way split for most endpoints is really "Lecturer vs. everyone else," with the super-admin flag layered on top for two specific pages.
+`Head of Technology` and `Head of School` are treated identically almost everywhere in the codebase (`user.get("role") in {"Head of Technology", "Head of School"}` appears throughout `main.py`) — the meaningful three-way split for most endpoints is really "Lecturer vs. everyone else," with Audit Log / User Management / API Console layered on top as Head-of-Technology-only.
+
+There's also an `is_super_admin` DB column, but it no longer gates any page or endpoint — it exists solely to protect the seeded `admin` account itself from being deleted or modified by another Head of Technology account (`db_user.email == "admin"` checks in `update_user`/`delete_user`), not to distinguish access levels between admins.
 
 ---
 
@@ -78,13 +79,13 @@ Verified directly against `frontend/src/App.js`'s route table. `AdminProtected` 
 | Subject Analytics | `SubjectAnalytics.jsx` | `/subject-analytics` | `AdminProtected` |
 | Data Ingestion | `DataIngestion.jsx` | `/data-ingestion` | `AdminProtected` |
 | Model Health | `ModelHealth.jsx` | `/model-health` | `AdminProtected` — **read-only**, see [Model health](#model-health-dashboard-admin-only-read-only) |
-| Risk Email Template | `RiskEmailTemplateView.jsx` | `/risk-email-template` | `AdminProtected` — reference wording for the Students at Risk page's "Log as Emailed" bulk action |
+| Risk Email Templates | `RiskEmailTemplateView.jsx` | `/risk-email-template` | `AdminProtected` — a named list of reference-wording templates for the Students at Risk page's "Log as Emailed" bulk action, which picks one from a dropdown |
 | OAuth Providers | `OAuthProvidersView.jsx` | `/oauth-providers` | `AdminProtected` — configure Google/Microsoft sign-in client IDs, DB-backed (see [Environment Variables](#environment-variables)) |
 | AI Config | `AIConfigView.jsx` | `/ai-config` | `AdminProtected` — provider/model/API key for every AI insight endpoint and the Assistant chatbot, see [AI Insights & Assistant](#ai-insights--assistant) |
 | Outgoing Mail Servers | `OutgoingMailServersView.jsx` | `/mail-servers` | `AdminProtected` — see [Outgoing Mail & Email Logs](#outgoing-mail--email-logs) |
 | Email Logs | `EmailLogsView.jsx` | `/email-logs` | `AdminProtected` — see [Outgoing Mail & Email Logs](#outgoing-mail--email-logs) |
 | Audit Log | `AuditLog.jsx` | `/audit-log` | `HoTOnlyProtected` route, backed by `require_admin` (any Head of Technology) |
-| User Management | `UserManagement.jsx` | `/users` | `HoTOnlyProtected` route, but every `/api/users*` call is backed by `require_super_admin` — stricter than the route guard alone: a Head of Technology who isn't the seeded super-admin account can reach the page but every API call on it 403s |
+| User Management | `UserManagement.jsx` | `/users` | `HoTOnlyProtected` route, backed by `require_admin` (any Head of Technology) — every Head of Technology account is a full administrator here, not just the seeded super-admin account |
 | API Console | `ApiConsole.jsx` | `/api-console` | `HoTOnlyProtected` — API key issuance/testing for the external `POST /api/v1/predict` integration |
 
 ### Auth pages
@@ -133,19 +134,19 @@ EDAPTv2/
 │   │           └── model_<timestamp>.pkl
 │   ├── scripts/
 │   │   └── retrain_loop.sh            # Sidecar scheduler loop (scheduled_retrain.py → sleep 24h → repeat)
-│   ├── tests/                          # 94 tests across 13 files — see Running Tests
+│   ├── tests/                          # 101 tests across 13 files — see Running Tests
 │   │   ├── conftest.py                # runs the app's real startup handler for tests
 │   │   ├── test_smoke.py              # 24 tests
+│   │   ├── test_chatbot.py            # 14 tests — POST /api/chatbot/ask context/scoping/refusal
 │   │   ├── test_ingestion_e2e.py      # 8 tests
 │   │   ├── test_mail_servers.py       # 8 tests — Outgoing Mail Servers CRUD + test-connection
-│   │   ├── test_chatbot.py            # 8 tests — POST /api/chatbot/ask context/scoping/refusal
 │   │   ├── test_incremental_merge.py  # 7 tests
 │   │   ├── test_batch_upload.py       # 7 tests — chunked large-file upload
 │   │   ├── test_oauth_provider_config.py  # 6 tests
 │   │   ├── test_oauth_login.py        # 6 tests
 │   │   ├── test_email_logs.py         # 5 tests — send-test-email + email log listing/detail
 │   │   ├── test_ai_config.py          # 5 tests — multi-provider AI Config CRUD
-│   │   ├── test_risk_email_and_interventions.py  # 4 tests
+│   │   ├── test_risk_email_and_interventions.py  # 5 tests
 │   │   ├── test_ingested_dataset_registry.py     # 4 tests
 │   │   └── test_students_at_risk.py   # 2 tests
 │   ├── Dockerfile.dev
@@ -244,21 +245,18 @@ docker exec edaptv2_backend python3 -m app.ml.<script_name>
 
 ## Environment Variables
 
-Confirmed against the current `.env` (values redacted; variable names are real):
+Confirmed against the current `.env` (values redacted; variable names are real). `POSTGRES_HOST`, `POSTGRES_PORT`, and `ENVIRONMENT` used to be listed here too — removed after confirming (via repo-wide grep) that nothing reads them: `DATABASE_URL` is its own hardcoded literal DSN, not built from the `POSTGRES_*` vars, and `docker-compose.yml` hardcodes `ENVIRONMENT: development` directly rather than interpolating `${ENVIRONMENT}`, so the `.env` copy had no effect either way.
 
 ```bash
 # ── PostgreSQL ──────────────────────────────────────────────
 POSTGRES_USER=
 POSTGRES_PASSWORD=
 POSTGRES_DB=
-POSTGRES_HOST=
-POSTGRES_PORT=
 
 DATABASE_URL=
 
 # ── FastAPI ─────────────────────────────────────────────────
 SECRET_KEY=
-ENVIRONMENT=
 LOG_LEVEL=
 
 # ── pgAdmin ─────────────────────────────────────────────────
@@ -308,7 +306,7 @@ Three demo accounts are seeded automatically on first backend startup if the `us
 | `hos` | `HoS@2025!` | Head of School | No |
 | `user` | `Lect@2025!` | Lecturer (assigned `ICT104`, `ICT201`, `ICT301`) | No |
 
-Use **User Management** (`/users`, super-admin only) to create additional accounts.
+Use **User Management** (`/users`, any Head of Technology account) to create additional accounts.
 
 ---
 
@@ -511,7 +509,7 @@ Beyond `predictions`/`interventions`/`users`/`audit_logs`, several more tables b
 | `upload_batches` | Data Ingestion's chunked-upload flow | One row per in-progress or completed large-file upload — `status`, `total_chunks`/`received_chunks`, `storage_path` for the assembled file, `analyze_job_id` once handed off. See [Loading Data](#loading-data) |
 | `ai_provider_configs` | Settings > AI Config | Single-row (`id=1`) config for whichever provider/model/key currently powers every AI-insight endpoint and the Assistant chatbot. See [AI Insights & Assistant](#ai-insights--assistant) |
 | `oauth_provider_configs` | Settings > OAuth Providers | One row per provider (`google`/`microsoft`) — client ID and, for Microsoft, tenant ID |
-| `risk_email_templates` | Settings > Risk Email Template | Reference subject/body wording for Students at Risk's "Log as Emailed" bulk action (see [Intervention tracking](#intervention-tracking) — this doesn't send email itself, it logs an `Intervention` row) |
+| `risk_email_templates` | Settings > Risk Email Templates | A named list of reference subject/body wording templates for Students at Risk's "Log as Emailed" bulk action, picked from a dropdown there (see [Intervention tracking](#intervention-tracking) — this doesn't send email itself, it logs an `Intervention` row) |
 | `api_keys` | API Console | Issued keys for the external `POST /api/v1/predict` integration |
 | `pending_ingests` | Two-phase ingestion (`analyze` → `confirm`) | See [Container drift](#source-control-note--a-claimed-fix-that-was-never-on-disk) era fix — Postgres-backed so `analyze`/`confirm` work regardless of which of prod's 4 gunicorn workers handles each request |
 
@@ -714,14 +712,26 @@ The two CLI scripts gained `collect()`/`summarise()` functions that `main()` now
 docker exec edaptv2_backend pytest tests/ -v
 ```
 
-**94 tests across 13 files** as of this README (regenerated via `pytest --collect-only`, not hand-typed — see the file-by-file breakdown in [Project Structure](#project-structure) — on a container built `--no-cache` from `requirements.txt`). **92 pass; the 2 in `test_oauth_login.py` that assert "login rejected when no client ID is configured" fail specifically in an environment (like this one) that has real Google/Microsoft client IDs configured through Settings > OAuth Providers — that's the tests' own precondition no longer holding, not an application bug.**
+**101 tests across 13 files** as of this README (regenerated via `pytest --collect-only`, not hand-typed — see the file-by-file breakdown in [Project Structure](#project-structure) — on a container built `--no-cache` from `requirements.txt`). **99 pass; the 2 in `test_oauth_login.py`** that assert "login rejected when no client ID is configured" fail specifically in an environment (like this one) that has real Google/Microsoft client IDs configured through Settings > OAuth Providers — that's the tests' own precondition no longer holding, not an application bug.
+
+### A real incident, found while regenerating this section — not papered over
+
+Getting to that number was not a single clean run — it surfaced a real, live data-corruption incident, documented here rather than silently fixed, in the same spirit as [Testing Practices](#testing-practices--a-real-outage-the-suite-missed) above. In order:
+
+1. **A second full run** (after the first showed the clean 92/2 above) came back 90/4 — two new failures in `test_students_at_risk.py`. Traced to a real bug: `_preserve_app_state()` (the shared ingestion-test cleanup helper) deleted `analyze_jobs` rows before `upload_batches` rows that FK-reference them, so its own `finally`-block cleanup threw a `ForeignKeyViolationError` once real leftover `upload_batches` rows existed. **Fixed** — delete order now matches the FK dependency (`upload_batches` first).
+2. **Investigating that surfaced something more serious.** `backend/app/ml/ingested_capstone.csv` — the single on-disk file this project's real dataset lives in, with no archived fallback copy ever present in this environment — had been silently overwritten with a 2-subject/951-row test fixture by an interrupted ingestion test, degrading the **live dev server itself** (`GET /api/health` dropped to `dataset.rows: 950`, versus the real 327,501). Root cause: `_isolate_ml_paths()` (the test helper whose own docstring claimed full isolation) never actually redirected `INGESTED_DATA_DIR` — the variable `main.py`'s real confirm handler writes through — so a real `confirm()` call inside a supposedly-isolated test wrote straight to the file the live server loads from. **Fixed**: `_isolate_ml_paths()` now redirects `INGESTED_DATA_DIR` (and actually reassigns `DATA_PATH`/`check_new_period.DATA_PATH`, which it had been capturing and restoring but never actually changing — dead code) to a throwaway temp directory.
+3. **The dev-server footgun that let this reach production data at all**: uvicorn's `--reload` watched the entire `backend/` tree including `tests/`, so editing a test file could trigger the live server to reload and re-read whatever was currently on disk. `--reload-dir` (even an absolute path) was tried first and, confirmed live, did **not** stop this — uvicorn 0.30.6 still watched `tests/` regardless. What actually worked, verified live both directions (touching a `tests/` file → no reload; touching `app/main.py` → reload fires): `--reload-exclude "tests/*" --reload-exclude "scripts/*"`.
+4. **Fixing the isolation surfaced one more real bug, not just the original one.** With `INGESTED_DATA_DIR` now genuinely isolated, `test_retrain_trigger_same_period_vs_new_period` started failing a different way: a real retrain attempt inside isolation now correctly couldn't find attendance data at the isolated path either, so `load_attendance_raw()` fell back to the archived `data/masked_attendance.csv.gz` default — which has never existed in this environment. That `FileNotFoundError` was being silently swallowed by a broad `except Exception` in `main.py`'s retrain-trigger code, surfacing only as `retrain.triggered: False` with no visible cause — the isolation bug had been accidentally masking this one too, by leaking real ambient attendance data through. **Fixed**: `_isolate_ml_paths()` now also copies the real `ingested_attendance_raw.csv` into the isolated temp directory (read-only source copy — the shared original is never touched), so an isolated retrain sees the same real data a non-isolated one would.
+5. **Recovery.** No technical path existed to recover the corrupted file from within this environment — checked and ruled out: the archived `data/` fallback (never present here), Docker images (bind-mounted `app/ml/`, never baked in), the `PendingIngest.csv_bytes` row (already consumed/cleared), leftover chunked-upload `.part` files (test fixtures only), Postgres (`predictions` has no raw assessment marks), Volume Shadow Copy (needs elevation not available here), OneDrive (this project isn't under OneDrive sync). **Resolved by re-uploading the real source file** (`Capstone_data_20260729.csv` / `masked_attendance.csv`) through Data Ingestion from a separate on-disk copy the project owner still had — confirmed restored via `GET /api/health` (`dataset.rows: 327501`, `attendance.enrolments: 84422`, 100% attendance/capstone match rate) and a byte-for-byte-persistent check across a real container restart.
+
+**All four fixes hold under the real data.** With the real dataset back and every fix in place, `test_attendance_rate_known_input` and `test_retrain_trigger_same_period_vs_new_period` both pass again — the full suite returns to the clean 92/2 stated above, this time regenerated *after* every fix in this section, not before.
 
 Beyond the original `test_smoke.py`/`test_ingestion_e2e.py` coverage (health/auth, the three coverage-tier prediction paths, server-side partial-score recomputation, SHAP explanation consistency, the Fail/Safe risk-band contradiction fix, cross-endpoint attendance agreement, intervention scoping, actionable-factor selection, the read-only model-health endpoint, and the two-phase ingestion flow's Postgres-backed pending-row handoff), later files added real coverage for each feature documented above:
 
 | File | Covers |
 |---|---|
 | `test_ai_config.py` | Multi-provider AI Config CRUD — never returns a plaintext key, blank key on update keeps the existing one, rejects an unknown provider/model pair |
-| `test_chatbot.py` | The Assistant's context-building and refusal routing — role scoping (a lecturer's prompt never contains another subject's data), dedup across model versions (a re-predicted student counts once, at their latest risk band), the honest "no predictions computed yet" case, refusal pass-through — faked `_ai_call`/seeded `Prediction` rows, so these don't depend on a real AI key or a full ML pipeline |
+| `test_chatbot.py` | The Assistant's context-building and refusal routing — role scoping (a lecturer's prompt never contains another subject's data), dedup across model versions (a re-predicted student counts once, at their latest risk band), the honest "no predictions computed yet" case, refusal pass-through, plus attendance/correlation, subject-vs-subject comparison, already-logged interventions, named-student lookup (found and not-found), and data-freshness reporting — faked `_ai_call`/seeded `Prediction`/`Intervention`/`IngestJob` rows and (for the two context pieces read from the in-memory dataframe rather than a DB table) a monkeypatched `_DATA`/`_ATTENDANCE`, so these don't depend on a real AI key, a full ML pipeline, or real ingested data |
 | `test_mail_servers.py` | Outgoing Mail Servers CRUD (including the post-commit-refresh regression that once 500'd an update), test-connection against an unreachable host, lecturer rejection |
 | `test_email_logs.py` | Send Test Email logging a real SMTP failure reason (via a server pointed at a port nothing listens on — deterministic, no real credentials needed), status/kind filtering, the list view omitting `body` while the detail view includes it |
 | `test_batch_upload.py` | The chunked-upload flow end to end — full upload → analyze handoff, idempotent retry of the immediately-preceding chunk, out-of-order rejection, size-mismatch-at-finalize |
@@ -762,9 +772,16 @@ Without a real key configured (either path), every call above returns a fixed `"
 `POST /api/chatbot/ask`, surfaced as a floating "EDAPT AI Assistant" widget (`AIChatbox.jsx`) on every protected page, with a Chat tab and an FAQ tab of verified-working template prompts. Deliberately **not** a general-purpose chatbot:
 
 - **Scoped by role identically to Students at Risk** — an admin's context is institution-wide, a lecturer's is built only from their assigned subjects, using the same `_role_filter`/`user["subjects"]` rule as every other role-scoped endpoint in this app.
-- **Answers only from a JSON context built out of real data**, never invented numbers: `_subject_stats()` (the same raw-marks stats the tiered insights above use — average mark, pass rate, weakest assessment type, period-over-period change) plus per-subject risk-band counts (High Risk / At Risk / Safe) read directly off the `predictions` table.
-- **Reads `predictions` directly rather than recomputing risk bands live.** An early version called the same `subject_roster()`/`students_at_risk()` aggregation the Students at Risk page uses — real per-student ML/SHAP inference across every visible subject, confirmed 50s+ end-to-end on the full dataset, unworkable for an interactive chat reply. Rewritten to a single indexed `DISTINCT ON` query against `predictions` (deduplicated to each student's *most recent* row, so a student re-predicted under a newer model version is never double-counted) — confirmed live at ~4s total, almost entirely the AI provider round-trip itself, not the query.
-- **Honest about missing data, not silently wrong.** A study period nobody has opened Students at Risk or Predictor for yet has zero rows in `predictions` — the chatbot reports this explicitly ("no risk predictions computed for this period yet") rather than rendering an empty result as "zero students at risk," which would be a different and false claim.
+- **Answers only from a JSON context built out of real data**, never invented numbers. Seven pieces are assembled per question, each a plain scoped DB/dataframe read (no live ML/SHAP inference runs per chat message):
+  - `_subject_stats()` — the same raw-marks stats the tiered insights above use (average mark, pass rate, weakest assessment type, period-over-period change).
+  - Per-subject risk-band counts (High Risk / At Risk / Safe) read directly off the `predictions` table.
+  - **Attendance** — per-subject attendance rates plus a Pearson attendance-vs-outcome correlation, from the same `_ATTENDANCE` dataframe/scoping `GET /api/dashboard/attendance-by-subject` and `attendance-outcome` already use, so the numbers can never disagree.
+  - **Subject-vs-subject comparison** — an avg-mark/pass-rate/difficulty table for every subject the user can see this period (capped to the 20 lowest by pass rate for an admin's much larger visible set; a lecturer's small subject list is never capped), so "how does X compare to Y" is answerable without knowing in advance which two subjects will be asked about.
+  - **Already-logged interventions** — counts from the `interventions` table, by subject and action type, so the assistant can say what's already been done rather than only ever suggesting fresh outreach.
+  - **Named-student lookup** — a masked student id mentioned in the question (regex-matched, e.g. "Student4921") is looked up against that student's own `predictions` rows for the period. `Prediction` has no column storing a full SHAP explanation, so this can't give a genuine factor-by-factor "why" — it reports the recorded classification and points to that student's row in Predictor for the full breakdown, the same deep-link `StudentsAtRisk.jsx` already uses instead of duplicating SHAP rendering.
+  - **Data freshness** — when the live dataset was last (successfully, still-active) ingested, so an answer isn't mistaken for more current than it is.
+- **Reads `predictions` directly rather than recomputing risk bands live.** An early version called the same `subject_roster()`/`students_at_risk()` aggregation the Students at Risk page uses — real per-student ML/SHAP inference across every visible subject, confirmed 50s+ end-to-end on the full dataset, unworkable for an interactive chat reply. Rewritten to a single indexed `DISTINCT ON` query against `predictions` (deduplicated to each student's *most recent* row, so a student re-predicted under a newer model version is never double-counted) — confirmed live at ~4s total, almost entirely the AI provider round-trip itself, not the query. The named-student lookup follows the same principle: one student's already-stored rows, never a live per-request recompute.
+- **Honest about missing data, not silently wrong.** A study period nobody has opened Students at Risk or Predictor for yet has zero rows in `predictions` — the chatbot reports this explicitly ("no risk predictions computed for this period yet") rather than rendering an empty result as "zero students at risk," which would be a different and false claim. Same treatment for a named student with no matching prediction, and for interventions with nothing logged yet.
 - **Refuses, with one fixed sentence, anything outside that scope** — a question the context can't answer, or one unrelated to this system's data entirely (general knowledge, coding help, an instruction to ignore these rules) — rather than answering from the model's outside knowledge. This is a **prompt-level restriction**, the same class of control as every other endpoint in this file: it constrains an honest model's behavior, it is not a sandbox, and a sufficiently adversarial prompt could still try to talk the model out of it.
 - **Small talk gets small talk.** An earlier prompt version had no branch for a plain greeting, so asking "Hi" produced a full unsolicited statistics dump — confirmed live, then fixed by adding an explicit instruction to reply with one short, friendly sentence for a greeting and reserve the data context for an actual question.
 - **Renders Markdown in the chat bubble**, not literal `**`/`-` characters — a small dependency-free renderer (`renderMarkdownLite` in `AIChatbox.jsx`) turns the model's bold/bullet-list output into real React elements, never `dangerouslySetInnerHTML`.
@@ -789,7 +806,7 @@ Settings > Outgoing Mail Servers (multiple SMTP servers, lowest-`priority` activ
 - JWT tokens stored in `localStorage` as `edapt_token`
 - User profile stored as `edapt_user` (JSON)
 - Tokens expire after 8 hours
-- Role checking happens on both the frontend (route guards in `App.js`) and the backend (`require_admin` / `require_super_admin` FastAPI dependencies in `main.py`)
+- Role checking happens on both the frontend (route guards in `App.js`) and the backend (`require_admin` / `require_head_of_school` FastAPI dependencies in `main.py`)
 
 ---
 
@@ -920,7 +937,7 @@ Every incident documented above was caught by a person deciding to check, not by
 | `ruff check` (backend lint) | `.github/workflows/ci.yml` → `backend-lint` | every push and PR |
 | Fresh `--no-cache` image build | `backend-tests` | every push and PR |
 | Image-vs-`requirements.txt` assertion | `backend-tests` | every push and PR |
-| Full backend suite (94 tests as of this update — see [Running Tests](#running-tests)) inside that image | `backend-tests` | every push and PR |
+| Full backend suite (101 tests as of this update — see [Running Tests](#running-tests)) inside that image | `backend-tests` | every push and PR |
 | `npm ci` + eslint + frontend tests | `frontend` | every push and PR |
 | ruff, whitespace, YAML/JSON validity, large files, private keys, conflict markers | `.pre-commit-config.yaml` | every local commit |
 

@@ -10,7 +10,10 @@ import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { isAdmin as checkIsAdmin } from '../utils/auth';
 import api from '../services/api';
+import { getErrorMessage } from '../utils/apiError';
 import { RiskBadge, MidTermTag, resolveSafeFloor } from '../components/RiskBadge';
+import RichTextEditor from '../components/RichTextEditor';
+import DOMPurify from 'dompurify';
 
 const TABS = [
   { key: 'at_risk', label: 'At Risk' },
@@ -102,7 +105,7 @@ export default function StudentsAtRisk() {
         setStudents(r.data.students || []);
         setSubjectsIncluded(r.data.subjects_included || 0);
       })
-      .catch(err => setError(err.response?.data?.detail || 'Could not load students at risk.'))
+      .catch(err => setError(getErrorMessage(err, 'Could not load students at risk.')))
       .finally(() => setLoading(false));
   }, [studyPeriod]);
 
@@ -311,12 +314,15 @@ export default function StudentsAtRisk() {
 
 // ── Bulk "Log as emailed" modal ────────────────────────────────────────────
 // Never sends a real email — this system has no real student email address
-// anywhere (see RiskEmailTemplate's backend docstring). Staff review/edit the
-// wording here, send the real email themselves outside this system, then
-// confirm — which logs one Intervention row per selected student
-// (action_type "email sent"), with {{placeholders}} rendered per-student
-// server-side (see POST /api/interventions/bulk).
+// anywhere (see RiskEmailTemplate's backend docstring). Staff pick one of
+// the saved templates (Settings > Risk Email Templates) from the dropdown
+// below, review/edit the wording, send the real email themselves outside
+// this system, then confirm — which logs one Intervention row per selected
+// student (action_type "email sent"), with {{placeholders}} rendered
+// per-student server-side (see POST /api/interventions/bulk).
 function RiskEmailModal({ targets, studyPeriod, onClose, onLogged }) {
+  const [templates,        setTemplates]        = useState([]);
+  const [selectedTemplate, setSelectedTemplate]  = useState('');
   const [subject, setSubject] = useState('');
   const [body,    setBody]    = useState('');
   const [templateLoading, setTemplateLoading] = useState(true);
@@ -324,18 +330,40 @@ function RiskEmailModal({ targets, studyPeriod, onClose, onLogged }) {
   const [error,  setError]  = useState(null);
 
   useEffect(() => {
-    api.get('/api/risk-email-template')
-      .then(r => { setSubject(r.data.subject); setBody(r.data.body); })
-      .catch(() => setError('Could not load the email template. You can still edit and send below.'))
+    api.get('/api/risk-email-templates')
+      .then(r => {
+        const list = r.data.templates || [];
+        setTemplates(list);
+        if (list.length > 0) {
+          setSelectedTemplate(String(list[0].id));
+          setSubject(list[0].subject);
+          setBody(list[0].body);
+        }
+      })
+      .catch(() => setError('Could not load email templates. You can still edit and send below.'))
       .finally(() => setTemplateLoading(false));
   }, []);
 
+  const handleTemplateChange = (id) => {
+    setSelectedTemplate(id);
+    const tpl = templates.find(t => String(t.id) === id);
+    if (tpl) { setSubject(tpl.subject); setBody(tpl.body); }
+  };
+
+  // replaceAll, not replace — a plain string first argument to .replace()
+  // only swaps the FIRST occurrence, so a placeholder used more than once
+  // in the body (e.g. both in a sentence and in a "Subject Code: ..." list
+  // further down) left every later occurrence as a literal, unresolved
+  // {{placeholder}} in the preview. Confirmed live: the actual logged
+  // Intervention notes were already correct (Python's str.replace() IS
+  // all-occurrences by default — see _render_risk_email in main.py), only
+  // this frontend preview was wrong.
   const preview = targets[0]
     ? body
-        .replace('{{student_id}}',   targets[0].student_id)
-        .replace('{{subject_code}}', targets[0].subject)
-        .replace('{{study_period}}', studyPeriod)
-        .replace('{{risk_band}}',    targets[0].risk_band || 'at risk')
+        .replaceAll('{{student_id}}',   targets[0].student_id)
+        .replaceAll('{{subject_code}}', targets[0].subject)
+        .replaceAll('{{study_period}}', studyPeriod)
+        .replaceAll('{{risk_band}}',    targets[0].risk_band || 'at risk')
     : '';
 
   const handleConfirm = async () => {
@@ -354,7 +382,7 @@ function RiskEmailModal({ targets, studyPeriod, onClose, onLogged }) {
       });
       onLogged();
     } catch (err) {
-      setError(err.response?.data?.detail || 'Could not log these actions. Please try again.');
+      setError(getErrorMessage(err, 'Could not log these actions. Please try again.'));
     } finally {
       setSaving(false);
     }
@@ -371,27 +399,47 @@ function RiskEmailModal({ targets, studyPeriod, onClose, onLogged }) {
         </p>
 
         {templateLoading ? (
-          <p style={{ fontSize: 12, color: '#64748B' }}>Loading template…</p>
+          <p style={{ fontSize: 12, color: '#64748B' }}>Loading templates…</p>
         ) : (
           <>
-            <div style={s.fieldGroup}>
+            {templates.length > 0 && (
+              <div style={s.fieldGroup}>
+                <label style={s.label}>Template</label>
+                <select
+                  style={s.select}
+                  value={selectedTemplate}
+                  onChange={e => handleTemplateChange(e.target.value)}
+                >
+                  {templates.map(t => (
+                    <option key={t.id} value={t.id}>{t.name}</option>
+                  ))}
+                </select>
+              </div>
+            )}
+            <div style={{ ...s.fieldGroup, marginTop: templates.length > 0 ? 12 : 0 }}>
               <label style={s.label}>Subject</label>
               <input style={{ ...s.select, cursor: 'text' }} value={subject} onChange={e => setSubject(e.target.value)} />
             </div>
             <div style={{ ...s.fieldGroup, marginTop: 12 }}>
               <label style={s.label}>Body</label>
-              <textarea
-                style={{ ...s.select, height: 150, padding: '10px 12px', resize: 'vertical', fontFamily: 'inherit', cursor: 'text' }}
-                value={body}
-                onChange={e => setBody(e.target.value)}
-              />
+              <RichTextEditor value={body} onChange={setBody} minHeight={150} />
             </div>
             {targets[0] && (
               <div style={s.previewBox}>
                 <p style={{ margin: '0 0 4px', fontSize: 10.5, fontWeight: 700, color: '#94A3B8', textTransform: 'uppercase' }}>
                   Preview — {targets[0].student_id}
                 </p>
-                <p style={{ margin: 0, fontSize: 12, color: '#334155', whiteSpace: 'pre-wrap' }}>{preview}</p>
+                <div
+                  style={{ margin: 0, fontSize: 12, color: '#334155' }}
+                  // Sanitized, not raw — a saved template is shared, stored
+                  // data (any Head of Technology / Head of School can create
+                  // one), so an unsanitized render here would let a
+                  // malicious template run script in every OTHER user's
+                  // session the moment they select it, same class of risk
+                  // EmailLogsView's DetailPanel deliberately avoids for
+                  // admin-entered HTML bodies.
+                  dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(preview) }}
+                />
               </div>
             )}
           </>

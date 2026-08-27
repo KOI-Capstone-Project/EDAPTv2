@@ -2,6 +2,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import api from '../services/api';
+import { getErrorMessage } from '../utils/apiError';
 
 export default function ForgotPassword() {
   const navigate = useNavigate();
@@ -89,7 +90,7 @@ export default function ForgotPassword() {
       setStep(2);
       startTimer();
     } catch (err) {
-      setError(err.response?.data?.detail || 'Failed to send reset code. Please try again.');
+      setError(getErrorMessage(err, 'Failed to send reset code. Please try again.'));
     } finally {
       setLoading(false);
     }
@@ -108,7 +109,7 @@ export default function ForgotPassword() {
       }
       startTimer();
     } catch (err) {
-      setError(err.response?.data?.detail || 'Failed to resend code. Please try again.');
+      setError(getErrorMessage(err, 'Failed to resend code. Please try again.'));
     } finally {
       setLoading(false);
     }
@@ -126,7 +127,7 @@ export default function ForgotPassword() {
       await api.post('/api/auth/reset-password', { email, otp: digits.join(''), new_password: newPassword });
       navigate('/login', { state: { message: 'Password reset successfully. Please sign in.' } });
     } catch (err) {
-      setError(err.response?.data?.detail || 'Reset failed. Please check your code and try again.');
+      setError(getErrorMessage(err, 'Reset failed. Please check your code and try again.'));
     } finally {
       setLoading(false);
     }

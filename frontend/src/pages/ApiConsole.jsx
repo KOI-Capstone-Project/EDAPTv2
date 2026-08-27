@@ -6,6 +6,7 @@ import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer,
 } from 'recharts';
 import api from '../services/api';
+import { getErrorMessage } from '../utils/apiError';
 
 const API_BASE_URL = process.env.REACT_APP_API_BASE_URL || 'http://localhost:8000';
 
@@ -121,7 +122,7 @@ export default function ApiConsole() {
       setShowCreate(false);
       fetchKeys();
     } catch (err) {
-      setNameErr(err.response?.data?.detail || 'Failed to generate API key.');
+      setNameErr(getErrorMessage(err, 'Failed to generate API key.'));
     } finally {
       setCreating(false);
     }
@@ -133,7 +134,7 @@ export default function ApiConsole() {
       await api.delete(`/api/api-keys/${key.id}`);
       setKeys(prev => prev.map(k => k.id === key.id ? { ...k, revoked: true } : k));
     } catch (err) {
-      alert(err.response?.data?.detail || 'Failed to revoke key.');
+      alert(getErrorMessage(err, 'Failed to revoke key.'));
     }
   };
 

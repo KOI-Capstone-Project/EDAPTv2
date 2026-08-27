@@ -56,11 +56,29 @@ services:
     depends_on:
       db:
         condition: service_healthy
+    # --reload-exclude keeps the watcher off tests/ and scripts/. Left
+    # unscoped, uvicorn watches the whole bind-mounted backend/ tree —
+    # including tests/ — so editing a test file triggers a live reload,
+    # which re-runs startup and re-reads whatever's currently on disk in
+    # backend/app/ml/ingested_capstone.csv. Confirmed as a real contributor
+    # to a real incident: a test left that file corrupted mid-run, and an
+    # unrelated edit to a test file triggered the live server to reload and
+    # pick up the corrupted data (see _isolate_ml_paths's docstring in
+    # tests/test_ingestion_e2e.py for the full account).
+    # --reload-dir alone (tried first) did NOT work — confirmed live, still
+    # triggered on tests/*.py even with an absolute --reload-dir /app/app —
+    # uvicorn 0.30.6 appears to still implicitly watch the cwd/app-module's
+    # own directory regardless. --reload-exclude glob patterns are the
+    # lever that actually worked, verified by touching a tests/ file and
+    # confirming no reload fired, then touching an app/ file and confirming
+    # one did.
     command: >
       uvicorn app.main:app
         --host 0.0.0.0
         --port 8000
         --reload
+        --reload-exclude "tests/*"
+        --reload-exclude "scripts/*"
         --log-level ${LOG_LEVEL:-info}
     # Readiness, not liveness: /api/health returns 503 unless the database,
     # both datasets and a live model for BOTH families are actually available.
@@ -85,6 +103,11 @@ services:
     environment:
       REACT_APP_API_BASE_URL: ${REACT_APP_API_BASE_URL:-http://localhost:8000}
       CHOKIDAR_USEPOLLING: "true"   # needed for hot-reload inside Docker on some OS
+      # react-scripts 5 (webpack 5) watches via `watchpack`, not chokidar — CHOKIDAR_USEPOLLING
+      # alone left this bind mount's edits silently un-picked-up (confirmed live: saved edits
+      # never recompiled until the container was restarted). WATCHPACK_POLLING is the var
+      # watchpack itself reads.
+      WATCHPACK_POLLING: "true"
     volumes:
       - ./frontend:/app
       - /app/node_modules           # anonymous volume prevents host override

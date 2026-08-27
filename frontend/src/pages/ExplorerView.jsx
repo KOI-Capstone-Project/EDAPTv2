@@ -132,15 +132,19 @@ function StudentDetail({ studentId, onClose }) {
       {!loading && !detail && <p style={s.muted}>Student data unavailable.</p>}
       {detail && (
         <>
+          <p style={{ ...s.muted, fontSize: 11, marginTop: -8, marginBottom: 12 }}>
+            Across all {detail.records?.length ?? 0} of this student's records, every subject and
+            period — not just the rows currently filtered in the table.
+          </p>
           <div style={s.detailKpiRow}>
             <div style={s.detailKpi}>
-              <p style={s.kpiLabel}>Avg Mark</p>
+              <p style={s.kpiLabel}>All-Time Avg Mark</p>
               <p style={{ ...s.kpiVal, color: detail.overall_passed ? '#059669' : '#DC2626' }}>
                 {detail.avg_mark != null ? `${detail.avg_mark}%` : '—'}
               </p>
             </div>
             <div style={s.detailKpi}>
-              <p style={s.kpiLabel}>Overall Result</p>
+              <p style={s.kpiLabel}>All-Time Result</p>
               <PassBadge passed={detail.overall_passed} />
             </div>
             <div style={s.detailKpi}>

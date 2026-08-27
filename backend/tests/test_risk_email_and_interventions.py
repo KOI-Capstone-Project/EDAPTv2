@@ -7,13 +7,17 @@ POST /api/interventions/bulk only ever writes Intervention rows (never
 sends anything), rendering the {{placeholder}} template per-target so each
 row's notes reflects its own student/subject/period/risk_band rather than
 one identical blob across every row.
+
+RiskEmailTemplate is a real list (CRUD via /api/risk-email-templates), not
+the single fixed-id row it used to be — an admin saves several named
+templates and the Students at Risk page picks one from a dropdown.
 """
 
 import contextlib
 
 import pytest
 from httpx import AsyncClient, ASGITransport
-from sqlalchemy import delete
+from sqlalchemy import delete, select
 
 import app.main as main_mod
 from app.db.models import Intervention, RiskEmailTemplate
@@ -29,39 +33,56 @@ async def _login(client, email: str, password: str) -> str:
 
 @contextlib.asynccontextmanager
 async def _preserve_template_and_interventions():
-    """Snapshot the singleton template row and restore it afterward, and
-    delete any Intervention rows this test created for TEST_STUDENT_IDS —
-    both are shared, cross-worker Postgres tables a stray test row would
-    pollute for the real app too."""
+    """Snapshot every existing template row (this table went from a
+    singleton to a real list — see RiskEmailTemplate's docstring) and put
+    the table back to exactly that state afterward: fields restored for
+    any row a test edited, rows a test deleted re-inserted with their
+    original id, rows a test created removed. Also deletes any
+    Intervention rows this test created for TEST_STUDENT_IDS. Both are
+    shared, cross-worker Postgres tables a stray test row would pollute
+    for the real app too."""
     async with main_mod._AsyncSession() as db:
-        row = await db.get(RiskEmailTemplate, 1)
-        original = {"subject": row.subject, "body": row.body, "updated_by": row.updated_by}
+        result = await db.execute(select(RiskEmailTemplate))
+        originals = {
+            r.id: {"name": r.name, "subject": r.subject, "body": r.body, "updated_by": r.updated_by}
+            for r in result.scalars().all()
+        }
     try:
         yield
     finally:
         async with main_mod._AsyncSession() as db:
-            row = await db.get(RiskEmailTemplate, 1)
-            row.subject, row.body, row.updated_by = (
-                original["subject"], original["body"], original["updated_by"],
-            )
+            result = await db.execute(select(RiskEmailTemplate))
+            current_by_id = {r.id: r for r in result.scalars().all()}
+            for tid, o in originals.items():
+                row = current_by_id.get(tid)
+                if row is not None:
+                    row.name, row.subject, row.body, row.updated_by = (
+                        o["name"], o["subject"], o["body"], o["updated_by"],
+                    )
+                else:
+                    db.add(RiskEmailTemplate(id=tid, **o))
+            for tid, row in current_by_id.items():
+                if tid not in originals:
+                    await db.delete(row)
             await db.execute(delete(Intervention).where(Intervention.student_id_masked.in_(TEST_STUDENT_IDS)))
             await db.commit()
 
 
 @pytest.mark.asyncio
-async def test_get_risk_email_template_returns_seeded_default():
+async def test_list_risk_email_templates_returns_seeded_default():
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         token = await _login(client, "admin", "Admin@2025!")
         headers = {"Authorization": f"Bearer {token}"}
-        r = await client.get("/api/risk-email-template", headers=headers)
+        r = await client.get("/api/risk-email-templates", headers=headers)
     assert r.status_code == 200
-    body = r.json()
-    assert "{{student_id}}" in body["body"]
-    assert "subject" in body and "updated_at" in body
+    templates = r.json()["templates"]
+    assert len(templates) >= 1
+    assert any("{{student_id}}" in t["body"] for t in templates)
+    assert all({"id", "name", "subject", "body", "updated_at"} <= set(t) for t in templates)
 
 
 @pytest.mark.asyncio
-async def test_update_risk_email_template_admin_only():
+async def test_create_update_delete_risk_email_template_admin_only():
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         admin_token = await _login(client, "admin", "Admin@2025!")
         admin_headers = {"Authorization": f"Bearer {admin_token}"}
@@ -69,10 +90,10 @@ async def test_update_risk_email_template_admin_only():
         lect_headers = {"Authorization": f"Bearer {lect_token}"}
 
         async with _preserve_template_and_interventions():
-            # Lecturer cannot change the shared template.
-            r_forbidden = await client.put(
-                "/api/risk-email-template", headers=lect_headers,
-                json={"subject": "nope", "body": "nope"},
+            # Lecturer cannot create a template.
+            r_forbidden = await client.post(
+                "/api/risk-email-templates", headers=lect_headers,
+                json={"name": "nope", "subject": "nope", "body": "nope"},
             )
             assert r_forbidden.status_code == 403
 
@@ -82,22 +103,70 @@ async def test_update_risk_email_template_admin_only():
             # row's attributes after _append_audit_db's commit had
             # already expired them). Asserting on every field, not just
             # the status code, so a regression here fails loudly again.
-            new_subject = "Updated subject {{subject_code}}"
-            new_body = "Hi {{student_id}} — {{risk_band}} in {{subject_code}} ({{study_period}})"
-            r = await client.put(
-                "/api/risk-email-template", headers=admin_headers,
-                json={"subject": new_subject, "body": new_body},
+            new_name    = "Second Notice"
+            new_subject = "Second notice {{subject_code}}"
+            new_body    = "Hi {{student_id}} — {{risk_band}} in {{subject_code}} ({{study_period}})"
+            r_create = await client.post(
+                "/api/risk-email-templates", headers=admin_headers,
+                json={"name": new_name, "subject": new_subject, "body": new_body},
             )
-            assert r.status_code == 200
-            body = r.json()
-            assert body["subject"] == new_subject
-            assert body["body"] == new_body
-            assert body["updated_by"] == "admin"
-            assert body["updated_at"]  # a real ISO timestamp, not None/missing
+            assert r_create.status_code == 201
+            created = r_create.json()
+            assert created["name"] == new_name
+            assert created["subject"] == new_subject
+            assert created["updated_by"] == "admin"
+            assert created["created_at"] and created["updated_at"]
+            template_id = created["id"]
 
-            # And it's actually persisted, not just echoed back.
-            r_get = await client.get("/api/risk-email-template", headers=admin_headers)
-            assert r_get.json()["subject"] == new_subject
+            # It's actually persisted, not just echoed back.
+            r_list = await client.get("/api/risk-email-templates", headers=admin_headers)
+            assert any(t["id"] == template_id and t["name"] == new_name for t in r_list.json()["templates"])
+
+            # Lecturer cannot update or delete it.
+            assert (await client.put(
+                f"/api/risk-email-templates/{template_id}", headers=lect_headers,
+                json={"name": "nope", "subject": "nope", "body": "nope"},
+            )).status_code == 403
+            assert (await client.delete(
+                f"/api/risk-email-templates/{template_id}", headers=lect_headers,
+            )).status_code == 403
+
+            # Admin can update it.
+            edited_name = "Second Notice (Edited)"
+            r_update = await client.put(
+                f"/api/risk-email-templates/{template_id}", headers=admin_headers,
+                json={"name": edited_name, "subject": new_subject, "body": new_body},
+            )
+            assert r_update.status_code == 200
+            assert r_update.json()["name"] == edited_name
+
+            # Admin can delete it, since another template (the seeded default) still exists.
+            r_delete = await client.delete(f"/api/risk-email-templates/{template_id}", headers=admin_headers)
+            assert r_delete.status_code == 200
+            r_list_after = await client.get("/api/risk-email-templates", headers=admin_headers)
+            assert not any(t["id"] == template_id for t in r_list_after.json()["templates"])
+
+
+@pytest.mark.asyncio
+async def test_cannot_delete_last_remaining_risk_email_template():
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        admin_token = await _login(client, "admin", "Admin@2025!")
+        admin_headers = {"Authorization": f"Bearer {admin_token}"}
+
+        async with _preserve_template_and_interventions():
+            # Reduce to exactly one template (deleting all originals but the
+            # first), then confirm that last one is protected from deletion.
+            # _preserve_template_and_interventions re-inserts every original
+            # row afterward regardless of what this test does to them.
+            async with main_mod._AsyncSession() as db:
+                ids = [row[0] for row in (await db.execute(select(RiskEmailTemplate.id))).all()]
+            for extra_id in ids[1:]:
+                await client.delete(f"/api/risk-email-templates/{extra_id}", headers=admin_headers)
+
+            r = await client.delete(f"/api/risk-email-templates/{ids[0]}", headers=admin_headers)
+            assert r.status_code == 400
+            r_list = await client.get("/api/risk-email-templates", headers=admin_headers)
+            assert len(r_list.json()["templates"]) == 1
 
 
 @pytest.mark.asyncio

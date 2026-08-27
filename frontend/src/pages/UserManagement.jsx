@@ -2,6 +2,7 @@
 import { Fragment, useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import api from '../services/api';
+import { getErrorMessage } from '../utils/apiError';
 
 const ROLE_BADGE = {
   'Lecturer':          { bg: '#EEEDFE', color: '#534AB7', border: '#C5C2F5' },
@@ -113,12 +114,15 @@ function SubjectMultiSelect({ value, onChange, allSubjects, placeholder }) {
 export default function UserManagement() {
   const navigate = useNavigate();
 
+  // Every Head of Technology account is a full administrator — same role
+  // check as the /users route guard in App.js (HoTOnlyRoute) and the
+  // backend's require_admin gate on the /api/users endpoints.
   const storedUser = (() => { try { return JSON.parse(localStorage.getItem('edapt_user')); } catch { return null; } })();
-  const isSuperAdmin = storedUser?.email === 'admin';
+  const isAdmin = storedUser?.role === 'Head of Technology';
 
   useEffect(() => {
-    if (!isSuperAdmin) navigate('/dashboard', { replace: true });
-  }, [isSuperAdmin, navigate]);
+    if (!isAdmin) navigate('/dashboard', { replace: true });
+  }, [isAdmin, navigate]);
 
   const [users,        setUsers]        = useState([]);
   const [allSubjects,  setAllSubjects]  = useState([]);
@@ -139,10 +143,10 @@ export default function UserManagement() {
   const [showPwd, setShowPwd] = useState(false);
 
   useEffect(() => {
-    if (!isSuperAdmin) return;
+    if (!isAdmin) return;
     api.get('/api/subjects/list').then(r => setAllSubjects(r.data)).catch(() => {});
     fetchUsers();
-  }, [isSuperAdmin]);
+  }, [isAdmin]);
 
   const fetchUsers = () => {
     setLoading(true);
@@ -163,7 +167,7 @@ export default function UserManagement() {
       setEditMsg('Subjects updated successfully');
       setTimeout(() => { setEditingEmail(null); setEditMsg(''); }, 1500);
     } catch (err) {
-      setEditMsg(err.response?.data?.detail || 'Failed to save.');
+      setEditMsg(getErrorMessage(err, 'Failed to save.'));
     } finally {
       setEditSaving(false);
     }
@@ -174,7 +178,7 @@ export default function UserManagement() {
       await api.put(`/api/users/${encodeURIComponent(user.email)}`, { active: !user.active });
       setUsers(prev => prev.map(u => u.email === user.email ? { ...u, active: !u.active } : u));
     } catch (err) {
-      alert(err.response?.data?.detail || 'Failed to update status.');
+      alert(getErrorMessage(err, 'Failed to update status.'));
     }
   };
 
@@ -185,7 +189,7 @@ export default function UserManagement() {
       setUsers(prev => prev.filter(u => u.email !== user.email));
       if (editingEmail === user.email) cancelEdit();
     } catch (err) {
-      alert(err.response?.data?.detail || 'Failed to delete account.');
+      alert(getErrorMessage(err, 'Failed to delete account.'));
     }
   };
 
@@ -211,7 +215,7 @@ export default function UserManagement() {
       setForm({ name: '', email: '', password: '', role: 'Lecturer', subjects: [] });
       setTimeout(() => { setShowCreate(false); setCreateMsg(''); }, 3000);
     } catch (err) {
-      setEmailErr(err.response?.data?.detail || 'Failed to create account.');
+      setEmailErr(getErrorMessage(err, 'Failed to create account.'));
     } finally {
       setCreating(false);
     }
@@ -231,7 +235,7 @@ export default function UserManagement() {
 
   const canCreate = isValidEmail(form.email) && Boolean(form.name.trim()) && form.password.length > 0;
 
-  if (!isSuperAdmin) return null;
+  if (!isAdmin) return null;
 
   return (
     <div>

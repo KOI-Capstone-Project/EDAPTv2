@@ -6,6 +6,7 @@
 import { useState, useEffect } from 'react';
 import { GoogleLogin, GoogleOAuthProvider } from '@react-oauth/google';
 import api from '../services/api';
+import { getErrorMessage } from '../utils/apiError';
 import { getMsalInstance } from '../utils/msal';
 
 const MicrosoftIcon = () => (
@@ -44,7 +45,7 @@ export default function OAuthButtons({ onSuccess, onError, disabled }) {
     try {
       await exchangeToken('/api/auth/google', credentialResponse.credential);
     } catch (err) {
-      onError(err.response?.data?.detail || 'Google sign-in failed. Please try again.');
+      onError(getErrorMessage(err, 'Google sign-in failed. Please try again.'));
     }
   };
 
@@ -56,7 +57,7 @@ export default function OAuthButtons({ onSuccess, onError, disabled }) {
       await exchangeToken('/api/auth/microsoft', result.idToken);
     } catch (err) {
       if (err?.errorCode !== 'user_cancelled') {
-        onError(err.response?.data?.detail || 'Microsoft sign-in failed. Please try again.');
+        onError(getErrorMessage(err, 'Microsoft sign-in failed. Please try again.'));
       }
     } finally {
       setMsLoading(false);

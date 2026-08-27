@@ -268,8 +268,13 @@ class Intervention(Base):
 
 class RiskEmailTemplate(Base):
     """
-    Singleton config row (always id=1) for the "Students at Risk" bulk
-    action's email wording.
+    Named email templates for the "Students at Risk" bulk "Log as emailed"
+    action — an admin can save several (e.g. one per severity or tone) and
+    picks which one to use per bulk-log from a dropdown on that page.
+    Previously a single fixed-id (id=1) row; migrated in place (see
+    scratchpad/migrate_risk_email_templates.sql run against the live dev
+    DB) to add `name` and a real auto-incrementing `id` without losing the
+    one row that already existed.
 
     This system has no real student email anywhere — STUDENTID_MASKED is a
     one-way pseudonym applied upstream, before the data ever reaches this
@@ -278,15 +283,13 @@ class RiskEmailTemplate(Base):
     email they send on their own, to the real student they personally
     know, outside this system — the bulk action on the Students at Risk
     page then logs an `Intervention` row (action_type="email sent") per
-    selected student to record that it happened. One fixed-id row rather
-    than a generic key/value settings table: this is the one piece of
-    admin-configurable free-text copy in the app, so there's no need for
-    a table designed to hold more than that.
+    selected student to record that it happened.
     """
 
     __tablename__ = "risk_email_templates"
 
-    id: int = Column(Integer, primary_key=True, autoincrement=False)
+    id:   int = Column(Integer, primary_key=True, autoincrement=True)
+    name: str = Column(String(120), nullable=False)
 
     subject: str = Column(String(255), nullable=False)
     body:    str = Column(
@@ -295,6 +298,7 @@ class RiskEmailTemplate(Base):
     )
 
     updated_by: str | None = Column(String(254), nullable=True)
+    created_at: datetime = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at: datetime = Column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False,
     )

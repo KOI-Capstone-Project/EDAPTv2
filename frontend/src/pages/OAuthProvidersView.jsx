@@ -6,6 +6,7 @@
 // there's somewhere obvious to go set them up.
 import { useState, useEffect } from 'react';
 import api from '../services/api';
+import { getErrorMessage } from '../utils/apiError';
 
 const PROVIDER_META = {
   google:    { label: 'Google',    hint: 'Sign-in with a Google Workspace / Gmail account.' },
@@ -25,7 +26,7 @@ export default function OAuthProvidersView() {
         r.data.providers.forEach(p => { byProvider[p.provider] = p; });
         setProviders(byProvider);
       })
-      .catch(err => setLoadError(err.response?.data?.detail || 'Failed to load OAuth provider settings.'));
+      .catch(err => setLoadError(getErrorMessage(err, 'Failed to load OAuth provider settings.')));
   };
 
   useEffect(load, []);
@@ -83,7 +84,7 @@ function ProviderCard({ providerKey, meta, config, isOpen, onToggle, onSaved }) 
       });
       onSaved();
     } catch (err) {
-      setMsg({ type: 'error', text: err.response?.data?.detail || 'Failed to save.' });
+      setMsg({ type: 'error', text: getErrorMessage(err, 'Failed to save.') });
     } finally {
       setSaving(false);
     }

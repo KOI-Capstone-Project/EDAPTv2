@@ -5,6 +5,7 @@ import { useState, useEffect } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { getUser } from '../utils/auth';
 import api from '../services/api';
+import { getErrorMessage } from '../utils/apiError';
 import { RiskBadge, MidTermTag, resolveSafeFloor } from '../components/RiskBadge';
 
 // ── Sub-components ─────────────────────────────────────────────────────────────
@@ -186,7 +187,7 @@ export function InterventionPanel({ studentId, subject, studyPeriod }) {
       notes: notes.trim() || null,
     })
       .then(() => { setNotes(''); setSaved(true); loadHistory(); })
-      .catch(e => setError(e.response?.data?.detail || 'Could not save this action.'))
+      .catch(e => setError(getErrorMessage(e, 'Could not save this action.')))
       .finally(() => setSaving(false));
   };
 
@@ -754,6 +755,9 @@ export default function PredictorView({ isAdmin }) {
     setWhatIfMarks(p => ({ ...p, [assessmentType]: value }));
     const num = parseFloat(value);
     setWhatIfMarkErrors(p => {
+      if (!isNaN(num) && num < 0) {
+        return { ...p, [assessmentType]: 'Mark cannot be negative.' };
+      }
       if (!isNaN(num) && num > weighting) {
         return { ...p, [assessmentType]: `Maximum mark for this assessment is ${weighting}.` };
       }
@@ -884,7 +888,7 @@ export default function PredictorView({ isAdmin }) {
         fetchWhatIfGeminiInsight(res.data);
       }
     } catch (err) {
-      setWhatIfError(err.response?.data?.detail || 'Prediction failed. Please check your inputs and try again.');
+      setWhatIfError(getErrorMessage(err, 'Prediction failed. Please check your inputs and try again.'));
     } finally {
       setWhatIfLoading(false);
     }
