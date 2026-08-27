@@ -5315,6 +5315,8 @@ async def subjects_analytics(
     user: dict = Depends(require_head_of_school),
 ):
     """Return analytics for one or two subjects for side-by-side comparison."""
+    if subject_b and subject_b == subject_a:
+        raise HTTPException(400, "Subject B must be different from Subject A to compare.")
     stats_a = _calc_subject_analytics(subject_a, trimester)
     if not stats_a:
         raise HTTPException(404, f"No data found for subject {subject_a}")

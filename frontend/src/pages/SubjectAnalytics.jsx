@@ -204,7 +204,7 @@ export default function SubjectAnalytics() {
             <SearchableSelect
               value={subjectA}
               onChange={v => { setSubjectA(v); setData(null); }}
-              options={subjects}
+              options={subjects.filter(sv => sv !== subjectB)}
               placeholder="Select subject…"
             />
           </div>
