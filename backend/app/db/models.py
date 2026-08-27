@@ -332,6 +332,39 @@ class OAuthProviderConfig(Base):
     )
 
 
+class AIProviderConfig(Base):
+    """
+    Singleton config row (always id=1) for which AI provider/model/API key
+    powers every AI-insight endpoint in this app (the alert/analyse/ask
+    endpoints under /api/gemini/*, kept under that route prefix for
+    frontend compatibility even though they're no longer Gemini-exclusive)
+    — replaces the single hardcoded GEMINI_API_KEY env var + fixed
+    gemini-1.5-flash/pro model pair with an admin-configurable, swappable
+    provider (Anthropic / Gemini / OpenAI) and model, editable from
+    Settings > AI Config.
+
+    api_key is Fernet-encrypted (see app.crypto_utils) — unlike
+    OAuthProviderConfig.client_id (a public identifier), a provider API key
+    is a genuine secret this app sends on the wire on the admin's behalf,
+    so it is never returned in plaintext by the API; GET only exposes
+    whether one is set and a short masked preview.
+    """
+
+    __tablename__ = "ai_provider_configs"
+
+    id: int = Column(Integer, primary_key=True, autoincrement=False)
+
+    provider: str = Column(String(20), nullable=False, default="gemini", comment="'anthropic' | 'gemini' | 'openai'")
+    model:    str = Column(String(100), nullable=False, default="gemini-1.5-pro")
+
+    encrypted_api_key: str | None = Column(Text, nullable=True)
+
+    updated_by: str | None = Column(String(254), nullable=True)
+    updated_at: datetime = Column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False,
+    )
+
+
 class User(AuditMixin, Base):
     """
     Application user account for EDAPT staff / admins.
@@ -534,6 +567,179 @@ class AnalyzeJob(Base):
         JSON, nullable=True,
         comment="Same {token, row_count, columns, ...} payload the old synchronous analyze endpoint returned",
     )
+    error_detail: str | None = Column(Text, nullable=True)
+
+
+class MailServer(AuditMixin, Base):
+    """
+    Admin-configurable outgoing SMTP server (Settings > Outgoing Mail
+    Servers) — replaces the single hardcoded GMAIL_SENDER/GMAIL_APP_PASSWORD
+    env var pair (Gmail-only, one server, no way to swap providers) with
+    admin-editable, multiple servers, modeled on Odoo's ir.mail_server:
+    name/host/port/connection-security/username/password/priority/active.
+
+    Multiple rows, not a singleton config row like AIProviderConfig or
+    RiskEmailTemplate — an org may genuinely want more than one outgoing
+    server (e.g. a primary provider and a fallback), so this follows
+    ApiKey's shape instead (autoincrement id, admin-chosen name,
+    created_by/timestamps via AuditMixin) rather than the fixed id=1
+    pattern. `priority` picks which ACTIVE server is actually used to send
+    (lowest number wins) — the same "sequence" convention Odoo's mail
+    server list uses, just without Odoo's per-server failover-on-send
+    (this app only ever needs one server to actually send from at a time).
+
+    encrypted_password is Fernet-encrypted (see app.crypto_utils), same as
+    AIProviderConfig.encrypted_api_key — a genuine secret this app sends on
+    the wire on the admin's behalf, so GET never returns it in plaintext,
+    only whether one is set and a short masked preview.
+    """
+
+    __tablename__ = "mail_servers"
+
+    id: int = Column(Integer, primary_key=True, autoincrement=True)
+
+    name: str = Column(String(120), nullable=False, comment="Admin-chosen label, e.g. 'Gmail SMTP'")
+
+    host: str = Column(String(255), nullable=False)
+    port: int = Column(Integer, nullable=False, default=587, server_default="587")
+    security: str = Column(
+        String(20), nullable=False, default="starttls", server_default="starttls",
+        comment="'none' | 'starttls' | 'ssl'",
+    )
+
+    username: str | None = Column(String(255), nullable=True)
+    encrypted_password: str | None = Column(Text, nullable=True)
+
+    from_email: str | None = Column(
+        String(254), nullable=True,
+        comment="Envelope From address — falls back to username at send time if blank",
+    )
+
+    priority: int = Column(
+        Integer, nullable=False, default=10, server_default="10",
+        comment="Lower number = tried first among active servers (Odoo's 'sequence' convention)",
+    )
+    active: bool = Column(Boolean, nullable=False, default=True, server_default="true")
+
+    created_by: str = Column(String(254), nullable=False)
+    updated_by: str | None = Column(String(254), nullable=True)
+
+
+class EmailLog(Base):
+    """
+    Record of one email this app tried to send — every attempt, not just
+    the ones that worked, via a configured MailServer (Settings > Outgoing
+    Mail Servers). Powers Settings > Email Logs.
+
+    status is only ever 'sent' (handed off to the SMTP server without the
+    send call raising) or 'failed' (with the real exception text in
+    failure_reason) — deliberately NOT a three-way sent/delivered/failed
+    split. Plain SMTP has no way to confirm actual mailbox delivery
+    (that needs bounce/webhook infrastructure this app doesn't have, e.g.
+    reading IMAP bounces or an ESP's delivery webhooks) — claiming
+    "delivered" here would just be a guess dressed up as a fact.
+
+    mail_server_id is nullable with ON DELETE SET NULL, same reasoning as
+    Intervention.prediction_id: if the server config is later edited away
+    or deleted, the historical record that this email was sent (and how)
+    must survive it.
+    """
+
+    __tablename__ = "email_logs"
+
+    id: int = Column(BigInteger, primary_key=True, autoincrement=True)
+
+    mail_server_id: int | None = Column(
+        Integer, ForeignKey("mail_servers.id", ondelete="SET NULL"), nullable=True, index=True,
+    )
+
+    from_email: str = Column(String(254), nullable=False)
+    to_email:   str = Column(String(254), nullable=False, index=True)
+    subject:    str | None = Column(String(255), nullable=True)
+    body:       str = Column(Text, nullable=False)
+    is_html:    bool = Column(Boolean, nullable=False, default=False, server_default="false")
+
+    kind: str = Column(
+        String(30), nullable=False, default="test", server_default="test", index=True,
+        comment="'test' (Send Test Email) | 'password_reset' (forgot-password OTP)",
+    )
+
+    status: str = Column(String(20), nullable=False, index=True, comment="'sent' | 'failed'")
+    failure_reason: str | None = Column(Text, nullable=True)
+
+    sent_by: str | None = Column(
+        String(254), nullable=True,
+        comment="Admin who triggered this (test emails) — NULL for system-triggered emails like password resets",
+    )
+    sent_at: datetime = Column(DateTime(timezone=True), server_default=func.now(), nullable=False, index=True)
+
+
+class UploadBatch(Base):
+    """
+    Tracks a large file upload split into small sequential chunks from the
+    browser, instead of one giant multipart request.
+
+    Confirmed real-world failure mode this replaces: a 125MB attendance CSV
+    sent as a single POST sat stuck "(pending)" in the browser for 500+
+    seconds and never completed, even though a direct curl of a similarly
+    sized file to the same endpoint finished in under 90 seconds and the
+    CORS preflight for the browser's own request succeeded instantly — the
+    backend and network path were fine, something about handling one huge
+    request client-side wasn't. Splitting the upload into small (~10MB)
+    chunks keeps every individual request small regardless of total file
+    size, and gives real progress to show ("34/58 chunks") instead of one
+    opaque spinner.
+
+    Chunks must arrive strictly in order — received_chunks is both the
+    count received so far and the index of the next chunk expected. This
+    project has no need for concurrent/out-of-order chunk upload, and
+    requiring order keeps the server-side append logic a plain byte-append
+    rather than a seek-and-write-at-offset. Re-POSTing the immediately
+    preceding chunk index is treated as an idempotent no-op, not an error,
+    so the client can safely retry one failed chunk without first checking
+    what already landed.
+
+    Once the last chunk arrives, the assembled file is handed to the exact
+    same analyze pipeline the old single-shot upload used (_run_analyze_job)
+    — analyze_job_id links to that follow-on AnalyzeJob so the browser can
+    switch from polling batch progress to polling the AnalyzeJob it already
+    knows how to render, rather than this table needing its own duplicate
+    "analyzing/success" result shape.
+    """
+
+    __tablename__ = "upload_batches"
+
+    id: int = Column(Integer, primary_key=True, autoincrement=True)
+
+    kind: str = Column(String(20), nullable=False, comment="'capstone' or 'attendance'")
+
+    status: str = Column(
+        String(20), nullable=False, default="uploading", server_default="uploading",
+        comment="uploading | analyzing | failed",
+    )
+
+    filename: str | None = Column(String(255), nullable=True)
+
+    total_size:   int = Column(BigInteger, nullable=False, comment="Total file size in bytes, declared at init")
+    chunk_size:   int = Column(Integer, nullable=False, comment="Bytes per chunk, declared at init")
+    total_chunks: int = Column(Integer, nullable=False)
+
+    received_chunks: int = Column(
+        Integer, nullable=False, default=0, server_default="0",
+        comment="Count received so far — also the index of the next chunk expected",
+    )
+
+    storage_path: str = Column(String(500), nullable=False, comment="Server-side path chunks are appended to")
+
+    analyze_job_id: int | None = Column(
+        Integer, ForeignKey("analyze_jobs.id"), nullable=True,
+        comment="Set once all chunks have landed and analysis has been handed off",
+    )
+
+    started_by: str = Column(String(254), nullable=False)
+    started_at: datetime = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    finished_at: datetime | None = Column(DateTime(timezone=True), nullable=True)
+
     error_detail: str | None = Column(Text, nullable=True)
 
 

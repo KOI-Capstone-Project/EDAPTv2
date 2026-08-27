@@ -179,7 +179,7 @@ _ATTENDANCE_PERIOD_CODE_TO_NUM = {"T1": "1", "T2": "2", "T3": "3"}
 _attendance_raw_cache: dict = {}
 
 
-def load_attendance_raw(capstone_raw: pd.DataFrame) -> pd.DataFrame:
+def load_attendance_raw(capstone_raw: pd.DataFrame, attendance_path: Path | None = None) -> pd.DataFrame:
     """
     Load and filter masked_attendance.csv to raw, per-session rows (NOT
     aggregated to a rate yet) — same filtering as
@@ -187,18 +187,31 @@ def load_attendance_raw(capstone_raw: pd.DataFrame) -> pd.DataFrame:
     present in the current capstone data), but returning individual
     sessions with class_no/actv_no/cls_session_no so callers can truncate
     to a coverage point before aggregating (needed for the mid-term model —
-    see build_simulated_progress_features()). Cached per capstone_raw id()
-    so repeated calls within one training run don't re-read/re-filter a
-    2.5M-row CSV each time.
+    see build_simulated_progress_features()). Cached per (capstone_raw id(),
+    path) so repeated calls within one training run don't re-read/re-filter
+    a 2.5M-row CSV each time.
+
+    attendance_path overrides the module-level ATTENDANCE_PATH for this
+    call only. Callers that need whatever attendance file is CURRENTLY
+    ingested (not necessarily the bundled /data sample) should pass it
+    explicitly — e.g. main.py's _attendance_raw_sessions(), which used to
+    call this with no override and so always read the bundled sample
+    (missing entirely in some environments), ignoring any admin-ingested
+    attendance file completely.
     """
-    cache_key = id(capstone_raw)
+    path = attendance_path if attendance_path is not None else ATTENDANCE_PATH
+    cache_key = (id(capstone_raw), str(path))
     if cache_key in _attendance_raw_cache:
         return _attendance_raw_cache[cache_key]
 
-    att = pd.read_csv(ATTENDANCE_PATH)
+    att = pd.read_csv(path)
     capstone_subjects = set(capstone_raw["SUBJECTCODE"].unique())
-    capstone_years = set(capstone_raw["YEAR"].astype(str).unique())
-    att["year"] = att["year"].astype(str)
+    # capstone_raw["YEAR"] is float64 when NaN is present, so a plain
+    # .astype(str) yields "2026.0" while attendance's int64 year column
+    # yields "2026" for the same year, and every row would be dropped by
+    # the mismatch below — same fix as build_attendance_features.py.
+    capstone_years = set(capstone_raw["YEAR"].dropna().astype(int).astype(str).unique())
+    att["year"] = att["year"].astype(int).astype(str)
     mask = (
         att["study_period_code"].isin(_ATTENDANCE_VALID_PERIOD_CODES)
         & att["course"].isin(capstone_subjects)

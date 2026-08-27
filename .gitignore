@@ -76,6 +76,10 @@ backend/app/ml/column_review_decisions.json
 backend/app/ml/ingested_capstone.csv
 backend/app/ml/ingested_attendance_raw.csv
 backend/app/ml/.ingest.lock
+# In-flight chunked-upload pieces (see UploadBatch in app/db/models.py) —
+# assembled and deleted automatically once a batch completes; a leftover
+# .part file just means an upload was abandoned mid-transfer.
+backend/app/ml/batch_uploads/
 
 # ── OS ───────────────────────────────────────────────────
 .DS_Store

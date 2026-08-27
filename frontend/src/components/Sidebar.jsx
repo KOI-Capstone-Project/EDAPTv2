@@ -121,6 +121,12 @@ const I = {
       <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
     </svg>
   ),
+  Mail: () => (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="2" y="4" width="20" height="16" rx="2"/>
+      <path d="M22 6l-10 7L2 6"/>
+    </svg>
+  ),
   ChevronDown: () => (
     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
       <polyline points="6 9 12 15 18 9"/>
@@ -193,6 +199,9 @@ export default function Sidebar() {
     { label: 'My Profile', icon: <I.Settings />, to: '/settings' },
     ...(isAdmin || isHoS ? [{ label: 'Risk Email Template', icon: <I.AlertTriangle />, to: '/risk-email-template' }] : []),
     ...(isAdmin || isHoS ? [{ label: 'OAuth Providers', icon: <I.Shield />, to: '/oauth-providers' }] : []),
+    ...(isAdmin || isHoS ? [{ label: 'AI Config', icon: <I.AI />, to: '/ai-config' }] : []),
+    ...(isAdmin || isHoS ? [{ label: 'Outgoing Mail Servers', icon: <I.Mail />, to: '/mail-servers' }] : []),
+    ...(isAdmin || isHoS ? [{ label: 'Email Logs', icon: <I.AuditLog />, to: '/email-logs' }] : []),
     ...(isAdmin ? [{ label: 'API Console', icon: <I.ApiKey />, to: '/api-console' }] : []),
     ...(isAdmin && isSuperAdmin ? [
       { label: 'User Management', icon: <I.Users />,    to: '/users'     },
@@ -254,7 +263,7 @@ export default function Sidebar() {
         padding: collapsed ? '0 0 20px' : '0 20px 20px',
       }}>
         {!collapsed && (
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, animation: 'sidebarLabelIn 0.18s ease' }}>
             <div style={s.logoIcon}>E</div>
             <span style={s.logoText}>EDAPT v2</span>
           </div>
@@ -288,28 +297,32 @@ export default function Sidebar() {
                   title={collapsed ? item.label : undefined}
                 >
                   <span style={s.icon}>{item.icon}</span>
-                  {!collapsed && <span style={{ flex: 1, textAlign: 'left' }}>{item.label}</span>}
+                  {!collapsed && <span style={{ flex: 1, textAlign: 'left', animation: 'sidebarLabelIn 0.18s ease' }}>{item.label}</span>}
                   {!collapsed && (
-                    <span style={{ display: 'flex', transition: 'transform 0.15s', transform: isOpen ? 'rotate(0deg)' : 'rotate(-90deg)' }}>
+                    <span style={{ display: 'flex', transition: 'transform 0.2s ease', transform: isOpen ? 'rotate(0deg)' : 'rotate(-90deg)' }}>
                       <I.ChevronDown />
                     </span>
                   )}
                 </button>
-                {!collapsed && isOpen && (
-                  <div style={s.subNav}>
-                    {item.children.map(child => (
-                      <NavLink
-                        key={child.to}
-                        to={child.to}
-                        style={({ isActive }) => ({
-                          ...s.item, ...s.subItem,
-                          ...(isActive ? s.itemActive : {}),
-                        })}
-                      >
-                        <span style={s.icon}>{child.icon}</span>
-                        {child.label}
-                      </NavLink>
-                    ))}
+                {!collapsed && (
+                  <div style={{ display: 'grid', gridTemplateRows: isOpen ? '1fr' : '0fr', transition: 'grid-template-rows 0.25s cubic-bezier(0.4, 0, 0.2, 1)' }}>
+                    <div style={{ overflow: 'hidden' }}>
+                      <div style={{ ...s.subNav, opacity: isOpen ? 1 : 0, transition: 'opacity 0.2s ease' }}>
+                        {item.children.map(child => (
+                          <NavLink
+                            key={child.to}
+                            to={child.to}
+                            style={({ isActive }) => ({
+                              ...s.item, ...s.subItem,
+                              ...(isActive ? s.itemActive : {}),
+                            })}
+                          >
+                            <span style={s.icon}>{child.icon}</span>
+                            {child.label}
+                          </NavLink>
+                        ))}
+                      </div>
+                    </div>
                   </div>
                 )}
               </div>
@@ -337,7 +350,7 @@ export default function Sidebar() {
                   <span style={{ ...s.navBadge, ...s.navBadgeCollapsed, ...(ingestBadge.hasFailure ? s.navBadgeFailure : {}) }} />
                 )}
               </span>
-              {!collapsed && label}
+              {!collapsed && <span style={{ animation: 'sidebarLabelIn 0.18s ease' }}>{label}</span>}
               {!collapsed && showBadge && (
                 <span style={{ ...s.navBadge, ...(ingestBadge.hasFailure ? s.navBadgeFailure : {}) }}>
                   {ingestBadge.count}
@@ -359,7 +372,7 @@ export default function Sidebar() {
             {initials}
           </div>
           {!collapsed && (
-            <div>
+            <div style={{ animation: 'sidebarLabelIn 0.18s ease' }}>
               <div style={s.userName}>{getUserName()}</div>
               <div style={s.userRole}>{user?.role || 'Staff'}</div>
             </div>
@@ -367,7 +380,7 @@ export default function Sidebar() {
         </div>
 
         {!collapsed && (
-          <button onClick={handleLogout} style={s.logoutBtn}>
+          <button onClick={handleLogout} style={{ ...s.logoutBtn, animation: 'sidebarLabelIn 0.18s ease' }}>
             <I.Logout />
             <span>Sign Out</span>
           </button>
@@ -378,6 +391,13 @@ export default function Sidebar() {
           </button>
         )}
       </div>
+
+      <style>{`
+        @keyframes sidebarLabelIn {
+          from { opacity: 0; transform: translateX(-4px); }
+          to   { opacity: 1; transform: translateX(0); }
+        }
+      `}</style>
     </aside>
   );
 }
@@ -387,7 +407,7 @@ const s = {
     background: '#1A2E40',
     display: 'flex', flexDirection: 'column',
     boxSizing: 'border-box',
-    transition: 'width 0.2s ease, min-width 0.2s ease',
+    transition: 'width 0.25s cubic-bezier(0.4, 0, 0.2, 1), min-width 0.25s cubic-bezier(0.4, 0, 0.2, 1)',
     overflow: 'hidden', flexShrink: 0,
     height: '100vh',
   },
