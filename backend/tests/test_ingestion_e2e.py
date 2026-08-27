@@ -298,6 +298,22 @@ def _isolate_ml_paths(seed_live_period: str | None = None):
         train_model.INGESTED_DATA_DIR  = tmp_dir
         train_model.DATA_PATH          = isolated_data_path
         check_new_period.DATA_PATH     = isolated_data_path
+        # A genuine retrain needs attendance too (ATTENDANCE_RATE is a real
+        # model feature) — main.py's confirm handler only points
+        # train_model.ATTENDANCE_PATH at the ingested override if that file
+        # exists at the (now-isolated) INGESTED_DATA_DIR; it never does
+        # inside a Case-B-style test that only confirms capstone, so
+        # without this copy it silently falls back to the archived
+        # data/masked_attendance.csv.gz default — which has never existed
+        # in this environment either. That FileNotFoundError was getting
+        # swallowed by main.py's broad `except Exception` around the
+        # retrain check, surfacing only as `triggered: False` with no
+        # obvious cause. Copying the REAL attendance file in (read-only,
+        # never touching the shared original) gives an isolated retrain
+        # the same real data a non-isolated one would see.
+        real_attendance_path = original["train_model.INGESTED_DATA_DIR"] / "ingested_attendance_raw.csv"
+        if real_attendance_path.exists():
+            shutil.copy(real_attendance_path, tmp_dir / "ingested_attendance_raw.csv")
         model_registry.MODELS_DIR      = isolated_models_dir
         model_registry.REGISTRY_PATH   = isolated_registry_path
         model_registry.LEGACY_PKL_PATH = tmp_dir / "no_legacy_here.pkl"
