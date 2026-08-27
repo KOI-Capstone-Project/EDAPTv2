@@ -1112,8 +1112,21 @@ _oauth2 = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
 # Role Dependencies
 # ─────────────────────────────────────────────────────────────────────────────
 
-async def get_current_user(token: str = Depends(_oauth2)) -> dict:
-    """Decode JWT and return the payload dict; raises 401 if revoked or invalid."""
+async def get_current_user(
+    token: str = Depends(_oauth2),
+    db:    AsyncSession = Depends(get_db),
+) -> dict:
+    """Decode JWT and return the payload dict; raises 401 if revoked, invalid,
+    or the account itself no longer allows access.
+
+    A JWT alone can't reflect an account being deleted or deactivated *after*
+    it was issued — the token's signature and expiry are still perfectly
+    valid, so without this the previous holder stays logged in, fully
+    authorized, until the token's natural expiry. Confirmed live: deleting
+    a user's account left their existing session working normally. Every
+    request now re-checks the account still exists and is active, not just
+    that the token decodes.
+    """
     if token in _REVOKED_TOKENS:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -1124,7 +1137,6 @@ async def get_current_user(token: str = Depends(_oauth2)) -> dict:
         payload = _decode_token(token)
         if "sub" not in payload:
             raise ValueError
-        return payload
     except (JWTError, ValueError):
         # `from None` deliberately: the underlying JWT error (expired vs.
         # malformed vs. bad signature) must not reach the client, and chaining
@@ -1134,6 +1146,16 @@ async def get_current_user(token: str = Depends(_oauth2)) -> dict:
             detail="Could not validate credentials.",
             headers={"WWW-Authenticate": "Bearer"},
         ) from None
+
+    result  = await db.execute(select(UserModel).where(UserModel.email == payload["sub"]))
+    db_user = result.scalar_one_or_none()
+    if db_user is None or not db_user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Session expired. Please log in again.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return payload
 
 
 async def require_admin(user: dict = Depends(get_current_user)) -> dict:
