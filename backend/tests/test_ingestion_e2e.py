@@ -8,11 +8,18 @@ the new-period retrain trigger (registration only, never auto-promotion).
 Separate file from test_smoke.py, per the build spec. Every test that
 mutates app.main's in-memory _DATA/_ATTENDANCE/_PENDING_INGESTS restores
 the originals afterward (see _preserve_app_state), and every test that
-touches the ML registry/DATA_PATH constants is fully isolated to a
-throwaway temp directory (see _isolate_ml_paths) — the same pattern
-already used by app/ml/verify_dynamic_period_e2e.py — so nothing here
-ever writes to the real data/Capstone_data_20260729.csv or the real
+touches the ML registry/DATA_PATH/INGESTED_DATA_DIR constants is fully
+isolated to a throwaway temp directory (see _isolate_ml_paths) — the same
+pattern already used by app/ml/verify_dynamic_period_e2e.py — so nothing
+here writes to the real data/Capstone_data_20260729.csv or the real
 backend/app/ml/models/registry.json.
+
+A real, confirmed incident is why INGESTED_DATA_DIR is now explicitly
+part of that isolation and not just DATA_PATH: it wasn't before, so a
+real confirm() call inside a test wrote straight through to the shared
+backend/app/ml/ingested_capstone.csv the live dev server also reads —
+verified as the cause of a real production-data-quality incident (see
+_isolate_ml_paths's docstring for the full account).
 """
 
 import contextlib
@@ -224,13 +231,34 @@ def _build_known_attendance_csv() -> bytes:
 def _isolate_ml_paths(seed_live_period: str | None = None):
     """
     Full isolation for DATA_PATH / check_new_period.DATA_PATH / the model
-    registry — same pattern as verify_dynamic_period_e2e.py. Nothing here
-    touches the real data/Capstone_data_20260729.csv or the real
-    backend/app/ml/models/registry.json. If seed_live_period is given, the
-    isolated registry starts with a minimal fake "live" entry at that
-    validated_on period (no real .pkl needed — get_live_entry() is a plain
-    dict lookup), so new-period comparison logic has something real to
-    compare against.
+    registry / INGESTED_DATA_DIR — same pattern as
+    verify_dynamic_period_e2e.py. Nothing here touches the real
+    data/Capstone_data_20260729.csv, the real
+    backend/app/ml/models/registry.json, or the real
+    backend/app/ml/ingested_capstone.csv / ingested_attendance_raw.csv. If
+    seed_live_period is given, the isolated registry starts with a minimal
+    fake "live" entry at that validated_on period (no real .pkl needed —
+    get_live_entry() is a plain dict lookup), so new-period comparison
+    logic has something real to compare against.
+
+    FIXED — this docstring's "nothing here touches the real ingested
+    files" claim used to be false for INGESTED_DATA_DIR specifically: the
+    variable was never isolated at all, so any test that ran a real
+    confirm flow for capstone/attendance inside this context manager wrote
+    straight through to the SAME shared backend/app/ml/ingested_capstone.csv
+    the live dev server also loads from — main.py resolves the write path
+    via `train_model_mod.INGESTED_DATA_DIR`, a live module-attribute
+    lookup, so redirecting `train_model.INGESTED_DATA_DIR` here is enough
+    to isolate every writer, no per-caller change needed. Confirmed as the
+    real cause of a real incident: a test run left synthetic 2-subject
+    data in the shared file when interrupted mid-test (a container
+    restart force-kills anything running inside it, skipping this
+    function's own `finally` restore), and the live dev server picked it
+    up on its next reload — degrading real predictions until manually
+    fixed. Also fixes another consequence of the same corrupted file:
+    `finally`'s DATA_PATH restore itself was a no-op before this fix,
+    since DATA_PATH was captured but never actually reassigned in the
+    `try` block below.
     """
     tmp_dir = Path(tempfile.mkdtemp(prefix="edapt_ingestion_e2e_"))
     isolated_models_dir = tmp_dir / "models"
@@ -252,20 +280,31 @@ def _isolate_ml_paths(seed_live_period: str | None = None):
         with open(isolated_registry_path, "w") as f:
             json.dump(seed_registry, f)
 
+    isolated_data_path = tmp_dir / "ingested_capstone.csv"
     original = {
         "train_model.DATA_PATH":          train_model.DATA_PATH,
+        "train_model.INGESTED_DATA_DIR":  train_model.INGESTED_DATA_DIR,
         "check_new_period.DATA_PATH":     check_new_period.DATA_PATH,
         "model_registry.MODELS_DIR":      model_registry.MODELS_DIR,
         "model_registry.REGISTRY_PATH":   model_registry.REGISTRY_PATH,
         "model_registry.LEGACY_PKL_PATH": model_registry.LEGACY_PKL_PATH,
     }
     try:
+        # The critical one: main.py's confirm handler resolves its write
+        # target as `train_model_mod.INGESTED_DATA_DIR / "ingested_capstone.csv"`
+        # (a live module-attribute lookup, not train_model.DATA_PATH) —
+        # redirecting this is what actually keeps a real confirm() call
+        # inside this context manager off the real shared file.
+        train_model.INGESTED_DATA_DIR  = tmp_dir
+        train_model.DATA_PATH          = isolated_data_path
+        check_new_period.DATA_PATH     = isolated_data_path
         model_registry.MODELS_DIR      = isolated_models_dir
         model_registry.REGISTRY_PATH   = isolated_registry_path
         model_registry.LEGACY_PKL_PATH = tmp_dir / "no_legacy_here.pkl"
         yield tmp_dir, isolated_registry_path
     finally:
         train_model.DATA_PATH          = original["train_model.DATA_PATH"]
+        train_model.INGESTED_DATA_DIR  = original["train_model.INGESTED_DATA_DIR"]
         check_new_period.DATA_PATH     = original["check_new_period.DATA_PATH"]
         model_registry.MODELS_DIR      = original["model_registry.MODELS_DIR"]
         model_registry.REGISTRY_PATH   = original["model_registry.REGISTRY_PATH"]
