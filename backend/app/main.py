@@ -5329,7 +5329,17 @@ async def subjects_analytics(
     stats_a = _calc_subject_analytics(subject_a, trimester)
     if not stats_a:
         raise HTTPException(404, f"No data found for subject {subject_a}")
-    stats_b = _calc_subject_analytics(subject_b, trimester) if subject_b else None
+    stats_b = None
+    if subject_b:
+        stats_b = _calc_subject_analytics(subject_b, trimester)
+        # _calc_subject_analytics returns {} (not None) when the subject has no
+        # rows in this scope — same as subject_a above, but subject_b previously
+        # skipped this check and sent that {} straight through as "subject_b" in
+        # the response. The frontend then trusted it as real comparison data and
+        # crashed reading its (missing) grade_distribution — confirmed live via
+        # comparing two real subjects in a trimester where the second had no data.
+        if not stats_b:
+            raise HTTPException(404, f"No data found for subject {subject_b} in the selected scope.")
     return {"subject_a": stats_a, "subject_b": stats_b}
 
 # ─────────────────────────────────────────────────────────────────────────────
