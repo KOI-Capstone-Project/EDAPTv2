@@ -75,6 +75,8 @@ const FAQ_PROMPTS = [
   'How many students are currently in the High Risk band?',
   "What's the weakest assessment type this period?",
   'Give me a quick summary of student performance this period.',
+  'Which subjects have the lowest attendance right now?',
+  'Is there a link between attendance and passing this period?',
 ];
 
 const REFUSAL = "I'm restricted to answering questions about this system's student data and can't help with that.";
