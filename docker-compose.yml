@@ -103,6 +103,11 @@ services:
     environment:
       REACT_APP_API_BASE_URL: ${REACT_APP_API_BASE_URL:-http://localhost:8000}
       CHOKIDAR_USEPOLLING: "true"   # needed for hot-reload inside Docker on some OS
+      # react-scripts 5 (webpack 5) watches via `watchpack`, not chokidar — CHOKIDAR_USEPOLLING
+      # alone left this bind mount's edits silently un-picked-up (confirmed live: saved edits
+      # never recompiled until the container was restarted). WATCHPACK_POLLING is the var
+      # watchpack itself reads.
+      WATCHPACK_POLLING: "true"
     volumes:
       - ./frontend:/app
       - /app/node_modules           # anonymous volume prevents host override

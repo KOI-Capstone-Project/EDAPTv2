@@ -113,12 +113,15 @@ function SubjectMultiSelect({ value, onChange, allSubjects, placeholder }) {
 export default function UserManagement() {
   const navigate = useNavigate();
 
+  // Every Head of Technology account is a full administrator — same role
+  // check as the /users route guard in App.js (HoTOnlyRoute) and the
+  // backend's require_admin gate on the /api/users endpoints.
   const storedUser = (() => { try { return JSON.parse(localStorage.getItem('edapt_user')); } catch { return null; } })();
-  const isSuperAdmin = storedUser?.email === 'admin';
+  const isAdmin = storedUser?.role === 'Head of Technology';
 
   useEffect(() => {
-    if (!isSuperAdmin) navigate('/dashboard', { replace: true });
-  }, [isSuperAdmin, navigate]);
+    if (!isAdmin) navigate('/dashboard', { replace: true });
+  }, [isAdmin, navigate]);
 
   const [users,        setUsers]        = useState([]);
   const [allSubjects,  setAllSubjects]  = useState([]);
@@ -139,10 +142,10 @@ export default function UserManagement() {
   const [showPwd, setShowPwd] = useState(false);
 
   useEffect(() => {
-    if (!isSuperAdmin) return;
+    if (!isAdmin) return;
     api.get('/api/subjects/list').then(r => setAllSubjects(r.data)).catch(() => {});
     fetchUsers();
-  }, [isSuperAdmin]);
+  }, [isAdmin]);
 
   const fetchUsers = () => {
     setLoading(true);
@@ -231,7 +234,7 @@ export default function UserManagement() {
 
   const canCreate = isValidEmail(form.email) && Boolean(form.name.trim()) && form.password.length > 0;
 
-  if (!isSuperAdmin) return null;
+  if (!isAdmin) return null;
 
   return (
     <div>

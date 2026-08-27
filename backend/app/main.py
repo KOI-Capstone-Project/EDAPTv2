@@ -1152,13 +1152,6 @@ async def require_head_of_school(user: dict = Depends(get_current_user)) -> dict
     return user
 
 
-async def require_super_admin(user: dict = Depends(get_current_user)) -> dict:
-    """Restrict access to the system administrator (is_super_admin=True in JWT)."""
-    if user.get("is_super_admin") is not True:
-        raise HTTPException(403, "Only the system administrator can access this feature.")
-    return user
-
-
 _api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
 
@@ -5354,7 +5347,7 @@ async def get_audit_logs(
 
 @app.get("/api/users", tags=["Admin"])
 async def list_users(
-    user: dict = Depends(require_super_admin),
+    user: dict = Depends(require_admin),
     db:   AsyncSession = Depends(get_db),
 ):
     """Return all non-admin user accounts."""
@@ -5375,7 +5368,7 @@ async def list_users(
 @app.post("/api/users", status_code=201, tags=["Admin"])
 async def create_user(
     payload: CreateUserRequest,
-    user: dict = Depends(require_super_admin),
+    user: dict = Depends(require_admin),
     db:   AsyncSession = Depends(get_db),
 ):
     """Create a new staff account with role and subject assignments."""
@@ -5423,7 +5416,7 @@ async def create_user(
 async def update_user(
     email:   str,
     payload: UpdateUserRequest,
-    user: dict = Depends(require_super_admin),
+    user: dict = Depends(require_admin),
     db:   AsyncSession = Depends(get_db),
 ):
     """Update subject assignments or active status for an existing account."""
@@ -5450,7 +5443,7 @@ async def update_user(
 @app.delete("/api/users/{email}", tags=["Admin"])
 async def delete_user(
     email: str,
-    user: dict = Depends(require_super_admin),
+    user: dict = Depends(require_admin),
     db:   AsyncSession = Depends(get_db),
 ):
     """Permanently delete a staff account; prevents self-deletion and admin removal."""
@@ -5472,9 +5465,8 @@ async def delete_user(
 # ═══════════════════════════════════════════════════════════════════════════
 # API Console — admin-issued keys for the external /api/v1/predict endpoint
 # ═══════════════════════════════════════════════════════════════════════════
-# Gated by require_admin (any Head of Technology), not require_super_admin —
-# this is a role-based feature like /api/audit-logs, not restricted to the
-# single literal "admin" account the way /api/users is.
+# Gated by require_admin (any Head of Technology), same as /api/users and
+# /api/audit-logs — every Head of Technology account is a full administrator.
 
 @app.get("/api/api-keys", tags=["Admin"])
 async def list_api_keys(

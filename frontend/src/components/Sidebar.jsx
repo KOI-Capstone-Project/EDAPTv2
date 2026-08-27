@@ -189,17 +189,17 @@ export default function Sidebar() {
   const user       = getUser();
   const isAdmin      = user?.role === 'Head of Technology';
   const isHoS        = user?.role === 'Head of School';
-  const isSuperAdmin = user?.email === 'admin';
   const roleKey      = isAdmin ? 'admin' : isHoS ? 'hos' : 'lecturer';
 
   // Same ACL as before per item — this only changes where each link lives
   // in the tree, not who can reach it (route guards in App.js are untouched).
   const reportingChildren = REPORTING_CHILDREN.filter(c => c.roles.includes(roleKey));
   // Email Logs and Audit Logs live under one nested "Logs" group rather than
-  // as flat Settings entries — same ACL per item as before, only grouped.
+  // as flat Settings entries — every Head of Technology account is a full
+  // administrator, so both are gated on role alone, same as the rest of Settings.
   const logsChildren = [
     ...(isAdmin || isHoS ? [{ label: 'Email Logs', icon: <I.Mail />,     to: '/email-logs' }] : []),
-    ...(isAdmin && isSuperAdmin ? [{ label: 'Audit Logs', icon: <I.AuditLog />, to: '/audit-log' }] : []),
+    ...(isAdmin ? [{ label: 'Audit Logs', icon: <I.AuditLog />, to: '/audit-log' }] : []),
   ];
   const settingsChildren  = [
     { label: 'My Profile', icon: <I.Settings />, to: '/settings' },
@@ -208,7 +208,7 @@ export default function Sidebar() {
     ...(isAdmin || isHoS ? [{ label: 'AI Config', icon: <I.AI />, to: '/ai-config' }] : []),
     ...(isAdmin || isHoS ? [{ label: 'Outgoing Mail Servers', icon: <I.Mail />, to: '/mail-servers' }] : []),
     ...(isAdmin ? [{ label: 'API Console', icon: <I.ApiKey />, to: '/api-console' }] : []),
-    ...(isAdmin && isSuperAdmin ? [{ label: 'User Management', icon: <I.Users />, to: '/users' }] : []),
+    ...(isAdmin ? [{ label: 'User Management', icon: <I.Users />, to: '/users' }] : []),
     ...(logsChildren.length ? [{ label: 'Logs', icon: <I.AuditLog />, children: logsChildren }] : []),
   ];
 
