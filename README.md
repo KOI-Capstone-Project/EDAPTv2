@@ -29,16 +29,17 @@ A PostgreSQL-backed relational schema now exists and is genuinely used for **use
 
 ## Roles
 
-Confirmed directly against `backend/app/main.py`'s role checks and the seeded default accounts. There are **three roles**, plus one orthogonal super-admin flag:
+Confirmed directly against `backend/app/main.py`'s role checks and the seeded default accounts. There are **three roles**:
 
 | Role                 | Access                                                                 |
 |-----------------------|-------------------------------------------------------------------------|
 | `Lecturer`            | Their assigned subjects only — dashboard, explorer, predictor, settings |
 | `Head of School`      | Institution-wide analytics, same scope as Head of Technology except audit log / user management |
-| `Head of Technology`  | Institution-wide analytics, data ingestion, predictive reports, all subjects |
-| `is_super_admin` flag | Independent of role — grants Audit Log and User Management access. Seeded only on the default `admin` account (a Head of Technology) |
+| `Head of Technology`  | Institution-wide analytics, data ingestion, predictive reports, all subjects, Audit Log, User Management, API Console — every Head of Technology account is a full administrator |
 
-`Head of Technology` and `Head of School` are treated identically almost everywhere in the codebase (`user.get("role") in {"Head of Technology", "Head of School"}` appears throughout `main.py`) — the meaningful three-way split for most endpoints is really "Lecturer vs. everyone else," with the super-admin flag layered on top for two specific pages.
+`Head of Technology` and `Head of School` are treated identically almost everywhere in the codebase (`user.get("role") in {"Head of Technology", "Head of School"}` appears throughout `main.py`) — the meaningful three-way split for most endpoints is really "Lecturer vs. everyone else," with Audit Log / User Management / API Console layered on top as Head-of-Technology-only.
+
+There's also an `is_super_admin` DB column, but it no longer gates any page or endpoint — it exists solely to protect the seeded `admin` account itself from being deleted or modified by another Head of Technology account (`db_user.email == "admin"` checks in `update_user`/`delete_user`), not to distinguish access levels between admins.
 
 ---
 
@@ -84,7 +85,7 @@ Verified directly against `frontend/src/App.js`'s route table. `AdminProtected` 
 | Outgoing Mail Servers | `OutgoingMailServersView.jsx` | `/mail-servers` | `AdminProtected` — see [Outgoing Mail & Email Logs](#outgoing-mail--email-logs) |
 | Email Logs | `EmailLogsView.jsx` | `/email-logs` | `AdminProtected` — see [Outgoing Mail & Email Logs](#outgoing-mail--email-logs) |
 | Audit Log | `AuditLog.jsx` | `/audit-log` | `HoTOnlyProtected` route, backed by `require_admin` (any Head of Technology) |
-| User Management | `UserManagement.jsx` | `/users` | `HoTOnlyProtected` route, but every `/api/users*` call is backed by `require_super_admin` — stricter than the route guard alone: a Head of Technology who isn't the seeded super-admin account can reach the page but every API call on it 403s |
+| User Management | `UserManagement.jsx` | `/users` | `HoTOnlyProtected` route, backed by `require_admin` (any Head of Technology) — every Head of Technology account is a full administrator here, not just the seeded super-admin account |
 | API Console | `ApiConsole.jsx` | `/api-console` | `HoTOnlyProtected` — API key issuance/testing for the external `POST /api/v1/predict` integration |
 
 ### Auth pages
@@ -244,21 +245,18 @@ docker exec edaptv2_backend python3 -m app.ml.<script_name>
 
 ## Environment Variables
 
-Confirmed against the current `.env` (values redacted; variable names are real):
+Confirmed against the current `.env` (values redacted; variable names are real). `POSTGRES_HOST`, `POSTGRES_PORT`, and `ENVIRONMENT` used to be listed here too — removed after confirming (via repo-wide grep) that nothing reads them: `DATABASE_URL` is its own hardcoded literal DSN, not built from the `POSTGRES_*` vars, and `docker-compose.yml` hardcodes `ENVIRONMENT: development` directly rather than interpolating `${ENVIRONMENT}`, so the `.env` copy had no effect either way.
 
 ```bash
 # ── PostgreSQL ──────────────────────────────────────────────
 POSTGRES_USER=
 POSTGRES_PASSWORD=
 POSTGRES_DB=
-POSTGRES_HOST=
-POSTGRES_PORT=
 
 DATABASE_URL=
 
 # ── FastAPI ─────────────────────────────────────────────────
 SECRET_KEY=
-ENVIRONMENT=
 LOG_LEVEL=
 
 # ── pgAdmin ─────────────────────────────────────────────────
@@ -308,7 +306,7 @@ Three demo accounts are seeded automatically on first backend startup if the `us
 | `hos` | `HoS@2025!` | Head of School | No |
 | `user` | `Lect@2025!` | Lecturer (assigned `ICT104`, `ICT201`, `ICT301`) | No |
 
-Use **User Management** (`/users`, super-admin only) to create additional accounts.
+Use **User Management** (`/users`, any Head of Technology account) to create additional accounts.
 
 ---
 
@@ -801,7 +799,7 @@ Settings > Outgoing Mail Servers (multiple SMTP servers, lowest-`priority` activ
 - JWT tokens stored in `localStorage` as `edapt_token`
 - User profile stored as `edapt_user` (JSON)
 - Tokens expire after 8 hours
-- Role checking happens on both the frontend (route guards in `App.js`) and the backend (`require_admin` / `require_super_admin` FastAPI dependencies in `main.py`)
+- Role checking happens on both the frontend (route guards in `App.js`) and the backend (`require_admin` / `require_head_of_school` FastAPI dependencies in `main.py`)
 
 ---
 
