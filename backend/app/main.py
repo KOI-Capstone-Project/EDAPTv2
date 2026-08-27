@@ -3036,7 +3036,16 @@ async def dashboard_summary(
         "avg_mark_prev":   round(avg_mark_prev,  1) if avg_mark_prev  is not None else None,
         "pass_rate":       round(pass_rate,      1) if pass_rate      is not None else 0.0,
         "pass_rate_prev":  round(pass_rate_prev, 1) if pass_rate_prev is not None else None,
-        "at_risk_count":   int((df["MARKPERCENT"] < 50).sum()),
+        # Distinct STUDENTS with at least one mark below 50%, not a row count of
+        # failing assessment items — the dashboard shows this right next to
+        # total_students (a student count), so it must never exceed it. A raw
+        # `(MARKPERCENT < 50).sum()` counts every failing assessment across every
+        # subject/period, which is not bounded by student count at all (confirmed
+        # live: 57,710 vs. 7,926 total students, a QA-flagged impossible reading).
+        "at_risk_count": (
+            int(df.loc[df["MARKPERCENT"] < 50, "STUDENTID_MASKED"].nunique())
+            if "STUDENTID_MASKED" in df.columns else int((df["MARKPERCENT"] < 50).sum())
+        ),
         "countries_count": countries,
     }
 
