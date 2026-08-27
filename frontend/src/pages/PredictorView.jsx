@@ -755,6 +755,9 @@ export default function PredictorView({ isAdmin }) {
     setWhatIfMarks(p => ({ ...p, [assessmentType]: value }));
     const num = parseFloat(value);
     setWhatIfMarkErrors(p => {
+      if (!isNaN(num) && num < 0) {
+        return { ...p, [assessmentType]: 'Mark cannot be negative.' };
+      }
       if (!isNaN(num) && num > weighting) {
         return { ...p, [assessmentType]: `Maximum mark for this assessment is ${weighting}.` };
       }
