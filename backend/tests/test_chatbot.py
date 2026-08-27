@@ -453,6 +453,128 @@ async def test_chatbot_student_lookup_found_and_not_found(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_chatbot_student_lookup_tolerates_a_space_before_the_number(monkeypatch):
+    """Real bug, confirmed live: "student 20035193" (a space — the natural
+    way most people type it) previously fell straight through
+    _STUDENT_ID_PATTERN's zero-width \\bStudent\\d+\\b, so student_lookup
+    was silently never added and the model fell back to a flat
+    "outside this system's data" refusal for what was actually an
+    in-scope, just-unresolvable student question. Also checks the
+    reconstructed id is the no-space canonical form ("Student777777"),
+    not whatever spacing the user happened to type."""
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        token = await _login(client, "admin", "Admin@2025!")
+        headers = {"Authorization": f"Bearer {token}"}
+
+        async with _cleanup_test_predictions():
+            async with main_mod._AsyncSession() as db:
+                await _seed_prediction(db, student_id="Student777777", subject="ICT104", risk_band="At Risk")
+
+            captured_prompt = {}
+
+            async def _fake_ai_call(prompt):
+                captured_prompt["value"] = prompt
+                return "ok", 1
+
+            monkeypatch.setattr(main_mod, "_ai_call", _fake_ai_call)
+
+            r = await client.post(
+                "/api/chatbot/ask", headers=headers,
+                json={"question": "How is student 777777 doing?", "study_period": TEST_PERIOD},
+            )
+            assert r.status_code == 200
+            prompt = captured_prompt["value"]
+            assert '"student_lookup"' in prompt
+            assert '"student_id": "Student777777"' in prompt
+            assert '"found": true' in prompt
+
+
+@pytest.mark.asyncio
+async def test_chatbot_student_lookup_falls_back_to_conversation_history(monkeypatch):
+    """Real bug, confirmed live: after "How is Student4912 doing?", a
+    pronoun follow-up like "is he enrolled in just this one subject?"
+    names no student itself, so student_lookup was never added for that
+    turn and the model fell back to the flat refusal even though the
+    conversation clearly established who "he" is. Falls back to the most
+    recent student id mentioned in the client-echoed history when the
+    current question has none."""
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        token = await _login(client, "admin", "Admin@2025!")
+        headers = {"Authorization": f"Bearer {token}"}
+
+        async with _cleanup_test_predictions():
+            async with main_mod._AsyncSession() as db:
+                await _seed_prediction(db, student_id="Student777777", subject="ICT104", risk_band="At Risk")
+
+            captured_prompt = {}
+
+            async def _fake_ai_call(prompt):
+                captured_prompt["value"] = prompt
+                return "ok", 1
+
+            monkeypatch.setattr(main_mod, "_ai_call", _fake_ai_call)
+
+            r = await client.post(
+                "/api/chatbot/ask", headers=headers,
+                json={
+                    "question": "is he enrolled in just this one subject?",
+                    "study_period": TEST_PERIOD,
+                    "history": [
+                        {"role": "user", "content": "How is Student777777 doing?"},
+                        {"role": "assistant", "content": "Student777777 is enrolled in ICT104..."},
+                    ],
+                },
+            )
+            assert r.status_code == 200
+            prompt = captured_prompt["value"]
+            assert '"student_lookup"' in prompt
+            assert '"student_id": "Student777777"' in prompt
+            assert '"found": true' in prompt
+
+        # No student ever mentioned, in this question or history: no lookup.
+        r2 = await client.post(
+            "/api/chatbot/ask", headers=headers,
+            json={
+                "question": "is he passing?",
+                "study_period": TEST_PERIOD,
+                "history": [{"role": "user", "content": "what's the overall pass rate?"}],
+            },
+        )
+        assert r2.status_code == 200
+        assert '"student_lookup"' not in captured_prompt["value"]
+
+
+@pytest.mark.asyncio
+async def test_chatbot_bare_number_with_no_student_word_is_not_treated_as_a_student_id(monkeypatch):
+    """A number with no "student" anywhere in the question (a real
+    institutional id, a mark, a year) is deliberately NOT resolved to a
+    student lookup — this system's masked ids only ever look like
+    "Student<N>", and guessing on every number-bearing question would be
+    worse than occasionally missing an unlabeled reference. This is the
+    one part of the reported "20035193" case that's expected behavior, not
+    a bug: that number was never a valid masked id in this dataset's
+    format regardless of how the question was phrased."""
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        token = await _login(client, "admin", "Admin@2025!")
+        headers = {"Authorization": f"Bearer {token}"}
+
+        captured_prompt = {}
+
+        async def _fake_ai_call(prompt):
+            captured_prompt["value"] = prompt
+            return "ok", 1
+
+        monkeypatch.setattr(main_mod, "_ai_call", _fake_ai_call)
+
+        r = await client.post(
+            "/api/chatbot/ask", headers=headers,
+            json={"question": "How is 20035193 doing?", "study_period": TEST_PERIOD},
+        )
+        assert r.status_code == 200
+        assert '"student_lookup"' not in captured_prompt["value"]
+
+
+@pytest.mark.asyncio
 async def test_chatbot_reports_data_freshness(monkeypatch):
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         token = await _login(client, "admin", "Admin@2025!")

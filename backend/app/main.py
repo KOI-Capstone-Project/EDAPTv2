@@ -5319,10 +5319,20 @@ def _chatbot_subject_comparison(study_period: str, user: dict) -> list[dict]:
     return rows[:20] if is_admin else rows
 
 
-_STUDENT_ID_PATTERN = re.compile(r"\bStudent\d+\b", re.IGNORECASE)
+# \s* between the word and the digits, not zero-width — "student 20035193"
+# (a space, the natural way most people actually type it) previously
+# never matched, only the exact no-space "Student20035193" form the DB
+# itself uses. Confirmed live: that silently skipped student_lookup
+# entirely, so the model fell through to a flat "outside this system's
+# data" refusal for what was, in fact, a real (if unresolvable) student
+# question — see the docstring below for what "unresolvable" still means.
+_STUDENT_ID_PATTERN = re.compile(r"\bstudent\s*(\d+)\b", re.IGNORECASE)
 
 
-async def _chatbot_student_lookup(question: str, study_period: str, user: dict, db: AsyncSession) -> Optional[dict]:
+async def _chatbot_student_lookup(
+    question: str, study_period: str, user: dict, db: AsyncSession,
+    history: Optional[list] = None,
+) -> Optional[dict]:
     """If the question names a specific masked student id (e.g.
     "Student4921"), that student's most recent prediction row per subject
     for this period — same DISTINCT ON per-model-version dedup
@@ -5338,11 +5348,35 @@ async def _chatbot_student_lookup(question: str, study_period: str, user: dict, 
     factor-by-factor "why" — only the recorded classification. The prompt
     below points the user to Predictor for that, the same deep-link
     StudentsAtRisk.jsx already uses instead of duplicating SHAP rendering.
+
+    Only recognizes "student" + a number, since that's the one id format
+    this system actually has (STUDENTID_MASKED values are "Student0",
+    "Student1", ... — small sequential integers assigned at masking time,
+    never a real institutional student number). A bare, unlabeled number
+    with no "student" anywhere in the question (a real institutional id, a
+    mark, a year) is deliberately NOT treated as a student reference — a
+    prompt-only assistant has no reliable way to tell those apart, and
+    guessing wrong on every question with a number in it would be worse
+    than occasionally missing an unlabeled reference.
+
+    If THIS question doesn't name a student, falls back to the most recent
+    mention in `history` — e.g. "is he enrolled in just this one subject?"
+    following "How is Student4912 doing?" previously fell through to the
+    blanket refusal, because student_lookup was only ever built from the
+    current turn's text and the model had no fresh data to answer a
+    pronoun-only follow-up from, even though the conversation clearly names
+    who "he" is. Most-recent-first so a later "and Student8?" correctly
+    supersedes an earlier student named in the same short history window.
     """
     match = _STUDENT_ID_PATTERN.search(question)
+    if not match and history:
+        for turn in reversed(history):
+            match = _STUDENT_ID_PATTERN.search(turn.content)
+            if match:
+                break
     if not match:
         return None
-    student_id = match.group(0)
+    student_id = f"Student{match.group(1)}"
 
     is_admin = user.get("role") in {"Head of Technology", "Head of School"}
     subjects = user.get("subjects", []) if not is_admin else None
@@ -5461,7 +5495,7 @@ async def chatbot_ask(
     attendance    = _chatbot_attendance_context(study_period, user)
     comparison    = _chatbot_subject_comparison(study_period, user)
     interventions = await _chatbot_intervention_context(study_period, user, db)
-    student       = await _chatbot_student_lookup(req.question, study_period, user, db)
+    student       = await _chatbot_student_lookup(req.question, study_period, user, db, req.history)
     data_as_of    = await _chatbot_data_freshness(db)
 
     context = {
@@ -5538,9 +5572,15 @@ async def chatbot_ask(
                 ),
             }
             if student.get("found") else
-            {**student, "note": "No prediction found for this student in this period/scope — "
-                                 "they may not be enrolled in a subject you can see, or haven't "
-                                 "been scored yet (visit Students at Risk or Predictor to generate one)."}
+            {**student, "note": (
+                f"No prediction found for {student['student_id']} in this period/scope. "
+                "This system's student ids are masked as 'Student' followed by a small "
+                "sequential number (e.g. Student0, Student4921) assigned when the data was "
+                "anonymized — never a real institutional student number, so a real-world id "
+                "typed in won't resolve to anything here. If this genuinely is one of this "
+                "system's ids, they may not be enrolled in a subject you can see, or haven't "
+                "been scored yet (visit Students at Risk or Predictor to generate one)."
+            )}
         )
 
     history_str = "\n".join(f"{t.role}: {t.content}" for t in req.history[-8:]) if req.history else ""
