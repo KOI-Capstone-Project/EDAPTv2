@@ -5,6 +5,7 @@ import {
   LineChart, Line, ResponsiveContainer,
 } from 'recharts';
 import api from '../services/api';
+import { getErrorMessage } from '../utils/apiError';
 
 const TEAL   = '#2E6E8E';
 const ORANGE = '#E8873A';
@@ -129,7 +130,7 @@ export default function SubjectAnalytics() {
       const res = await api.get('/api/subjects/analytics', { params });
       setData(res.data);
     } catch (err) {
-      setError(err.response?.data?.detail || 'Failed to load analytics.');
+      setError(getErrorMessage(err, 'Failed to load analytics.'));
     } finally {
       setLoading(false);
     }

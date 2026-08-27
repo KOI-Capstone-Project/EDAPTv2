@@ -14,6 +14,7 @@
 // page cannot disagree with what those scripts report.
 import { useState, useEffect } from 'react';
 import api from '../services/api';
+import { getErrorMessage } from '../utils/apiError';
 
 function Metric({ label, value, hint }) {
   return (
@@ -101,7 +102,7 @@ export default function ModelHealth() {
   useEffect(() => {
     api.get('/api/admin/model-health')
       .then(r => setData(r.data))
-      .catch(e => setError(e.response?.data?.detail || 'Could not load model health.'))
+      .catch(e => setError(getErrorMessage(e, 'Could not load model health.')))
       .finally(() => setLoading(false));
   }, []);
 

@@ -8,6 +8,7 @@
 // next AI call, no redeploy needed.
 import { useState, useEffect } from 'react';
 import api from '../services/api';
+import { getErrorMessage } from '../utils/apiError';
 
 const PROVIDER_LABELS = {
   anthropic: 'Anthropic',
@@ -44,7 +45,7 @@ export default function AIConfigView() {
         setUpdatedBy(r.data.updated_by);
         setUpdatedAt(r.data.updated_at);
       })
-      .catch(err => setLoadError(err.response?.data?.detail || 'Failed to load AI configuration.'))
+      .catch(err => setLoadError(getErrorMessage(err, 'Failed to load AI configuration.')))
       .finally(() => setLoading(false));
   };
 
@@ -76,7 +77,7 @@ export default function AIConfigView() {
       setApiKey('');
       setMsg({ type: 'success', text: 'Saved. The next AI request will use this configuration.' });
     } catch (err) {
-      setMsg({ type: 'error', text: err.response?.data?.detail || 'Failed to save.' });
+      setMsg({ type: 'error', text: getErrorMessage(err, 'Failed to save.') });
     } finally {
       setSaving(false);
     }

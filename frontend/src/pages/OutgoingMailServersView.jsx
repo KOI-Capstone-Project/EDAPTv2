@@ -6,6 +6,7 @@
 // "Test Connection" flow are modeled on Odoo's Outgoing Mail Servers form.
 import { useState, useEffect, useCallback } from 'react';
 import api from '../services/api';
+import { getErrorMessage } from '../utils/apiError';
 
 const SECURITY_OPTIONS = [
   { value: 'none',     label: 'None' },
@@ -120,7 +121,7 @@ export default function OutgoingMailServersView() {
         message: res.data.message, elapsed_seconds: res.data.elapsed_seconds,
       });
     } catch (err) {
-      setTestState({ status: 'failed', message: err.response?.data?.detail || 'Test failed. Please try again.' });
+      setTestState({ status: 'failed', message: getErrorMessage(err, 'Test failed. Please try again.') });
     } finally {
       setTesting(false);
     }
@@ -144,7 +145,7 @@ export default function OutgoingMailServersView() {
       closeForm();
       fetchServers();
     } catch (err) {
-      setFormError(err.response?.data?.detail || 'Failed to save this mail server.');
+      setFormError(getErrorMessage(err, 'Failed to save this mail server.'));
     } finally {
       setSaving(false);
     }
@@ -156,7 +157,7 @@ export default function OutgoingMailServersView() {
       await api.delete(`/api/mail-servers/${srv.id}`);
       fetchServers();
     } catch (err) {
-      alert(err.response?.data?.detail || 'Failed to delete this mail server.');
+      alert(getErrorMessage(err, 'Failed to delete this mail server.'));
     }
   };
 
@@ -169,7 +170,7 @@ export default function OutgoingMailServersView() {
         [srv.id]: { status: res.data.success ? 'success' : 'failed', message: res.data.message, elapsed_seconds: res.data.elapsed_seconds },
       }));
     } catch (err) {
-      setRowTest(prev => ({ ...prev, [srv.id]: { status: 'failed', message: err.response?.data?.detail || 'Test failed.' } }));
+      setRowTest(prev => ({ ...prev, [srv.id]: { status: 'failed', message: getErrorMessage(err, 'Test failed.') } }));
     }
   };
 
@@ -202,7 +203,7 @@ export default function OutgoingMailServersView() {
           : (res.data.failure_reason || 'Send failed.'),
       });
     } catch (err) {
-      setSendResult({ status: 'failed', message: err.response?.data?.detail || 'Failed to send test email.' });
+      setSendResult({ status: 'failed', message: getErrorMessage(err, 'Failed to send test email.') });
     } finally {
       setSending(false);
     }

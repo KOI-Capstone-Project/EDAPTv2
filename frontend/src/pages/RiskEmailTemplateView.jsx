@@ -7,6 +7,7 @@
 // themselves, then use the bulk action to record that it happened.
 import { useState, useEffect } from 'react';
 import api from '../services/api';
+import { getErrorMessage } from '../utils/apiError';
 
 export default function RiskEmailTemplateView() {
   const [subject, setSubject] = useState('');
@@ -31,7 +32,7 @@ export default function RiskEmailTemplateView() {
       setBody(res.data.body);
       setMsg({ type: 'success', text: 'Template saved.' });
     } catch (err) {
-      setMsg({ type: 'error', text: err.response?.data?.detail || 'Failed to save template.' });
+      setMsg({ type: 'error', text: getErrorMessage(err, 'Failed to save template.') });
     } finally {
       setSaving(false);
     }

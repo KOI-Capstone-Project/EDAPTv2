@@ -2,6 +2,7 @@
 import { useState, useEffect } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import api from '../services/api';
+import { getErrorMessage } from '../utils/apiError';
 import { getToken, isAdmin, STORAGE_TOKEN_KEY, STORAGE_USER_KEY } from '../utils/auth';
 import { SESSION_EXPIRED_KEY } from '../api/client';
 import OAuthButtons from '../components/OAuthButtons';
@@ -95,7 +96,7 @@ export default function Login() {
       const res = await api.post('/api/auth/login', { email, password });
       completeLogin(res.data);
     } catch (err) {
-      setError(err.response?.data?.detail || 'Sign in failed. Please try again.');
+      setError(getErrorMessage(err, 'Sign in failed. Please try again.'));
     } finally {
       setLoading(false);
     }

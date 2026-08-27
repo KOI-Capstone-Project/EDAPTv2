@@ -10,6 +10,7 @@ import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { isAdmin as checkIsAdmin } from '../utils/auth';
 import api from '../services/api';
+import { getErrorMessage } from '../utils/apiError';
 import { RiskBadge, MidTermTag, resolveSafeFloor } from '../components/RiskBadge';
 
 const TABS = [
@@ -102,7 +103,7 @@ export default function StudentsAtRisk() {
         setStudents(r.data.students || []);
         setSubjectsIncluded(r.data.subjects_included || 0);
       })
-      .catch(err => setError(err.response?.data?.detail || 'Could not load students at risk.'))
+      .catch(err => setError(getErrorMessage(err, 'Could not load students at risk.')))
       .finally(() => setLoading(false));
   }, [studyPeriod]);
 
@@ -354,7 +355,7 @@ function RiskEmailModal({ targets, studyPeriod, onClose, onLogged }) {
       });
       onLogged();
     } catch (err) {
-      setError(err.response?.data?.detail || 'Could not log these actions. Please try again.');
+      setError(getErrorMessage(err, 'Could not log these actions. Please try again.'));
     } finally {
       setSaving(false);
     }
