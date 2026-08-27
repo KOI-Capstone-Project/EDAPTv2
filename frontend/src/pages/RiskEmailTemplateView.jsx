@@ -9,6 +9,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import api from '../services/api';
 import { getErrorMessage } from '../utils/apiError';
+import RichTextEditor from '../components/RichTextEditor';
 
 const EMPTY_FORM = { name: '', subject: '', body: '' };
 
@@ -127,10 +128,9 @@ export default function RiskEmailTemplateView() {
 
           <div style={{ ...s.formField, marginTop: 14 }}>
             <label style={s.label}>Body *</label>
-            <textarea
-              style={{ ...s.input, height: 170, padding: '10px 12px', resize: 'vertical', fontFamily: 'inherit' }}
+            <RichTextEditor
               value={form.body}
-              onChange={e => setForm(f => ({ ...f, body: e.target.value }))}
+              onChange={html => setForm(f => ({ ...f, body: html }))}
             />
           </div>
 

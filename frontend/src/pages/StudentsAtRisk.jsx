@@ -12,6 +12,8 @@ import { isAdmin as checkIsAdmin } from '../utils/auth';
 import api from '../services/api';
 import { getErrorMessage } from '../utils/apiError';
 import { RiskBadge, MidTermTag, resolveSafeFloor } from '../components/RiskBadge';
+import RichTextEditor from '../components/RichTextEditor';
+import DOMPurify from 'dompurify';
 
 const TABS = [
   { key: 'at_risk', label: 'At Risk' },
@@ -348,12 +350,20 @@ function RiskEmailModal({ targets, studyPeriod, onClose, onLogged }) {
     if (tpl) { setSubject(tpl.subject); setBody(tpl.body); }
   };
 
+  // replaceAll, not replace — a plain string first argument to .replace()
+  // only swaps the FIRST occurrence, so a placeholder used more than once
+  // in the body (e.g. both in a sentence and in a "Subject Code: ..." list
+  // further down) left every later occurrence as a literal, unresolved
+  // {{placeholder}} in the preview. Confirmed live: the actual logged
+  // Intervention notes were already correct (Python's str.replace() IS
+  // all-occurrences by default — see _render_risk_email in main.py), only
+  // this frontend preview was wrong.
   const preview = targets[0]
     ? body
-        .replace('{{student_id}}',   targets[0].student_id)
-        .replace('{{subject_code}}', targets[0].subject)
-        .replace('{{study_period}}', studyPeriod)
-        .replace('{{risk_band}}',    targets[0].risk_band || 'at risk')
+        .replaceAll('{{student_id}}',   targets[0].student_id)
+        .replaceAll('{{subject_code}}', targets[0].subject)
+        .replaceAll('{{study_period}}', studyPeriod)
+        .replaceAll('{{risk_band}}',    targets[0].risk_band || 'at risk')
     : '';
 
   const handleConfirm = async () => {
@@ -412,18 +422,24 @@ function RiskEmailModal({ targets, studyPeriod, onClose, onLogged }) {
             </div>
             <div style={{ ...s.fieldGroup, marginTop: 12 }}>
               <label style={s.label}>Body</label>
-              <textarea
-                style={{ ...s.select, height: 150, padding: '10px 12px', resize: 'vertical', fontFamily: 'inherit', cursor: 'text' }}
-                value={body}
-                onChange={e => setBody(e.target.value)}
-              />
+              <RichTextEditor value={body} onChange={setBody} minHeight={150} />
             </div>
             {targets[0] && (
               <div style={s.previewBox}>
                 <p style={{ margin: '0 0 4px', fontSize: 10.5, fontWeight: 700, color: '#94A3B8', textTransform: 'uppercase' }}>
                   Preview — {targets[0].student_id}
                 </p>
-                <p style={{ margin: 0, fontSize: 12, color: '#334155', whiteSpace: 'pre-wrap' }}>{preview}</p>
+                <div
+                  style={{ margin: 0, fontSize: 12, color: '#334155' }}
+                  // Sanitized, not raw — a saved template is shared, stored
+                  // data (any Head of Technology / Head of School can create
+                  // one), so an unsanitized render here would let a
+                  // malicious template run script in every OTHER user's
+                  // session the moment they select it, same class of risk
+                  // EmailLogsView's DetailPanel deliberately avoids for
+                  // admin-entered HTML bodies.
+                  dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(preview) }}
+                />
               </div>
             )}
           </>
