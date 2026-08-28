@@ -363,6 +363,49 @@ async def test_chatbot_subject_comparison_covers_every_visible_subject(monkeypat
         main_mod._DATA = original_data
 
 
+@pytest.mark.asyncio
+async def test_chatbot_uses_the_study_period_named_in_the_question(monkeypatch):
+    """Real bug, confirmed live: AIChatbox.jsx never sends study_period at
+    all, so every question was always answered using only the LATEST
+    period's data — "student data for period 23.1 for subject acc100"
+    built context for the latest period (e.g. 25.3), found no match for
+    "23.1" there, and refused, even though ACC100/23.1 has real data and
+    the identical question worked once study_period was passed explicitly.
+    A study period explicitly named in the question text must override
+    the "latest available" default."""
+    synthetic = _synthetic_marks_df([
+        ("S1", "ICT104", "23.1", 90.0), ("S2", "ICT104", "23.1", 80.0),  # avg 85 — the one asked about
+        ("S3", "ICT104", "24.1", 10.0), ("S4", "ICT104", "24.1", 20.0),  # avg 15 — would be "latest" default
+    ])
+    original_data = main_mod._DATA
+    main_mod._DATA = synthetic
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            token = await _login(client, "user", "Lect@2025!")  # subjects: ICT104, ICT201, ICT301
+            headers = {"Authorization": f"Bearer {token}"}
+
+            captured_prompt = {}
+
+            async def _fake_ai_call(prompt):
+                captured_prompt["value"] = prompt
+                return "ok", 1
+
+            monkeypatch.setattr(main_mod, "_ai_call", _fake_ai_call)
+
+            # No study_period in the request at all — only named in the question.
+            r = await client.post(
+                "/api/chatbot/ask", headers=headers,
+                json={"question": "How is ICT104 doing in period 23.1?"},
+            )
+        assert r.status_code == 200
+        assert r.json()["study_period_used"] == "23.1"
+        prompt = captured_prompt["value"]
+        assert '"avg_mark": 85.0' in prompt, "context wasn't built for the period named in the question"
+        assert '"avg_mark": 15.0' not in prompt, "context used the latest-available default instead"
+    finally:
+        main_mod._DATA = original_data
+
+
 def _synthetic_attendance_df(rows):
     return pd.DataFrame(rows, columns=["SUBJECTCODE", "STUDYPERIOD", "ATTENDANCE_RATE", "PASS"])
 

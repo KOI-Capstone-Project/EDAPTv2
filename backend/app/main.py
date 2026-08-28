@@ -1611,20 +1611,46 @@ async def get_summary(user: dict = Depends(get_current_user)):
     return {"data": result}
 
 
+def _subject_periods_map() -> dict[str, list[str]]:
+    """Map of subject -> the study periods that subject actually has data
+    for. A subject only ever ran in a handful of periods, but "periods" in
+    /api/filters is the union across every subject — so a period picked for
+    one subject can easily be one that subject never ran in at all, and
+    /api/subjects/{subject}/roster correctly 404s for that combo. Lets the
+    frontend restrict the period dropdown to only the periods valid for
+    whichever subject is currently selected, instead of only finding out
+    after a failed roster request."""
+    if _DATA is None or "SUBJECTCODE" not in _DATA.columns or "STUDYPERIOD" not in _DATA.columns:
+        return {}
+    return {
+        str(subject): sorted(grp["STUDYPERIOD"].dropna().unique().tolist(), key=lambda x: float(x))
+        for subject, grp in _DATA.dropna(subset=["SUBJECTCODE", "STUDYPERIOD"]).groupby("SUBJECTCODE")
+    }
+
+
 @app.get("/api/filters", tags=["Data"])
 async def get_filters(user: dict = Depends(get_current_user)):
-    """Return subjects visible to the requesting user and all available study periods."""
+    """Return subjects visible to the requesting user, all available study
+    periods, and subject_periods (subject -> that subject's own periods,
+    scoped to the same visible subjects) so the frontend can restrict a
+    period picker to combos that actually have data."""
     periods: list[str] = []
     if _DATA is not None and "STUDYPERIOD" in _DATA.columns:
         periods = sorted(
             _DATA["STUDYPERIOD"].dropna().unique().tolist(),
             key=lambda x: float(x),
         )
+    subject_periods = _subject_periods_map()
     if user.get("role") == "Lecturer":
-        return {"subjects": user.get("subjects", []), "periods": periods}
+        visible = user.get("subjects", [])
+        return {
+            "subjects": visible, "periods": periods,
+            "subject_periods": {s: subject_periods.get(s, []) for s in visible},
+        }
     if _DATA is not None and "SUBJECTCODE" in _DATA.columns:
-        return {"subjects": sorted(_DATA["SUBJECTCODE"].dropna().unique().tolist()), "periods": periods}
-    return {"subjects": [], "periods": periods}
+        visible = sorted(_DATA["SUBJECTCODE"].dropna().unique().tolist())
+        return {"subjects": visible, "periods": periods, "subject_periods": subject_periods}
+    return {"subjects": [], "periods": periods, "subject_periods": {}}
 
 
 # ── Two-phase ingestion: analyze (parse + classify, no commit) then confirm
@@ -5163,6 +5189,33 @@ def _latest_available_period(user: dict) -> Optional[str]:
     return None
 
 
+# Matches any real period ("23.1".."25.3") as a whole token — built from
+# PERIODS_ORDER (the same canonical list _latest_available_period uses)
+# rather than a generic \d\d?\.\d pattern, so it can never match a mark,
+# ratio, or any other decimal number that happens to be in the question.
+_STUDY_PERIOD_PATTERN = re.compile(
+    r"\b(" + "|".join(re.escape(p) for p in PERIODS_ORDER) + r")\b"
+)
+
+
+def _extract_study_period_from_question(question: str) -> Optional[str]:
+    """If the question names a specific study period (e.g. "period 23.1",
+    "in 24.2"), that period — real bug, confirmed live: the AI Chatbox
+    widget (AIChatbox.jsx) never sends study_period at all, so every
+    question was always answered using only the LATEST period's data
+    regardless of what the question actually asked about. "student data
+    for period 23.1 for subject acc100" built context for whatever the
+    latest period was (e.g. 25.3), found nothing there matching "23.1",
+    and refused — even though ACC100/23.1 has real data and the very same
+    question answered correctly once study_period was passed explicitly.
+    Takes priority over req.study_period (the frontend never actually
+    supplies one today, but if some page-embedded caller ever does, an
+    explicit period named in the question's own text is the more specific,
+    more clearly-intentional signal)."""
+    match = _STUDY_PERIOD_PATTERN.search(question)
+    return match.group(1) if match else None
+
+
 async def _chatbot_risk_context(study_period: str, user: dict, db: AsyncSession) -> dict:
     """Per-subject risk-band counts for one study period, scoped to what
     this user can see — read straight from the Predictions table (upserted
@@ -5482,7 +5535,11 @@ async def chatbot_ask(
             "tokens_used": 0, "study_period_used": None,
         }
 
-    study_period = req.study_period or _latest_available_period(user)
+    study_period = (
+        _extract_study_period_from_question(req.question)
+        or req.study_period
+        or _latest_available_period(user)
+    )
     if not study_period:
         return {
             "answer": "There's no study period with data available for your subjects yet.",

@@ -496,6 +496,56 @@ async def test_roster_midterm_tier_returns_real_predictions_not_nulls():
     )
 
 
+@pytest.mark.asyncio
+async def test_filters_subject_periods_matches_what_roster_actually_serves():
+    """Regression test for a real bug: /api/filters' `periods` is the union
+    across every subject, so the Predictor's period dropdown let users pick
+    a period a given subject never ran in at all — the roster endpoint
+    correctly 404s for that combo, but the UI showed it as a generic
+    "failed to load" error. subject_periods must scope each subject to only
+    the periods it actually has data for, and every one of those must
+    genuinely 200 from the roster endpoint (never 404)."""
+    from app.main import _DATA, _subject_reliability_category
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        token = await _login(client)
+        headers = {"Authorization": f"Bearer {token}"}
+
+        response = await client.get("/api/filters", headers=headers)
+        assert response.status_code == 200, response.text
+        payload = response.json()
+        subject_periods = payload["subject_periods"]
+
+        df = _DATA.dropna(subset=["MARKPERCENT"])
+        subject, periods_for_subject = next(
+            (s, p) for s, p in subject_periods.items()
+            if p and _subject_reliability_category(s) != "unreliable"
+            and not df[(df["SUBJECTCODE"] == s) & (df["STUDYPERIOD"] == p[0])].empty
+        )
+
+        # A period genuinely listed for this subject must actually serve.
+        ok_resp = await client.get(
+            f"/api/subjects/{subject}/roster",
+            params={"study_period": periods_for_subject[0]}, headers=headers,
+        )
+        assert ok_resp.status_code == 200, (
+            f"subject_periods claimed {subject}/{periods_for_subject[0]} has data, "
+            f"but the roster endpoint disagreed: {ok_resp.text}"
+        )
+
+        # A period NOT listed for this subject (but real for some other
+        # subject) must be the actual 404 case subject_periods exists to
+        # let the frontend avoid picking in the first place.
+        all_periods = payload["periods"]
+        missing_period = next((p for p in all_periods if p not in periods_for_subject), None)
+        if missing_period is not None:
+            missing_resp = await client.get(
+                f"/api/subjects/{subject}/roster",
+                params={"study_period": missing_period}, headers=headers,
+            )
+            assert missing_resp.status_code == 404
+
+
 # ── Cross-endpoint agreement ────────────────────────────────────────────────
 # The two tests above prove each endpoint works on its own. They cannot catch
 # the two endpoints being individually fine but disagreeing with each other —
