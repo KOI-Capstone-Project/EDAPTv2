@@ -245,7 +245,7 @@ export default function ExplorerView({ isLecturer }) {
 
   const colStyle = { fontSize: 12, color: '#475569', padding: '10px 12px', borderBottom: '0.5px solid #F0F4F8', whiteSpace: 'nowrap' };
   const thStyle  = { fontSize: 11, fontWeight: 600, color: '#94A3B8', padding: '10px 12px', borderBottom: '1px solid #E2E8F0', textTransform: 'uppercase', letterSpacing: 0.5, background: '#F8FAFC', whiteSpace: 'nowrap' };
-  const colCount = (isLecturer ? 7 : 8) + 1;
+  const colCount = (isLecturer ? 7 : 9) + 1;
 
   return (
     <div style={s.page}>
@@ -329,7 +329,7 @@ export default function ExplorerView({ isLecturer }) {
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={s.tableCard}>
             <div style={{ overflowX: 'auto' }}>
-              <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: isLecturer ? 660 : 780 }}>
+              <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: isLecturer ? 660 : 860 }}>
                 <thead>
                   <tr>
                     <th style={thStyle}>Student ID</th>
@@ -340,6 +340,7 @@ export default function ExplorerView({ isLecturer }) {
                     <th style={thStyle}>Attendance</th>
                     <th style={thStyle}>Period</th>
                     {!isLecturer && <th style={thStyle}>Country</th>}
+                    {!isLecturer && <th style={thStyle}>Gender</th>}
                     <th style={thStyle}></th>
                   </tr>
                 </thead>
@@ -367,6 +368,7 @@ export default function ExplorerView({ isLecturer }) {
                       </td>
                       <td style={colStyle}>{rec.study_period ?? '—'}</td>
                       {!isLecturer && <td style={colStyle}>{rec.country ?? '—'}</td>}
+                      {!isLecturer && <td style={colStyle}>{rec.gender ?? '—'}</td>}
                       <td style={{ ...colStyle, textAlign: 'right' }}>
                         <button
                           style={{ ...s.viewBtn, background: selectedId === rec.student_id ? '#2E6E8E' : '#F0F4F8', color: selectedId === rec.student_id ? '#fff' : '#2E6E8E' }}
