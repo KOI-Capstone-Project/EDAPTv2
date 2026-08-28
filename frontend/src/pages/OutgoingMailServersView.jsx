@@ -7,6 +7,21 @@
 import { useState, useEffect, useCallback } from 'react';
 import api from '../services/api';
 import { getErrorMessage } from '../utils/apiError';
+import { getUser } from '../utils/auth';
+import RichTextEditor from '../components/RichTextEditor';
+
+function isValidEmail(email) {
+  if (!email || email.length > 254) return false;
+  const at = email.indexOf('@');
+  if (at <= 0 || email.indexOf('@', at + 1) !== -1) return false;
+  const local  = email.slice(0, at);
+  const rest   = email.slice(at + 1);
+  if (!/^[a-zA-Z0-9._%+-]+$/.test(local)) return false;
+  const dot = rest.lastIndexOf('.');
+  if (dot <= 0) return false;
+  const ext = rest.slice(dot + 1);
+  return ext.length >= 2;
+}
 
 const SECURITY_OPTIONS = [
   { value: 'none',     label: 'None' },
@@ -38,7 +53,13 @@ function TestResultBanner({ result, runningLabel = 'Testing connection…' }) {
   );
 }
 
-const EMPTY_SEND_FORM = { server_id: '', from_email: '', to_email: '', subject: 'EDAPT Test Email', body: '<p>This is a test email from EDAPT.</p>' };
+// to_email defaults to the logged-in user's own address — read fresh each
+// time the panel opens, not baked into a module-level constant, since it
+// depends on who's currently signed in.
+const emptySendForm = () => ({
+  server_id: '', from_email: '', to_email: getUser()?.email || '',
+  subject: 'EDAPT Test Email', body: '<p>This is a test email from EDAPT.</p>',
+});
 
 export default function OutgoingMailServersView() {
   const [servers, setServers] = useState([]);
@@ -55,7 +76,7 @@ export default function OutgoingMailServersView() {
   const [rowTest, setRowTest] = useState({}); // {[id]: {status, message, elapsed_seconds}}
 
   const [showSendTest, setShowSendTest]   = useState(false);
-  const [sendForm, setSendForm]           = useState(EMPTY_SEND_FORM);
+  const [sendForm, setSendForm]           = useState(emptySendForm);
   const [sending, setSending]             = useState(false);
   const [sendResult, setSendResult]       = useState(null); // {status:'running'|'success'|'failed', message} | null
 
@@ -175,7 +196,7 @@ export default function OutgoingMailServersView() {
   };
 
   const openSendTest = () => {
-    setSendForm(EMPTY_SEND_FORM);
+    setSendForm(emptySendForm());
     setSendResult(null);
     setShowSendTest(true);
   };
@@ -184,6 +205,14 @@ export default function OutgoingMailServersView() {
   const handleSendTest = async () => {
     if (!sendForm.from_email.trim() || !sendForm.to_email.trim() || !sendForm.body.trim()) {
       setSendResult({ status: 'failed', message: 'From, To, and Body are all required.' });
+      return;
+    }
+    if (!isValidEmail(sendForm.from_email.trim())) {
+      setSendResult({ status: 'failed', message: 'Enter a valid From email address.' });
+      return;
+    }
+    if (!isValidEmail(sendForm.to_email.trim())) {
+      setSendResult({ status: 'failed', message: 'Enter a valid To email address.' });
       return;
     }
     setSending(true);
@@ -247,10 +276,16 @@ export default function OutgoingMailServersView() {
             <div style={s.field}>
               <label style={s.label}>From *</label>
               <input style={s.input} value={sendForm.from_email} onChange={e => setSendForm(f => ({ ...f, from_email: e.target.value }))} placeholder="sender@yourdomain.com" />
+              {sendForm.from_email && !isValidEmail(sendForm.from_email) && (
+                <span style={s.fieldErr}>Enter a valid email address.</span>
+              )}
             </div>
             <div style={s.field}>
               <label style={s.label}>To *</label>
               <input style={s.input} value={sendForm.to_email} onChange={e => setSendForm(f => ({ ...f, to_email: e.target.value }))} placeholder="recipient@example.com" />
+              {sendForm.to_email && !isValidEmail(sendForm.to_email) && (
+                <span style={s.fieldErr}>Enter a valid email address.</span>
+              )}
             </div>
             <div style={{ ...s.field, gridColumn: '1 / -1' }}>
               <label style={s.label}>Subject</label>
@@ -258,10 +293,11 @@ export default function OutgoingMailServersView() {
             </div>
             <div style={{ ...s.field, gridColumn: '1 / -1' }}>
               <label style={s.label}>Body (HTML) *</label>
-              <textarea
-                style={s.textarea} rows={6} value={sendForm.body}
-                onChange={e => setSendForm(f => ({ ...f, body: e.target.value }))}
-                placeholder="<p>Your HTML email content…</p>"
+              <RichTextEditor
+                value={sendForm.body}
+                onChange={html => setSendForm(f => ({ ...f, body: html }))}
+                minHeight={150}
+                placeholder="Your HTML email content…"
               />
             </div>
           </div>
@@ -434,6 +470,7 @@ const s = {
   field:     { display: 'flex', flexDirection: 'column', gap: 6 },
   label:     { fontSize: 12, fontWeight: 600, color: '#334155' },
   fieldNote: { margin: '2px 0 0', fontSize: 11, color: '#94A3B8' },
+  fieldErr:  { fontSize: 11, color: '#DC2626', marginTop: 3, display: 'block' },
   input: {
     height: 36, padding: '0 12px', borderRadius: 8,
     border: '0.5px solid #C5D2DC', fontSize: 13, color: '#1A2E40',
@@ -443,11 +480,6 @@ const s = {
     height: 36, padding: '0 12px', borderRadius: 8, border: '0.5px solid #C5D2DC',
     fontSize: 13, color: '#1A2E40', background: '#fff', cursor: 'pointer',
     width: '100%', boxSizing: 'border-box', outline: 'none',
-  },
-  textarea: {
-    padding: '10px 12px', borderRadius: 8, border: '0.5px solid #C5D2DC',
-    fontSize: 12.5, color: '#1A2E40', outline: 'none', width: '100%', boxSizing: 'border-box',
-    fontFamily: "'SF Mono','Fira Code',monospace", resize: 'vertical',
   },
   checkboxRow: { display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, fontWeight: 500, color: '#334155', cursor: 'pointer' },
 

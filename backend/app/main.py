@@ -4061,8 +4061,8 @@ async def delete_mail_server(
 
 class SendTestEmailRequest(BaseModel):
     server_id:  Optional[int] = None
-    from_email: str = Field(..., min_length=1, max_length=254)
-    to_email:   str = Field(..., min_length=1, max_length=254)
+    from_email: str = Field(..., min_length=1, max_length=254, pattern=_EMAIL_REGEX)
+    to_email:   str = Field(..., min_length=1, max_length=254, pattern=_EMAIL_REGEX)
     subject:    str = Field("EDAPT Test Email", max_length=255)
     # HTML content — the frontend's Send Test Email form is an HTML field,
     # not a plain-text one (unlike the OTP email, which stays plain text).

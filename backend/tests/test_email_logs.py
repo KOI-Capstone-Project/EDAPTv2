@@ -98,6 +98,29 @@ async def test_send_test_email_logs_failure_with_real_reason():
 
 
 @pytest.mark.asyncio
+async def test_send_test_email_rejects_malformed_from_and_to_addresses():
+    """SendTestEmailRequest previously accepted any non-empty string for
+    from_email/to_email — a typo'd address would only surface later as an
+    opaque SMTP failure. Both fields must now match the same email pattern
+    every other email field in this app validates against (_EMAIL_REGEX)."""
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        token = await _login(client, "admin", "Admin@2025!")
+        headers = {"Authorization": f"Bearer {token}"}
+
+        r1 = await client.post(
+            "/api/mail-servers/send-test-email", headers=headers,
+            json={"from_email": "not-an-email", "to_email": "recipient@example.com", "body": "<p>hi</p>"},
+        )
+        assert r1.status_code == 422
+
+        r2 = await client.post(
+            "/api/mail-servers/send-test-email", headers=headers,
+            json={"from_email": "sender@example.com", "to_email": "nope", "body": "<p>hi</p>"},
+        )
+        assert r2.status_code == 422
+
+
+@pytest.mark.asyncio
 async def test_send_test_email_requires_a_configured_server():
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         token = await _login(client, "admin", "Admin@2025!")
