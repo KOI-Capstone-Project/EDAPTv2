@@ -1,5 +1,5 @@
 // Role-aware navigation sidebar with user avatar, nav links, and logout button.
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { NavLink, useLocation } from 'react-router-dom';
 import { getUser, getUserName, getUserInitials } from '../utils/auth';
 import { INGEST_LAST_SEEN_KEY, INGEST_JOBS_SEEN_EVENT } from '../utils/ingestNotifications';
@@ -263,8 +263,33 @@ export default function Sidebar() {
 
   const initials = getUserInitials();
 
+  // Cursor-follow spotlight (the soft glow-that-tracks-your-mouse effect
+  // popular on AI product sites, e.g. claude.ai's own marketing pages) —
+  // written straight to the DOM via CSS custom properties on every
+  // mousemove instead of React state, since state would re-render the
+  // whole sidebar (nav tree, badges, everything) dozens of times a second
+  // just to move a glow.
+  const spotlightRef = useRef(null);
+  const handleSpotlightMove = (e) => {
+    const el = spotlightRef.current;
+    if (!el) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    el.style.setProperty('--mx', `${e.clientX - rect.left}px`);
+    el.style.setProperty('--my', `${e.clientY - rect.top}px`);
+  };
+
   return (
-    <aside style={{ ...s.sidebar, width: collapsed ? 64 : 220, minWidth: collapsed ? 64 : 220 }}>
+    <aside
+      className="sb-root"
+      style={{ ...s.sidebar, width: collapsed ? 64 : 220, minWidth: collapsed ? 64 : 220 }}
+      onMouseMove={handleSpotlightMove}
+    >
+      {/* Purely decorative glow — subtle depth behind the brand mark, clipped
+          by the sidebar's own overflow:hidden so it never bleeds into content. */}
+      <div style={s.glowBlob} aria-hidden="true" />
+      {/* Spotlight that follows the cursor while it's over the sidebar —
+          fades in/out via the .sb-root:hover rule in the <style> block below. */}
+      <div ref={spotlightRef} className="sb-spotlight" aria-hidden="true" />
 
       {/* ── Brand ──────────────────────────────────────────────────── */}
       <div style={{
@@ -280,24 +305,26 @@ export default function Sidebar() {
         )}
         <button
           onClick={() => setCollapsed(c => !c)}
-          style={s.toggleBtn}
+          className="sb-toggle"
+          style={{ ...s.toggleBtn, transform: collapsed ? 'rotate(180deg)' : 'rotate(0deg)' }}
           title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
         >
-          {collapsed ? <I.ChevronRight /> : <I.ChevronLeft />}
+          <I.ChevronLeft />
         </button>
       </div>
 
       {/* ── Navigation ─────────────────────────────────────────────── */}
       <nav style={s.nav}>
-        {navItems.map(item => {
+        {navItems.map((item, itemIndex) => {
           if (item.children) {
             const isOpen = !!openGroups[item.label];
             const groupActive = isChildActive(item.children);
             return (
-              <div key={item.label}>
+              <div key={item.label} style={{ animation: 'sbItemIn 0.3s ease both', animationDelay: `${itemIndex * 0.04}s` }}>
                 <button
                   type="button"
                   onClick={() => toggleGroup(item.label)}
+                  className="sb-item"
                   style={{
                     ...s.item, ...s.groupHeader,
                     ...(groupActive && !isOpen ? s.itemActive : {}),
@@ -306,6 +333,7 @@ export default function Sidebar() {
                   }}
                   title={collapsed ? item.label : undefined}
                 >
+                  {groupActive && !isOpen && <span style={s.activeBar} />}
                   <span style={s.icon}>{item.icon}</span>
                   {!collapsed && <span style={{ flex: 1, textAlign: 'left', animation: 'sidebarLabelIn 0.18s ease' }}>{item.label}</span>}
                   {!collapsed && (
@@ -326,11 +354,13 @@ export default function Sidebar() {
                             <button
                               type="button"
                               onClick={() => toggleGroup(child.label)}
+                              className="sb-item"
                               style={{
                                 ...s.item, ...s.subItem, ...s.groupHeader,
                                 ...(isChildActive(child.children) && !openGroups[child.label] ? s.itemActive : {}),
                               }}
                             >
+                              {isChildActive(child.children) && !openGroups[child.label] && <span style={s.activeBar} />}
                               <span style={s.icon}>{child.icon}</span>
                               <span style={{ flex: 1, textAlign: 'left' }}>{child.label}</span>
                               <span style={{
@@ -354,13 +384,19 @@ export default function Sidebar() {
                                     <NavLink
                                       key={grandchild.to}
                                       to={grandchild.to}
+                                      className="sb-item"
                                       style={({ isActive }) => ({
                                         ...s.item, ...s.subItem,
                                         ...(isActive ? s.itemActive : {}),
                                       })}
                                     >
-                                      <span style={s.icon}>{grandchild.icon}</span>
-                                      {grandchild.label}
+                                      {({ isActive }) => (
+                                        <>
+                                          {isActive && <span style={s.activeBar} />}
+                                          <span style={s.icon}>{grandchild.icon}</span>
+                                          {grandchild.label}
+                                        </>
+                                      )}
                                     </NavLink>
                                   ))}
                                 </div>
@@ -371,13 +407,19 @@ export default function Sidebar() {
                           <NavLink
                             key={child.to}
                             to={child.to}
+                            className="sb-item"
                             style={({ isActive }) => ({
                               ...s.item, ...s.subItem,
                               ...(isActive ? s.itemActive : {}),
                             })}
                           >
-                            <span style={s.icon}>{child.icon}</span>
-                            {child.label}
+                            {({ isActive }) => (
+                              <>
+                                {isActive && <span style={s.activeBar} />}
+                                <span style={s.icon}>{child.icon}</span>
+                                {child.label}
+                              </>
+                            )}
                           </NavLink>
                         ))}
                       </div>
@@ -394,26 +436,41 @@ export default function Sidebar() {
             <NavLink
               key={to}
               to={to}
+              className="sb-item"
               style={({ isActive }) => ({
                 ...s.item,
                 ...(isActive ? s.itemActive : {}),
                 justifyContent: collapsed ? 'center' : 'flex-start',
                 padding: collapsed ? '10px 0' : '12px 20px',
                 position: 'relative',
+                animation: 'sbItemIn 0.3s ease both',
+                animationDelay: `${itemIndex * 0.04}s`,
               })}
               title={collapsed ? `${label} (${ingestBadge.count} new)` : undefined}
             >
-              <span style={{ ...s.icon, position: 'relative' }}>
-                {icon}
-                {showBadge && collapsed && (
-                  <span style={{ ...s.navBadge, ...s.navBadgeCollapsed, ...(ingestBadge.hasFailure ? s.navBadgeFailure : {}) }} />
-                )}
-              </span>
-              {!collapsed && <span style={{ animation: 'sidebarLabelIn 0.18s ease' }}>{label}</span>}
-              {!collapsed && showBadge && (
-                <span style={{ ...s.navBadge, ...(ingestBadge.hasFailure ? s.navBadgeFailure : {}) }}>
-                  {ingestBadge.count}
-                </span>
+              {({ isActive }) => (
+                <>
+                  {isActive && <span style={s.activeBar} />}
+                  <span style={{ ...s.icon, position: 'relative' }}>
+                    {icon}
+                    {showBadge && collapsed && (
+                      <span style={{
+                        ...s.navBadge, ...s.navBadgeCollapsed,
+                        ...(ingestBadge.hasFailure ? s.navBadgeFailure : {}),
+                        animation: 'sbBadgePulse 1.8s ease-out infinite',
+                      }} />
+                    )}
+                  </span>
+                  {!collapsed && <span style={{ animation: 'sidebarLabelIn 0.18s ease' }}>{label}</span>}
+                  {!collapsed && showBadge && (
+                    <span style={{
+                      ...s.navBadge, ...(ingestBadge.hasFailure ? s.navBadgeFailure : {}),
+                      animation: 'sbBadgePulse 1.8s ease-out infinite',
+                    }}>
+                      {ingestBadge.count}
+                    </span>
+                  )}
+                </>
               )}
             </NavLink>
           );
@@ -427,8 +484,9 @@ export default function Sidebar() {
         alignItems: collapsed ? 'center' : 'flex-start',
       }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: collapsed ? 0 : 12 }}>
-          <div style={s.userAvatar} title={collapsed ? getUserName() : undefined}>
-            {initials}
+          <div style={s.userAvatarWrap} title={collapsed ? getUserName() : undefined}>
+            <div style={s.userAvatar}>{initials}</div>
+            <span style={s.onlineDot} />
           </div>
           {!collapsed && (
             <div style={{ animation: 'sidebarLabelIn 0.18s ease' }}>
@@ -439,13 +497,13 @@ export default function Sidebar() {
         </div>
 
         {!collapsed && (
-          <button onClick={handleLogout} style={{ ...s.logoutBtn, animation: 'sidebarLabelIn 0.18s ease' }}>
+          <button onClick={handleLogout} className="sb-logout" style={{ ...s.logoutBtn, animation: 'sidebarLabelIn 0.18s ease' }}>
             <I.Logout />
             <span>Sign Out</span>
           </button>
         )}
         {collapsed && (
-          <button onClick={handleLogout} style={{ ...s.logoutBtnCollapsed }} title="Sign Out">
+          <button onClick={handleLogout} className="sb-logout" style={{ ...s.logoutBtnCollapsed }} title="Sign Out">
             <I.Logout />
           </button>
         )}
@@ -456,6 +514,39 @@ export default function Sidebar() {
           from { opacity: 0; transform: translateX(-4px); }
           to   { opacity: 1; transform: translateX(0); }
         }
+        @keyframes sbItemIn {
+          from { opacity: 0; transform: translateX(-6px); }
+          to   { opacity: 1; transform: translateX(0); }
+        }
+        @keyframes sbLogoGlow {
+          0%, 100% { box-shadow: 0 0 0 0 rgba(74, 155, 196, 0.45); }
+          50%      { box-shadow: 0 0 16px 2px rgba(74, 155, 196, 0.45); }
+        }
+        @keyframes sbBadgePulse {
+          0%   { box-shadow: 0 0 0 0 rgba(220, 38, 38, 0.55); }
+          70%  { box-shadow: 0 0 0 6px rgba(220, 38, 38, 0); }
+          100% { box-shadow: 0 0 0 0 rgba(220, 38, 38, 0); }
+        }
+        @keyframes sbGlowDrift {
+          0%, 100% { transform: translate(0, 0) scale(1); }
+          50%      { transform: translate(6px, 10px) scale(1.08); }
+        }
+        .sb-spotlight {
+          position: absolute; inset: 0; z-index: 0; pointer-events: none;
+          opacity: 0; transition: opacity 0.4s ease;
+          background: radial-gradient(480px circle at var(--mx, 50%) var(--my, 0%),
+            rgba(143, 211, 255, 0.10), transparent 55%);
+        }
+        .sb-root:hover .sb-spotlight { opacity: 1; }
+
+        .sb-item:hover { background: rgba(255, 255, 255, 0.07); transform: translateX(3px) translateY(-1px); box-shadow: 0 4px 10px rgba(0,0,0,0.18); }
+        .sb-item { transition: background 0.2s cubic-bezier(0.34, 1.56, 0.64, 1), transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1), color 0.15s ease, box-shadow 0.2s ease; }
+        .sb-item svg { transition: transform 0.25s cubic-bezier(0.34, 1.56, 0.64, 1); }
+        .sb-item:hover svg { transform: scale(1.15) rotate(-4deg); }
+        .sb-toggle { transition: background 0.15s ease, transform 0.25s cubic-bezier(0.4, 0, 0.2, 1); }
+        .sb-toggle:hover { background: rgba(255, 255, 255, 0.08); color: #CBD5E1; }
+        .sb-logout { transition: background 0.15s ease, color 0.15s ease, transform 0.15s ease; }
+        .sb-logout:hover { background: rgba(220, 38, 38, 0.12); color: #F87171; transform: translateX(2px); }
       `}</style>
     </aside>
   );
@@ -463,24 +554,34 @@ export default function Sidebar() {
 
 const s = {
   sidebar: {
-    background: '#1A2E40',
+    background: 'linear-gradient(180deg, #1D3347 0%, #17293A 60%, #142430 100%)',
     display: 'flex', flexDirection: 'column',
-    boxSizing: 'border-box',
+    boxSizing: 'border-box', position: 'relative',
     transition: 'width 0.25s cubic-bezier(0.4, 0, 0.2, 1), min-width 0.25s cubic-bezier(0.4, 0, 0.2, 1)',
     overflow: 'hidden', flexShrink: 0,
     height: '100vh',
+    boxShadow: '2px 0 12px rgba(0,0,0,0.15)',
+  },
+  // Soft, slow-drifting radial glow behind the brand mark — purely
+  // decorative, clipped by the sidebar's own overflow:hidden.
+  glowBlob: {
+    position: 'absolute', top: -60, left: -40, width: 200, height: 200,
+    borderRadius: '50%', pointerEvents: 'none', zIndex: 0,
+    background: 'radial-gradient(circle, rgba(74,155,196,0.25) 0%, rgba(74,155,196,0) 70%)',
+    animation: 'sbGlowDrift 8s ease-in-out infinite',
   },
   logo: {
     display: 'flex', alignItems: 'center',
     borderBottom: '0.5px solid rgba(255,255,255,0.08)',
     padding: '24px 20px 20px',
-    marginBottom: 8,
+    marginBottom: 8, position: 'relative', zIndex: 1,
   },
   logoIcon: {
     width: 30, height: 30, borderRadius: 7, flexShrink: 0,
-    background: '#2E6E8E',
+    background: 'linear-gradient(135deg, #2E6E8E 0%, #4A9BC4 100%)',
     display: 'flex', alignItems: 'center', justifyContent: 'center',
     fontWeight: 800, fontSize: 15, color: '#fff',
+    animation: 'sbLogoGlow 3.5s ease-in-out infinite',
   },
   logoText: {
     fontSize: 14, fontWeight: 700, color: '#fff',
@@ -491,14 +592,18 @@ const s = {
     color: '#4A6880', display: 'flex', alignItems: 'center',
     padding: 4, borderRadius: 6, flexShrink: 0,
   },
-  nav: { flex: 1, display: 'flex', flexDirection: 'column', gap: 2, padding: '4px 8px', overflowY: 'auto' },
+  nav: { flex: 1, display: 'flex', flexDirection: 'column', gap: 2, padding: '4px 8px', overflowY: 'auto', position: 'relative', zIndex: 1 },
   item: {
     display: 'flex', alignItems: 'center', gap: 10,
     borderRadius: 8, fontSize: 13, fontWeight: 500,
-    color: '#8BA5B8', textDecoration: 'none',
-    transition: 'background 0.15s, color 0.15s', whiteSpace: 'nowrap',
+    color: '#8BA5B8', textDecoration: 'none', position: 'relative',
+    whiteSpace: 'nowrap',
   },
-  itemActive: { background: '#2E6E8E', color: '#fff' },
+  itemActive: { background: 'linear-gradient(90deg, #2E6E8E 0%, #2C6280 100%)', color: '#fff', boxShadow: '0 2px 8px rgba(46,110,142,0.35)' },
+  activeBar: {
+    position: 'absolute', left: -8, top: '50%', transform: 'translateY(-50%)',
+    width: 3, height: '60%', borderRadius: 3, background: '#8FD3FF',
+  },
   icon: { display: 'flex', alignItems: 'center', flexShrink: 0 },
   groupHeader: {
     width: '100%', border: 'none', background: 'none', cursor: 'pointer',
@@ -519,13 +624,18 @@ const s = {
   bottomSection: {
     display: 'flex', flexDirection: 'column',
     borderTop: '0.5px solid #2E4A60',
-    marginTop: 'auto',
+    marginTop: 'auto', position: 'relative', zIndex: 1,
   },
+  userAvatarWrap: { position: 'relative', flexShrink: 0, display: 'flex' },
   userAvatar: {
     width: 36, height: 36, borderRadius: '50%', flexShrink: 0,
-    background: '#2E6E8E',
+    background: 'linear-gradient(135deg, #2E6E8E 0%, #4A9BC4 100%)',
     display: 'flex', alignItems: 'center', justifyContent: 'center',
     fontSize: 13, fontWeight: 600, color: '#fff',
+  },
+  onlineDot: {
+    position: 'absolute', bottom: -1, right: -1, width: 10, height: 10,
+    borderRadius: '50%', background: '#22C55E', border: '2px solid #17293A',
   },
   userName: { fontSize: 13, fontWeight: 600, color: '#CBD5E1', whiteSpace: 'nowrap' },
   userRole: { fontSize: 11, color: '#4A6880', marginTop: 2, whiteSpace: 'nowrap' },
