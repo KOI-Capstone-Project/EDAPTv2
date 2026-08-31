@@ -57,6 +57,11 @@ export default function OAuthButtons({ onSuccess, onError, disabled }) {
       await exchangeToken('/api/auth/microsoft', result.idToken);
     } catch (err) {
       if (err?.errorCode !== 'user_cancelled') {
+        // MSAL errors (redirect URI mismatch, popup blocked, consent
+        // required, wrong tenant, etc.) carry the real reason in
+        // errorCode/errorMessage — the banner only ever shows a generic
+        // fallback, so this is the only place that detail is visible.
+        console.error('[Microsoft sign-in]', err?.errorCode, err?.errorMessage || err);
         onError(getErrorMessage(err, 'Microsoft sign-in failed. Please try again.'));
       }
     } finally {
@@ -91,8 +96,8 @@ export default function OAuthButtons({ onSuccess, onError, disabled }) {
             onClick={handleMicrosoft}
             disabled={disabled || msLoading}
           >
-            <MicrosoftIcon />
-            {msLoading ? 'Signing in…' : 'Sign in with Microsoft'}
+            <span style={s.msIconSlot}><MicrosoftIcon /></span>
+            <span style={s.msLabel}>{msLoading ? 'Signing in…' : 'Sign in with Microsoft'}</span>
           </button>
         )}
       </div>
@@ -111,11 +116,19 @@ const s = {
   dividerText: { fontSize: 11, color: '#94A3B8', whiteSpace: 'nowrap' },
   row: { display: 'flex', flexDirection: 'column', gap: 10, alignItems: 'stretch' },
   googleWrap: { display: 'flex', justifyContent: 'center' },
+  // Icon pinned in a fixed-width left slot, label centered in the
+  // remaining space — matches how Google's own rendered button (theme
+  //="outline", size="large") lays itself out, so the two logos land at
+  // the same spot regardless of each label's text length, instead of each
+  // icon+text pair being centered as one group (which shifts the icon
+  // sideways whenever the label is a different length).
   msBtn: {
-    display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10,
-    width: '100%', padding: '10px 14px',
-    background: '#fff', border: '1.5px solid #E2E8F0', borderRadius: 8,
-    fontSize: 14, fontWeight: 500, color: '#1E293B',
+    display: 'flex', alignItems: 'center',
+    width: '100%', height: 40, padding: '0 12px',
+    background: '#fff', border: '1px solid #dadce0', borderRadius: 8,
+    fontSize: 14, fontWeight: 500, color: '#3c4043',
     cursor: 'pointer', boxSizing: 'border-box',
   },
+  msIconSlot: { display: 'flex', alignItems: 'center', justifyContent: 'center', width: 20, flexShrink: 0 },
+  msLabel: { flex: 1, textAlign: 'center', paddingRight: 20 },
 };

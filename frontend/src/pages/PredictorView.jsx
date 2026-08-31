@@ -495,6 +495,7 @@ export default function PredictorView({ isAdmin }) {
   const [studyPeriod, setStudyPeriod] = useState(() => searchParams.get('period') || '');
   const [studentIdParam, setStudentIdParam] = useState(() => searchParams.get('student') || null);
   const [periods,     setPeriods]     = useState([]);
+  const [subjectPeriods, setSubjectPeriods] = useState({});
 
   // view: 'roster' (default) | 'detail' (a real student clicked) | 'whatif' (hypothetical scenario)
   const [view, setView] = useState('roster');
@@ -537,10 +538,27 @@ export default function PredictorView({ isAdmin }) {
     api.get('/api/filters')
       .then(r => {
         setPeriods(r.data.periods || []);
+        setSubjectPeriods(r.data.subject_periods || {});
         if (isAdmin) setAllSubjects(r.data.subjects || []);
       })
       .catch(() => {});
   }, [isAdmin]);
+
+  // A period valid for one subject is often not valid for another — a
+  // subject only ran in a handful of periods, while `periods` is the union
+  // across every subject. Restrict the dropdown to this subject's own
+  // periods so picking an available option can't 404 the roster, and drop
+  // a now-invalid selection when the subject changes.
+  const periodOptions = subject ? (subjectPeriods[subject] || []) : periods;
+  useEffect(() => {
+    // subjectPeriods[subject] is undefined until /api/filters resolves (or
+    // for a subject not in the map at all) — don't clear a deep-linked
+    // ?period= before we've actually confirmed it's invalid.
+    const validForSubject = subject ? subjectPeriods[subject] : undefined;
+    if (subject && studyPeriod && validForSubject && !validForSubject.includes(studyPeriod)) {
+      setStudyPeriod('');
+    }
+  }, [subject, studyPeriod, subjectPeriods]);
 
   // Reset everything downstream of subject/period and load the roster.
   useEffect(() => {
@@ -563,9 +581,20 @@ export default function PredictorView({ isAdmin }) {
 
     if (!subject || !studyPeriod) return;
 
+    // Guards against a stale response clobbering a newer one — React 18
+    // StrictMode (see index.js) double-fires this effect in dev, firing two
+    // requests for the same subject/period; without this, if the first
+    // invocation's request happens to resolve AFTER the second one's, its
+    // outcome (error or otherwise) wins even though it's for a request this
+    // effect has already superseded. Same real bug DataIngestion.jsx's
+    // mountedRef comment documents — confirmed live: the error banner and a
+    // fully-populated roster table showing at once, from the two requests
+    // resolving out of order.
+    let ignore = false;
     setRosterLoading(true);
     api.get(`/api/subjects/${encodeURIComponent(subject)}/roster?study_period=${encodeURIComponent(studyPeriod)}`)
       .then(r => {
+        if (ignore) return;
         if (r.data.prediction_available === false) {
           setPredictionUnavailable(true);
           setUnavailableMessage(r.data.message || '');
@@ -578,8 +607,13 @@ export default function PredictorView({ isAdmin }) {
         });
         setReliabilityWarning(r.data.reliability_warning || null);
       })
-      .catch(() => setRosterError('Failed to load the roster for this subject and period. Please try again.'))
-      .finally(() => setRosterLoading(false));
+      .catch(() => {
+        if (!ignore) setRosterError('Failed to load the roster for this subject and period. Please try again.');
+      })
+      .finally(() => {
+        if (!ignore) setRosterLoading(false);
+      });
+    return () => { ignore = true; };
   }, [subject, studyPeriod]);
 
   const filteredRoster = roster.filter(r =>
@@ -934,7 +968,7 @@ export default function PredictorView({ isAdmin }) {
               <label style={s.label}>Study Period <span style={{ color: '#DC2626' }}>*</span></label>
               <select style={s.select} value={studyPeriod} onChange={e => setStudyPeriod(e.target.value)}>
                 <option value="">Select period…</option>
-                {periods.map(p => <option key={p} value={p}>{p}</option>)}
+                {periodOptions.map(p => <option key={p} value={p}>{p}</option>)}
               </select>
             </div>
 

@@ -86,11 +86,19 @@ export default function RichTextEditor({ value, onChange, minHeight = 170, place
         <button type="button" style={{ ...s.btn, fontStyle: 'italic' }} onMouseDown={noFocusSteal} onClick={() => exec('italic')} title="Italic">I</button>
         <button type="button" style={{ ...s.btn, textDecoration: 'underline' }} onMouseDown={noFocusSteal} onClick={() => exec('underline')} title="Underline">U</button>
         <span style={s.sep} />
-        <select style={s.select} defaultValue="" onMouseDown={noFocusSteal} onChange={handleSelectCommand('fontSize')} disabled={showCode}>
+        <select
+          style={{ ...s.select, ...(showCode ? s.selectDisabled : {}) }}
+          defaultValue="" onChange={handleSelectCommand('fontSize')}
+          disabled={showCode} title={showCode ? 'Switch to Rich Text to change font size' : 'Font size'}
+        >
           <option value="" disabled>Font Size</option>
           {FONT_SIZES.map(f => <option key={f.value} value={f.value}>{f.label}</option>)}
         </select>
-        <select style={s.select} defaultValue="" onMouseDown={noFocusSteal} onChange={handleSelectCommand('formatBlock')} disabled={showCode}>
+        <select
+          style={{ ...s.select, ...(showCode ? s.selectDisabled : {}) }}
+          defaultValue="" onChange={handleSelectCommand('formatBlock')}
+          disabled={showCode} title={showCode ? 'Switch to Rich Text to change paragraph style' : 'Paragraph style'}
+        >
           <option value="" disabled>Paragraph</option>
           {BLOCK_FORMATS.map(f => <option key={f.value} value={f.value}>{f.label}</option>)}
         </select>
@@ -109,7 +117,16 @@ export default function RichTextEditor({ value, onChange, minHeight = 170, place
         <button
           type="button"
           style={{ ...s.btn, ...(showCode ? s.btnActive : {}) }}
-          onClick={() => setShowCode(sc => !sc)}
+          onClick={() => setShowCode(sc => {
+            // Returning to Rich Text mounts a brand-new, empty contentEditable
+            // div (it's conditionally rendered, not the same DOM node kept
+            // around) — resetting domHtmlRef here forces the sync effect's
+            // value !== domHtmlRef.current check to fire and actually fill
+            // it back in, instead of wrongly concluding nothing changed and
+            // leaving the fresh div empty.
+            if (sc) domHtmlRef.current = null;
+            return !sc;
+          })}
         >
           {showCode ? 'Rich Text' : 'HTML Code'}
         </button>
@@ -153,6 +170,7 @@ const s = {
     height: 28, padding: '0 6px', borderRadius: 6, border: '0.5px solid #DDE4EA',
     background: '#fff', fontSize: 12, color: '#1E293B', cursor: 'pointer',
   },
+  selectDisabled: { background: '#F1F5F9', color: '#94A3B8', cursor: 'not-allowed' },
   editor: {
     padding: '10px 12px', fontSize: 13, color: '#1E293B',
     outline: 'none', overflowY: 'auto', maxHeight: 360,
