@@ -5295,6 +5295,44 @@ def _extract_study_period_from_question(question: str) -> Optional[str]:
     return match.group(1) if match else None
 
 
+# Real subject codes look like 2-4 letters + 2-4 digits (ACC100, ICT104,
+# MBA901, ...) — matched against _DATA's own SUBJECTCODE values below
+# rather than trusting this pattern alone, so a random word that happens
+# to fit the shape (or a subject that isn't real) never triggers this.
+_SUBJECT_CODE_PATTERN = re.compile(r"\b([A-Za-z]{2,4}\d{2,4})\b")
+
+
+def _mentions_out_of_scope_subject(question: str, user: dict) -> Optional[str]:
+    """If the question names a real subject this system tracks that the
+    requesting user isn't assigned to, return that subject code so
+    chatbot_ask can refuse deterministically — a hard, code-level check
+    rather than relying on the model to always honor the "only answer
+    from the JSON context given below, never outside knowledge" line in
+    its own prompt. Every context builder above already SCOPES what DATA
+    the model sees to this user's subjects (so it was never possible to
+    leak a real number for a subject a lecturer can't see), but the
+    subject NAME the lecturer typed was still sent to the model as part
+    of their own question either way — a prompt instruction is a strong
+    steer, confirmed to hold up against direct asks and "ignore your
+    instructions" attempts in testing, but it is still the model's
+    choice each time, not a guarantee. This makes the answer for a named
+    out-of-scope subject the same every time, with no model call (and
+    no token cost) needed at all.
+
+    is_admin users have institution-wide visibility already (nothing to
+    gate), so this only ever applies to a lecturer's own assigned list."""
+    is_admin = user.get("role") in {"Head of Technology", "Head of School"}
+    if is_admin or _DATA is None or _DATA.empty or "SUBJECTCODE" not in _DATA.columns:
+        return None
+    allowed = set(user.get("subjects", []))
+    all_codes = set(_DATA["SUBJECTCODE"].dropna().unique().tolist())
+    for raw in _SUBJECT_CODE_PATTERN.findall(question):
+        code = raw.upper()
+        if code in all_codes and code not in allowed:
+            return code
+    return None
+
+
 async def _chatbot_risk_context(study_period: str, user: dict, db: AsyncSession) -> dict:
     """Per-subject risk-band counts for one study period, scoped to what
     this user can see — read straight from the Predictions table (upserted
@@ -5613,6 +5651,21 @@ async def chatbot_ask(
             "answer": "No data has been ingested into the system yet, so I have nothing to answer from.",
             "tokens_used": 0, "study_period_used": None,
         }
+
+    out_of_scope_subject = _mentions_out_of_scope_subject(req.question, user)
+    if out_of_scope_subject:
+        allowed = sorted(user.get("subjects", []))
+        answer = (
+            f"You're not assigned to {out_of_scope_subject}, so I can't answer questions about it. "
+            + (f"You can ask me about: {', '.join(allowed)}." if allowed
+               else "You don't currently have any subjects assigned.")
+        )
+        db.add(ChatLog(
+            user_uid=user["sub"], question=req.question, answer=answer,
+            study_period_used=None, model=None, tokens_used=0,
+        ))
+        await db.commit()
+        return {"answer": answer, "tokens_used": 0, "model": None, "study_period_used": None}
 
     study_period = (
         _extract_study_period_from_question(req.question)

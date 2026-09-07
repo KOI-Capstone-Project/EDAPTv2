@@ -364,6 +364,75 @@ async def test_chatbot_subject_comparison_covers_every_visible_subject(monkeypat
 
 
 @pytest.mark.asyncio
+async def test_chatbot_blocks_a_lecturer_asking_about_an_out_of_scope_subject(monkeypatch):
+    """A lecturer naming a real subject they aren't assigned to must be
+    refused deterministically, with NO call to the AI model at all — not
+    just left to the model's own "only answer from context" instruction,
+    which is a strong steer but not a hard guarantee. ACC100 is a real
+    subject (present in _DATA) that the test lecturer (subjects: ICT104,
+    ICT201, ICT301) is not assigned to."""
+    synthetic = _synthetic_marks_df([
+        ("S1", "ICT104", TEST_PERIOD, 90.0),
+        ("S2", "ACC100", TEST_PERIOD, 50.0),
+    ])
+    original_data = main_mod._DATA
+    main_mod._DATA = synthetic
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            token = await _login(client, "user", "Lect@2025!")  # subjects: ICT104, ICT201, ICT301
+            headers = {"Authorization": f"Bearer {token}"}
+
+            ai_called = {"value": False}
+
+            async def _fake_ai_call(prompt):
+                ai_called["value"] = True
+                return "ok", 1
+
+            monkeypatch.setattr(main_mod, "_ai_call", _fake_ai_call)
+
+            # Out-of-scope subject named directly: blocked, no model call.
+            r1 = await client.post(
+                "/api/chatbot/ask", headers=headers,
+                json={"question": "What is the average mark for ACC100?", "study_period": TEST_PERIOD},
+            )
+            assert r1.status_code == 200
+            body1 = r1.json()
+            assert "ACC100" in body1["answer"]
+            assert "ICT104" in body1["answer"]  # tells them what they CAN ask about
+            assert body1["tokens_used"] == 0
+            assert body1["model"] is None
+            assert ai_called["value"] is False
+
+            # Out-of-scope subject named alongside an in-scope one: still blocked.
+            r2 = await client.post(
+                "/api/chatbot/ask", headers=headers,
+                json={"question": "Compare ICT104 and ACC100", "study_period": TEST_PERIOD},
+            )
+            assert r2.status_code == 200
+            assert ai_called["value"] is False
+
+            # The lecturer's own subject: proceeds normally, model IS called.
+            r3 = await client.post(
+                "/api/chatbot/ask", headers=headers,
+                json={"question": "What is the average mark for ICT104?", "study_period": TEST_PERIOD},
+            )
+            assert r3.status_code == 200
+            assert ai_called["value"] is True
+
+            # An admin asking about the same subject is never blocked.
+            ai_called["value"] = False
+            admin_token = await _login(client, "admin", "Admin@2025!")
+            r4 = await client.post(
+                "/api/chatbot/ask", headers={"Authorization": f"Bearer {admin_token}"},
+                json={"question": "What is the average mark for ACC100?", "study_period": TEST_PERIOD},
+            )
+            assert r4.status_code == 200
+            assert ai_called["value"] is True
+    finally:
+        main_mod._DATA = original_data
+
+
+@pytest.mark.asyncio
 async def test_chatbot_uses_the_study_period_named_in_the_question(monkeypatch):
     """Real bug, confirmed live: AIChatbox.jsx never sends study_period at
     all, so every question was always answered using only the LATEST
