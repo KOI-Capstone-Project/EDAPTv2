@@ -53,7 +53,15 @@ export default function SettingsView({ isLecturer }) {
       const blob = await resizeImageToBlob(file);
       const formData = new FormData();
       formData.append('file', blob, 'photo.jpg');
-      await api.post('/api/users/me/photo', formData);
+      // The shared api client hardcodes Content-Type: application/json as
+      // a default header on every request (api/client.js) — left in place
+      // here, it overrides the multipart/form-data; boundary=... header a
+      // FormData body needs, so the backend never sees a real multipart
+      // body and reports "file" as a missing field. Setting it to
+      // undefined here (not omitting it) is what actually removes it from
+      // the merged request headers, letting axios/the browser compute the
+      // correct boundary automatically.
+      await api.post('/api/users/me/photo', formData, { headers: { 'Content-Type': undefined } });
       setPhotoSrc(URL.createObjectURL(blob));
     } catch (err) {
       setPhotoError(getErrorMessage(err, 'Failed to update photo.'));
