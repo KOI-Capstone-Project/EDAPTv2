@@ -7,7 +7,7 @@ import {
 import api from '../services/api';
 import { getUserName } from '../utils/auth';
 import {
-  DashboardKeyframes, KpiCard, ChartCard, NoData, ChartGradients, CustomTooltip, COLOR,
+  DashboardKeyframes, KpiCard, ChartCard, NoData, chartGradientDefs, CustomTooltip, COLOR,
   gradUrl, useChartGradUid,
 } from '../components/DashboardKit';
 
@@ -318,7 +318,7 @@ export default function AdminDashboard() {
           {gradeDist.length === 0 ? <NoData /> : (
             <ResponsiveContainer width="100%" height={280}>
               <BarChart data={gradeDist} margin={{ top: 4, right: 12, left: 0, bottom: 0 }}>
-                <ChartGradients uid={gid(0)} />
+                {chartGradientDefs(gid(0))}
                 <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" vertical={false} />
                 <XAxis dataKey="band" tick={{ fontSize: 11 }} axisLine={{ stroke: '#E2E8F0' }} tickLine={false} />
                 <YAxis tick={{ fontSize: 11 }} axisLine={false} tickLine={false} />
@@ -338,7 +338,7 @@ export default function AdminDashboard() {
           {trendData.every(d => d.institution_avg === null) ? <NoData /> : (
             <ResponsiveContainer width="100%" height={280}>
               <AreaChart data={trendData} margin={{ top: 4, right: 12, left: 0, bottom: 0 }}>
-                <ChartGradients uid={gid(1)} />
+                {chartGradientDefs(gid(1))}
                 <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" vertical={false} />
                 <XAxis dataKey="period" type="category" tick={{ fontSize: 11 }} axisLine={{ stroke: '#E2E8F0' }} tickLine={false} />
                 <YAxis domain={[0, 100]} unit="%" tick={{ fontSize: 11 }} axisLine={false} tickLine={false} />
@@ -360,7 +360,7 @@ export default function AdminDashboard() {
           {assessment.length === 0 ? <NoData /> : (
             <ResponsiveContainer width="100%" height={280}>
               <BarChart data={assessment} margin={{ top: 4, right: 12, left: 0, bottom: 0 }}>
-                <ChartGradients uid={gid(2)} />
+                {chartGradientDefs(gid(2))}
                 <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" vertical={false} />
                 <XAxis dataKey="type" tick={{ fontSize: 11 }} axisLine={{ stroke: '#E2E8F0' }} tickLine={false} />
                 <YAxis domain={[0, 100]} unit="%" tick={{ fontSize: 11 }} axisLine={false} tickLine={false} />
@@ -376,7 +376,7 @@ export default function AdminDashboard() {
           {!passFail || (passFail.pass_count === 0 && passFail.fail_count === 0) ? <NoData /> : (
             <ResponsiveContainer width="100%" height={280}>
               <PieChart>
-                <ChartGradients uid={gid(3)} />
+                {chartGradientDefs(gid(3))}
                 <Pie
                   data={[{ name: 'Pass', value: passFail.pass_count }, { name: 'Fail', value: passFail.fail_count }]}
                   innerRadius="38%" outerRadius="62%" paddingAngle={3} cornerRadius={6}
@@ -399,7 +399,7 @@ export default function AdminDashboard() {
             <div style={{ overflowY: 'auto', maxHeight: 320 }}>
               <ResponsiveContainer width="100%" height={Math.max(260, intl.length * 22)}>
                 <BarChart layout="vertical" data={intl} margin={{ top: 4, right: 40, left: 0, bottom: 0 }}>
-                  <ChartGradients uid={gid(4)} />
+                  {chartGradientDefs(gid(4))}
                   <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" horizontal={false} />
                   <XAxis type="number" domain={[0, 100]} unit="%" tick={{ fontSize: 10 }} axisLine={false} tickLine={false} />
                   <YAxis type="category" dataKey="country" width={90} tick={{ fontSize: 10 }} axisLine={false} tickLine={false} />
@@ -416,7 +416,7 @@ export default function AdminDashboard() {
           {diffTop20.length === 0 ? <NoData /> : (
             <ResponsiveContainer width="100%" height={280}>
               <BarChart data={diffTop20} margin={{ top: 4, right: 12, left: 0, bottom: 50 }}>
-                <ChartGradients uid={gid(5)} />
+                {chartGradientDefs(gid(5))}
                 <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" vertical={false} />
                 <XAxis dataKey="subject" tick={{ fontSize: 9 }} angle={-40} textAnchor="end" interval={0} axisLine={{ stroke: '#E2E8F0' }} tickLine={false} />
                 <YAxis domain={[0, 100]} unit="%" tick={{ fontSize: 11 }} axisLine={false} tickLine={false} />
@@ -435,7 +435,7 @@ export default function AdminDashboard() {
             <>
               <ResponsiveContainer width="100%" height={280}>
                 <BarChart data={attDist.data} margin={{ top: 4, right: 12, left: 0, bottom: 0 }}>
-                  <ChartGradients uid={gid(6)} />
+                  {chartGradientDefs(gid(6))}
                   <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" vertical={false} />
                   <XAxis dataKey="band" tick={{ fontSize: 11 }} axisLine={{ stroke: '#E2E8F0' }} tickLine={false} />
                   <YAxis tick={{ fontSize: 11 }} axisLine={false} tickLine={false} />
@@ -462,7 +462,7 @@ export default function AdminDashboard() {
                   ]}
                   margin={{ top: 4, right: 12, left: 0, bottom: 0 }}
                 >
-                  <ChartGradients uid={gid(7)} />
+                  {chartGradientDefs(gid(7))}
                   <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" vertical={false} />
                   <XAxis dataKey="status" tick={{ fontSize: 11 }} axisLine={{ stroke: '#E2E8F0' }} tickLine={false} />
                   <YAxis domain={[0, 100]} unit="%" tick={{ fontSize: 11 }} axisLine={false} tickLine={false} />
@@ -487,7 +487,7 @@ export default function AdminDashboard() {
               <div style={{ overflowY: 'auto', maxHeight: 320 }}>
                 <ResponsiveContainer width="100%" height={Math.max(260, Math.min(20, attBySubj.length) * 22)}>
                   <BarChart layout="vertical" data={attBySubj.slice(0, 20)} margin={{ top: 4, right: 40, left: 0, bottom: 0 }}>
-                    <ChartGradients uid={gid(8)} />
+                    {chartGradientDefs(gid(8))}
                     <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" horizontal={false} />
                     <XAxis type="number" domain={[0, 100]} unit="%" tick={{ fontSize: 10 }} axisLine={false} tickLine={false} />
                     <YAxis type="category" dataKey="SUBJECTCODE" width={90} tick={{ fontSize: 10 }} axisLine={false} tickLine={false} />

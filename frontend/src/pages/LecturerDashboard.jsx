@@ -9,7 +9,7 @@ import api from '../services/api';
 import { getUser, getUserName } from '../utils/auth';
 import GeminiPanel from '../components/GeminiPanel';
 import {
-  DashboardKeyframes, KpiCard, ChartCard, NoData, ChartGradients, CustomTooltip, COLOR,
+  DashboardKeyframes, KpiCard, ChartCard, NoData, chartGradientDefs, CustomTooltip, COLOR,
   gradUrl, useChartGradUid,
 } from '../components/DashboardKit';
 
@@ -239,7 +239,7 @@ export default function LecturerDashboard() {
             {noData || gradeDist.length === 0 ? <NoData /> : (
               <ResponsiveContainer width="100%" height={280}>
                 <BarChart data={gradeDist} margin={{ top: 8, right: 16, left: 0, bottom: 8 }}>
-                  <ChartGradients uid={gid(0)} />
+                  {chartGradientDefs(gid(0))}
                   <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" vertical={false} />
                   <XAxis dataKey="band" tick={{ fontSize: 11 }} axisLine={{ stroke: '#E2E8F0' }} tickLine={false} />
                   <YAxis tick={{ fontSize: 11 }} axisLine={false} tickLine={false} />
@@ -258,7 +258,7 @@ export default function LecturerDashboard() {
             {noData || trend.every(t => t.subject_avg == null && t.institution_avg == null) ? <NoData /> : (
               <ResponsiveContainer width="100%" height={260}>
                 <AreaChart data={trend} margin={{ top: 8, right: 16, left: 0, bottom: 8 }}>
-                  <ChartGradients uid={gid(1)} />
+                  {chartGradientDefs(gid(1))}
                   <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" vertical={false} />
                   <XAxis dataKey="period" type="category" tick={{ fontSize: 11 }} axisLine={{ stroke: '#E2E8F0' }} tickLine={false} />
                   <YAxis domain={[0, 100]} unit="%" tick={{ fontSize: 11 }} axisLine={false} tickLine={false} />
@@ -277,7 +277,7 @@ export default function LecturerDashboard() {
             {noData || assessment.length === 0 ? <NoData /> : (
               <ResponsiveContainer width="100%" height={280}>
                 <BarChart data={assessment} margin={{ top: 8, right: 16, left: 0, bottom: 8 }}>
-                  <ChartGradients uid={gid(2)} />
+                  {chartGradientDefs(gid(2))}
                   <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" vertical={false} />
                   <XAxis dataKey="type" tick={{ fontSize: 11 }} axisLine={{ stroke: '#E2E8F0' }} tickLine={false} />
                   <YAxis domain={[0, 100]} unit="%" tick={{ fontSize: 11 }} axisLine={false} tickLine={false} />
@@ -295,7 +295,7 @@ export default function LecturerDashboard() {
               <>
                 <ResponsiveContainer width="100%" height={220}>
                   <PieChart>
-                    <ChartGradients uid={gid(3)} />
+                    {chartGradientDefs(gid(3))}
                     <Pie
                       data={passFail}
                       dataKey="count"
@@ -339,7 +339,7 @@ export default function LecturerDashboard() {
                     ]}
                     margin={{ top: 8, right: 16, left: 0, bottom: 8 }}
                   >
-                    <ChartGradients uid={gid(4)} />
+                    {chartGradientDefs(gid(4))}
                     <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" vertical={false} />
                     <XAxis dataKey="status" tick={{ fontSize: 11 }} axisLine={{ stroke: '#E2E8F0' }} tickLine={false} />
                     <YAxis domain={[0, 100]} unit="%" tick={{ fontSize: 11 }} axisLine={false} tickLine={false} />
@@ -362,7 +362,7 @@ export default function LecturerDashboard() {
               <>
                 <ResponsiveContainer width="100%" height={Math.max(220, attBySubj.length * 26)}>
                   <BarChart layout="vertical" data={attBySubj} margin={{ top: 8, right: 30, left: 0, bottom: 8 }}>
-                    <ChartGradients uid={gid(5)} />
+                    {chartGradientDefs(gid(5))}
                     <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" horizontal={false} />
                     <XAxis type="number" domain={[0, 100]} unit="%" tick={{ fontSize: 10 }} axisLine={false} tickLine={false} />
                     <YAxis type="category" dataKey="SUBJECTCODE" width={80} tick={{ fontSize: 10 }} axisLine={false} tickLine={false} />

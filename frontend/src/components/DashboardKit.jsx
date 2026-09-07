@@ -161,18 +161,29 @@ export function NoData({ h = 240, icon = '📊', text = 'No data available' }) {
   );
 }
 
-// ── Shared gradient defs — drop as the first child inside any recharts chart ──
+// ── Shared gradient defs — call inline as {chartGradientDefs(uid)}, NOT as a
+//    <ChartGradients/> JSX tag ────────────────────────────────────────────────
 //
-// Each chart renders inside its OWN <svg> (via ResponsiveContainer), but `id`
-// must still be unique across the whole HTML document — browsers resolve
-// `fill="url(#foo)"` by document-wide id lookup, not "nearest enclosing
-// <svg>". With ~15 charts across the two dashboards all defining the same
-// literal ids (dkTeal, dkGreen, ...), only one copy of each id "wins" and
-// every other chart's fill reference silently resolves to nothing (an
-// invisible bar/area). `uid` must be a string unique to this chart instance
-// (see useChartGradUid below) so every chart gets its own non-colliding ids.
+// This must be a plain function, not a component rendered via JSX. Recharts'
+// internal renderByOrder()/isSvgElement() (see ReactUtils.js) only passes
+// through children whose element `type` is a literal native SVG tag string
+// (its own SVG_TAGS whitelist, which includes 'defs') — anything else falls
+// through to a lookup by displayName against its own known sub-components
+// (Bar, Area, XAxis, ...), and a completely unrecognized custom component is
+// silently dropped from the render tree. `<ChartGradients uid={x} />` has
+// `type` = the ChartGradients function, so it never rendered at all — the
+// gradients never reached the DOM, so every `fill="url(#...)"` referencing
+// them resolved to nothing (an invisible bar/area, though the data — and so
+// tooltips — were still there). Calling this as a plain function instead
+// returns a React element whose type really is the string 'defs', which
+// recharts recognizes and renders like the official inline-<defs> examples.
+//
+// `uid` must also be unique per chart instance (see useChartGradUid below) —
+// `id` has to be unique across the whole HTML document, and with ~15 charts
+// across the two dashboards, reusing the same literal ids would make
+// `fill="url(#foo)"` resolve to whichever chart's copy happens to "win".
 
-export function ChartGradients({ uid }) {
+export function chartGradientDefs(uid) {
   const id = (name) => `${uid}-${name}`;
   return (
     <defs>
