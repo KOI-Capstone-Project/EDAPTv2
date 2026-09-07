@@ -8,6 +8,7 @@ import api from '../services/api';
 import { getUserName } from '../utils/auth';
 import {
   DashboardKeyframes, KpiCard, ChartCard, NoData, ChartGradients, CustomTooltip, COLOR,
+  gradUrl, useChartGradUid,
 } from '../components/DashboardKit';
 
 const ALL_PERIODS   = ['23.1','23.2','23.3','24.1','24.2','24.3','25.1','25.2','25.3'];
@@ -216,6 +217,10 @@ export default function AdminDashboard() {
 
   useEffect(() => { fetchAll(); }, [fetchAll]);
 
+  // Distinct gradient-id namespace per chart card — see useChartGradUid's
+  // docstring in DashboardKit.jsx for why this can't just be a literal id.
+  const gid = useChartGradUid();
+
   // Cause 5 — redirect after hooks if user is missing/corrupt
   useEffect(() => {
     if (!_rawUser) window.location.href = '/login';
@@ -313,14 +318,14 @@ export default function AdminDashboard() {
           {gradeDist.length === 0 ? <NoData /> : (
             <ResponsiveContainer width="100%" height={280}>
               <BarChart data={gradeDist} margin={{ top: 4, right: 12, left: 0, bottom: 0 }}>
-                <ChartGradients />
+                <ChartGradients uid={gid(0)} />
                 <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" vertical={false} />
                 <XAxis dataKey="band" tick={{ fontSize: 11 }} axisLine={{ stroke: '#E2E8F0' }} tickLine={false} />
                 <YAxis tick={{ fontSize: 11 }} axisLine={false} tickLine={false} />
                 <Tooltip content={<CustomTooltip />} cursor={{ fill: 'rgba(46,110,142,0.06)' }} />
                 <Bar dataKey="count" name="Students" radius={[6,6,0,0]} animationDuration={900} animationEasing="ease-out">
                   {gradeDist.map((entry, i) => (
-                    <Cell key={i} fill={parseInt(entry.band.split('-')[0]) < 50 ? 'url(#dkRed)' : 'url(#dkGreen)'} />
+                    <Cell key={i} fill={parseInt(entry.band.split('-')[0]) < 50 ? gradUrl(gid(0), 'red') : gradUrl(gid(0), 'green')} />
                   ))}
                 </Bar>
               </BarChart>
@@ -333,17 +338,17 @@ export default function AdminDashboard() {
           {trendData.every(d => d.institution_avg === null) ? <NoData /> : (
             <ResponsiveContainer width="100%" height={280}>
               <AreaChart data={trendData} margin={{ top: 4, right: 12, left: 0, bottom: 0 }}>
-                <ChartGradients />
+                <ChartGradients uid={gid(1)} />
                 <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" vertical={false} />
                 <XAxis dataKey="period" type="category" tick={{ fontSize: 11 }} axisLine={{ stroke: '#E2E8F0' }} tickLine={false} />
                 <YAxis domain={[0, 100]} unit="%" tick={{ fontSize: 11 }} axisLine={false} tickLine={false} />
                 <Tooltip content={<CustomTooltip formatter={v => v !== null ? `${v}%` : 'No data'} />} />
                 <Legend wrapperStyle={{ fontSize: 12 }} />
                 <Area type="monotone" dataKey="institution_avg" name="Institution Avg" stroke={COLOR.teal} strokeWidth={2.5}
-                  fill="url(#dkTealArea)" dot={false} activeDot={{ r: 5 }} connectNulls animationDuration={1000} />
+                  fill={gradUrl(gid(1), 'tealArea')} dot={false} activeDot={{ r: 5 }} connectNulls animationDuration={1000} />
                 {(subjF || cgF) && (
                   <Area type="monotone" dataKey="subject_avg" name="Selected Avg" stroke={COLOR.navy} strokeWidth={2}
-                    strokeDasharray="5 3" fill="url(#dkSlateArea)" dot={false} activeDot={{ r: 5 }} connectNulls animationDuration={1000} />
+                    strokeDasharray="5 3" fill={gradUrl(gid(1), 'slateArea')} dot={false} activeDot={{ r: 5 }} connectNulls animationDuration={1000} />
                 )}
               </AreaChart>
             </ResponsiveContainer>
@@ -355,12 +360,12 @@ export default function AdminDashboard() {
           {assessment.length === 0 ? <NoData /> : (
             <ResponsiveContainer width="100%" height={280}>
               <BarChart data={assessment} margin={{ top: 4, right: 12, left: 0, bottom: 0 }}>
-                <ChartGradients />
+                <ChartGradients uid={gid(2)} />
                 <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" vertical={false} />
                 <XAxis dataKey="type" tick={{ fontSize: 11 }} axisLine={{ stroke: '#E2E8F0' }} tickLine={false} />
                 <YAxis domain={[0, 100]} unit="%" tick={{ fontSize: 11 }} axisLine={false} tickLine={false} />
                 <Tooltip content={<CustomTooltip formatter={v => `${v}%`} />} cursor={{ fill: 'rgba(46,110,142,0.06)' }} />
-                <Bar dataKey="avg_mark" name="Avg Mark %" fill="url(#dkTeal)" radius={[6,6,0,0]} animationDuration={900} animationEasing="ease-out" />
+                <Bar dataKey="avg_mark" name="Avg Mark %" fill={gradUrl(gid(2), 'teal')} radius={[6,6,0,0]} animationDuration={900} animationEasing="ease-out" />
               </BarChart>
             </ResponsiveContainer>
           )}
@@ -371,15 +376,15 @@ export default function AdminDashboard() {
           {!passFail || (passFail.pass_count === 0 && passFail.fail_count === 0) ? <NoData /> : (
             <ResponsiveContainer width="100%" height={280}>
               <PieChart>
-                <ChartGradients />
+                <ChartGradients uid={gid(3)} />
                 <Pie
                   data={[{ name: 'Pass', value: passFail.pass_count }, { name: 'Fail', value: passFail.fail_count }]}
                   innerRadius="38%" outerRadius="62%" paddingAngle={3} cornerRadius={6}
                   dataKey="value" labelLine={false} label={PieLabel}
                   animationDuration={900} animationEasing="ease-out"
                 >
-                  <Cell fill="url(#dkGreen)" />
-                  <Cell fill="url(#dkRed)" />
+                  <Cell fill={gradUrl(gid(3), 'green')} />
+                  <Cell fill={gradUrl(gid(3), 'red')} />
                 </Pie>
                 <Tooltip content={<CustomTooltip formatter={(v, name) => [v.toLocaleString(), name]} />} />
                 <Legend wrapperStyle={{ fontSize: 12 }} />
@@ -394,12 +399,12 @@ export default function AdminDashboard() {
             <div style={{ overflowY: 'auto', maxHeight: 320 }}>
               <ResponsiveContainer width="100%" height={Math.max(260, intl.length * 22)}>
                 <BarChart layout="vertical" data={intl} margin={{ top: 4, right: 40, left: 0, bottom: 0 }}>
-                  <ChartGradients />
+                  <ChartGradients uid={gid(4)} />
                   <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" horizontal={false} />
                   <XAxis type="number" domain={[0, 100]} unit="%" tick={{ fontSize: 10 }} axisLine={false} tickLine={false} />
                   <YAxis type="category" dataKey="country" width={90} tick={{ fontSize: 10 }} axisLine={false} tickLine={false} />
                   <Tooltip content={<CustomTooltip formatter={v => `${v}%`} />} cursor={{ fill: 'rgba(46,110,142,0.06)' }} />
-                  <Bar dataKey="avg_mark" name="Avg Mark %" fill="url(#dkTealH)" radius={[0,6,6,0]} animationDuration={900} animationEasing="ease-out" />
+                  <Bar dataKey="avg_mark" name="Avg Mark %" fill={gradUrl(gid(4), 'tealH')} radius={[0,6,6,0]} animationDuration={900} animationEasing="ease-out" />
                 </BarChart>
               </ResponsiveContainer>
             </div>
@@ -411,13 +416,13 @@ export default function AdminDashboard() {
           {diffTop20.length === 0 ? <NoData /> : (
             <ResponsiveContainer width="100%" height={280}>
               <BarChart data={diffTop20} margin={{ top: 4, right: 12, left: 0, bottom: 50 }}>
-                <ChartGradients />
+                <ChartGradients uid={gid(5)} />
                 <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" vertical={false} />
                 <XAxis dataKey="subject" tick={{ fontSize: 9 }} angle={-40} textAnchor="end" interval={0} axisLine={{ stroke: '#E2E8F0' }} tickLine={false} />
                 <YAxis domain={[0, 100]} unit="%" tick={{ fontSize: 11 }} axisLine={false} tickLine={false} />
                 <Tooltip content={<CustomTooltip formatter={v => `${v}%`} />} cursor={{ fill: 'rgba(46,110,142,0.06)' }} />
                 <Bar dataKey="failure_rate" name="Failure Rate %" radius={[6,6,0,0]} animationDuration={900} animationEasing="ease-out">
-                  {diffTop20.map((_, i) => <Cell key={i} fill={i < 10 ? 'url(#dkRed)' : 'url(#dkNavy)'} />)}
+                  {diffTop20.map((_, i) => <Cell key={i} fill={i < 10 ? gradUrl(gid(5), 'red') : gradUrl(gid(5), 'navy')} />)}
                 </Bar>
               </BarChart>
             </ResponsiveContainer>
@@ -430,12 +435,12 @@ export default function AdminDashboard() {
             <>
               <ResponsiveContainer width="100%" height={280}>
                 <BarChart data={attDist.data} margin={{ top: 4, right: 12, left: 0, bottom: 0 }}>
-                  <ChartGradients />
+                  <ChartGradients uid={gid(6)} />
                   <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" vertical={false} />
                   <XAxis dataKey="band" tick={{ fontSize: 11 }} axisLine={{ stroke: '#E2E8F0' }} tickLine={false} />
                   <YAxis tick={{ fontSize: 11 }} axisLine={false} tickLine={false} />
                   <Tooltip content={<CustomTooltip />} cursor={{ fill: 'rgba(46,110,142,0.06)' }} />
-                  <Bar dataKey="count" name="Enrolments" fill="url(#dkTeal)" radius={[6,6,0,0]} animationDuration={900} animationEasing="ease-out" />
+                  <Bar dataKey="count" name="Enrolments" fill={gradUrl(gid(6), 'teal')} radius={[6,6,0,0]} animationDuration={900} animationEasing="ease-out" />
                 </BarChart>
               </ResponsiveContainer>
               <p style={s.chartFootnote}>
@@ -457,14 +462,14 @@ export default function AdminDashboard() {
                   ]}
                   margin={{ top: 4, right: 12, left: 0, bottom: 0 }}
                 >
-                  <ChartGradients />
+                  <ChartGradients uid={gid(7)} />
                   <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" vertical={false} />
                   <XAxis dataKey="status" tick={{ fontSize: 11 }} axisLine={{ stroke: '#E2E8F0' }} tickLine={false} />
                   <YAxis domain={[0, 100]} unit="%" tick={{ fontSize: 11 }} axisLine={false} tickLine={false} />
                   <Tooltip content={<CustomTooltip formatter={v => `${v}%`} />} cursor={{ fill: 'rgba(46,110,142,0.06)' }} />
                   <Bar dataKey="rate" name="Avg Attendance %" radius={[6,6,0,0]} animationDuration={900} animationEasing="ease-out">
-                    <Cell fill="url(#dkGreen)" />
-                    <Cell fill="url(#dkRed)" />
+                    <Cell fill={gradUrl(gid(7), 'green')} />
+                    <Cell fill={gradUrl(gid(7), 'red')} />
                   </Bar>
                 </BarChart>
               </ResponsiveContainer>
@@ -482,12 +487,12 @@ export default function AdminDashboard() {
               <div style={{ overflowY: 'auto', maxHeight: 320 }}>
                 <ResponsiveContainer width="100%" height={Math.max(260, Math.min(20, attBySubj.length) * 22)}>
                   <BarChart layout="vertical" data={attBySubj.slice(0, 20)} margin={{ top: 4, right: 40, left: 0, bottom: 0 }}>
-                    <ChartGradients />
+                    <ChartGradients uid={gid(8)} />
                     <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" horizontal={false} />
                     <XAxis type="number" domain={[0, 100]} unit="%" tick={{ fontSize: 10 }} axisLine={false} tickLine={false} />
                     <YAxis type="category" dataKey="SUBJECTCODE" width={90} tick={{ fontSize: 10 }} axisLine={false} tickLine={false} />
                     <Tooltip content={<CustomTooltip formatter={v => `${v}%`} />} cursor={{ fill: 'rgba(46,110,142,0.06)' }} />
-                    <Bar dataKey="avg_attendance_rate" name="Avg Attendance %" fill="url(#dkTealH)" radius={[0,6,6,0]} animationDuration={900} animationEasing="ease-out" />
+                    <Bar dataKey="avg_attendance_rate" name="Avg Attendance %" fill={gradUrl(gid(8), 'tealH')} radius={[0,6,6,0]} animationDuration={900} animationEasing="ease-out" />
                   </BarChart>
                 </ResponsiveContainer>
               </div>

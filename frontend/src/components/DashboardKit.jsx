@@ -2,7 +2,7 @@
 // KPI counters, gradient chart fills, a styled tooltip, and glass-style cards.
 // Pulled into a shared file so both dashboards render with the same modern
 // look instead of duplicating the same chart chrome twice.
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 
 // ── Palette (matches the app's existing brand colors) ─────────────────────────
 
@@ -162,40 +162,61 @@ export function NoData({ h = 240, icon = '📊', text = 'No data available' }) {
 }
 
 // ── Shared gradient defs — drop as the first child inside any recharts chart ──
+//
+// Each chart renders inside its OWN <svg> (via ResponsiveContainer), but `id`
+// must still be unique across the whole HTML document — browsers resolve
+// `fill="url(#foo)"` by document-wide id lookup, not "nearest enclosing
+// <svg>". With ~15 charts across the two dashboards all defining the same
+// literal ids (dkTeal, dkGreen, ...), only one copy of each id "wins" and
+// every other chart's fill reference silently resolves to nothing (an
+// invisible bar/area). `uid` must be a string unique to this chart instance
+// (see useChartGradUid below) so every chart gets its own non-colliding ids.
 
-export function ChartGradients() {
+export function ChartGradients({ uid }) {
+  const id = (name) => `${uid}-${name}`;
   return (
     <defs>
-      <linearGradient id="dkTeal" x1="0" y1="0" x2="0" y2="1">
+      <linearGradient id={id('teal')} x1="0" y1="0" x2="0" y2="1">
         <stop offset="0%"  stopColor={COLOR.teal}  stopOpacity={0.95} />
         <stop offset="100%" stopColor={COLOR.teal} stopOpacity={0.35} />
       </linearGradient>
-      <linearGradient id="dkTealArea" x1="0" y1="0" x2="0" y2="1">
+      <linearGradient id={id('tealArea')} x1="0" y1="0" x2="0" y2="1">
         <stop offset="0%"  stopColor={COLOR.teal}  stopOpacity={0.35} />
         <stop offset="100%" stopColor={COLOR.teal} stopOpacity={0} />
       </linearGradient>
-      <linearGradient id="dkSlateArea" x1="0" y1="0" x2="0" y2="1">
+      <linearGradient id={id('slateArea')} x1="0" y1="0" x2="0" y2="1">
         <stop offset="0%"  stopColor={COLOR.slate} stopOpacity={0.25} />
         <stop offset="100%" stopColor={COLOR.slate} stopOpacity={0} />
       </linearGradient>
-      <linearGradient id="dkGreen" x1="0" y1="0" x2="0" y2="1">
+      <linearGradient id={id('green')} x1="0" y1="0" x2="0" y2="1">
         <stop offset="0%"  stopColor={COLOR.green} stopOpacity={0.95} />
         <stop offset="100%" stopColor={COLOR.green} stopOpacity={0.45} />
       </linearGradient>
-      <linearGradient id="dkRed" x1="0" y1="0" x2="0" y2="1">
+      <linearGradient id={id('red')} x1="0" y1="0" x2="0" y2="1">
         <stop offset="0%"  stopColor={COLOR.red} stopOpacity={0.95} />
         <stop offset="100%" stopColor={COLOR.red} stopOpacity={0.45} />
       </linearGradient>
-      <linearGradient id="dkNavy" x1="0" y1="0" x2="0" y2="1">
+      <linearGradient id={id('navy')} x1="0" y1="0" x2="0" y2="1">
         <stop offset="0%"  stopColor={COLOR.navy} stopOpacity={0.95} />
         <stop offset="100%" stopColor={COLOR.navy} stopOpacity={0.45} />
       </linearGradient>
-      <linearGradient id="dkTealH" x1="0" y1="0" x2="1" y2="0">
+      <linearGradient id={id('tealH')} x1="0" y1="0" x2="1" y2="0">
         <stop offset="0%"  stopColor={COLOR.light} stopOpacity={0.9} />
         <stop offset="100%" stopColor={COLOR.teal}  stopOpacity={0.95} />
       </linearGradient>
     </defs>
   );
+}
+
+// Builds the `fill="url(#...)"` string matching a given chart's gradient uid.
+export const gradUrl = (uid, name) => `url(#${uid}-${name})`;
+
+// One React.useId() call per dashboard page, plus a small per-chart suffix
+// (its index) — cheap way to give every chart on the page a distinct,
+// collision-free gradient-id namespace without a hook call per chart.
+export function useChartGradUid() {
+  const base = useId();
+  return (chartIndex) => `${base}-c${chartIndex}`;
 }
 
 // ── Custom tooltip — replaces recharts' plain default box ──────────────────────
