@@ -25,6 +25,7 @@ import OAuthProvidersView from './pages/OAuthProvidersView';
 import AIConfigView from './pages/AIConfigView';
 import OutgoingMailServersView from './pages/OutgoingMailServersView';
 import EmailLogsView from './pages/EmailLogsView';
+import ChatLogsView from './pages/ChatLogsView';
 
 // Auth utilities
 import { getToken, getUser } from './utils/auth';
@@ -139,6 +140,9 @@ export default function App() {
       {/* Admin only (HoT or HoS) — matches the backend's require_head_of_school
           gate on the /api/email-logs* endpoints. */}
       <Route path="/email-logs" element={<AdminProtected><EmailLogsView /></AdminProtected>} />
+      {/* Admin only (HoT or HoS) — matches the backend's require_head_of_school
+          gate on the /api/chat-logs* endpoints. */}
+      <Route path="/chat-logs" element={<AdminProtected><ChatLogsView /></AdminProtected>} />
 
       {/* Shared settings (role-aware) */}
       <Route path="/settings" element={<Protected><SettingsPage /></Protected>} />

@@ -7,6 +7,25 @@
 // replayed back per-request as `history` for conversational continuity.
 import { useState, useRef, useEffect, Fragment } from 'react';
 import api from '../services/api';
+import { CHAT_HISTORY_KEY } from '../utils/auth';
+
+// Every route wraps its own <Layout> (see App.js's Protected/AdminProtected/
+// HoTOnlyProtected), so navigating anywhere remounts this component from
+// scratch — plain useState alone loses the conversation on every page
+// change, not just a hard refresh. sessionStorage survives both (a page
+// reload keeps it; a real remount reads it back on mount below) while
+// still clearing itself when the tab actually closes — "for the session",
+// not forever. Cleared explicitly on logout (see utils/auth.js's logout()
+// and Sidebar.jsx's handleLogout) so a different user signing in on the
+// same tab never inherits someone else's chat history.
+function loadStoredMessages() {
+  try {
+    const raw = sessionStorage.getItem(CHAT_HISTORY_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch {
+    return [];
+  }
+}
 
 // Gemini's answers routinely come back as light Markdown (**bold**, "- "
 // bullet lists, paragraph breaks) — rendered as literal asterisks/dashes
@@ -86,7 +105,7 @@ export default function AIChatbox() {
   const [fullscreen, setFullscreen] = useState(false);
   const [tab,        setTab]        = useState('chat');
 
-  const [messages,    setMessages]    = useState([]);
+  const [messages,    setMessages]    = useState(loadStoredMessages);
   const [chatInput,   setChatInput]   = useState('');
   const [chatLoading, setChatLoading] = useState(false);
   const chatEndRef = useRef(null);
@@ -96,6 +115,11 @@ export default function AIChatbox() {
       chatEndRef.current.scrollIntoView({ behavior: 'smooth' });
     }
   }, [messages, open]);
+
+  useEffect(() => {
+    try { sessionStorage.setItem(CHAT_HISTORY_KEY, JSON.stringify(messages)); }
+    catch { /* storage full/unavailable — chat still works for this render, just won't survive a remount */ }
+  }, [messages]);
 
   const sendMessage = async (text) => {
     const q = (text ?? chatInput).trim();

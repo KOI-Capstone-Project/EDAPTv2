@@ -678,6 +678,44 @@ class EmailLog(Base):
     sent_at: datetime = Column(DateTime(timezone=True), server_default=func.now(), nullable=False, index=True)
 
 
+class ChatLog(Base):
+    """
+    Record of one question asked to the EDAPT Assistant (POST
+    /api/chatbot/ask) and the answer it gave. Powers Settings > Chat Logs.
+
+    Before this table existed, a chatbot question only ever produced a
+    generic AuditLog row (action_type="AI Request") with the question
+    truncated to 120 characters and no answer, model, token count, or
+    resolved study period at all — enough for a system-wide audit trail,
+    not enough to actually review what the assistant told people. This
+    table is written IN ADDITION to that AuditLog row, not instead of it —
+    the audit trail's job (a flat cross-feature timeline of every
+    significant action) is unrelated to this one's (a dedicated, filterable
+    history of assistant conversations).
+
+    user_uid is indexed since the whole point of this table is letting an
+    admin filter/group by who asked — same column name and meaning as
+    AuditLog.user_uid for consistency, not a foreign key (same reasoning as
+    AuditLog: the acting user's account may later be deleted, and the
+    historical record of who asked what must survive that).
+    """
+
+    __tablename__ = "chat_logs"
+
+    id: int = Column(BigInteger, primary_key=True, autoincrement=True)
+
+    user_uid: str = Column(String(254), nullable=False, index=True, comment="Email of the user who asked")
+
+    question: str = Column(Text, nullable=False)
+    answer:   str = Column(Text, nullable=False)
+
+    study_period_used: str | None = Column(String(10), nullable=True)
+    model:             str | None = Column(String(120), nullable=True, comment="e.g. 'gemini/gemini-3.7-flash'")
+    tokens_used:       int | None = Column(Integer, nullable=True)
+
+    asked_at: datetime = Column(DateTime(timezone=True), server_default=func.now(), nullable=False, index=True)
+
+
 class UploadBatch(Base):
     """
     Tracks a large file upload split into small sequential chunks from the

@@ -41,7 +41,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
-from app.db.models import AIProviderConfig, AnalyzeJob, ApiKey, AuditLog, Base, EmailLog, IngestJob, Intervention, MailServer, OAuthProviderConfig, PendingIngest, Prediction, RiskEmailTemplate, UploadBatch, User as UserModel
+from app.db.models import AIProviderConfig, AnalyzeJob, ApiKey, AuditLog, Base, ChatLog, EmailLog, IngestJob, Intervention, MailServer, OAuthProviderConfig, PendingIngest, Prediction, RiskEmailTemplate, UploadBatch, User as UserModel
 from app import oauth_providers
 from app.crypto_utils import encrypt_secret, decrypt_secret
 # Light module — pure functions over an already-computed SHAP dict, no model
@@ -4148,6 +4148,85 @@ async def get_email_log(
     return {**_email_log_to_dict(log), "body": log.body}
 
 
+def _chat_log_to_dict(log: ChatLog, *, role: Optional[str] = None, include_answer: bool = False) -> dict:
+    d = {
+        "id":                log.id,
+        "user_uid":          log.user_uid,
+        "role":              role,
+        "question":          log.question,
+        "study_period_used": log.study_period_used,
+        "model":             log.model,
+        "tokens_used":       log.tokens_used,
+        "asked_at":          log.asked_at.isoformat() if log.asked_at else None,
+    }
+    if include_answer:
+        d["answer"] = log.answer
+    return d
+
+
+@app.get("/api/chat-logs", tags=["Chat Logs"])
+async def list_chat_logs(
+    limit:    int           = Query(50, ge=1, le=200),
+    user_uid: Optional[str] = Query(None, description="Filter to one asker's questions only"),
+    user:     dict          = Depends(require_head_of_school),
+    db:       AsyncSession  = Depends(get_db),
+):
+    """Every question asked to the EDAPT Assistant, most recent first — the
+    answer itself is left out of this list shape (can be long; see GET
+    /api/chat-logs/{id} for the full content) so the table stays light to
+    load. user_uid scopes this to one asker, powering the Chat Logs page's
+    "filter by user" dropdown (see GET /api/chat-logs/users for the list
+    of askers to populate it with)."""
+    stmt = select(ChatLog).order_by(ChatLog.asked_at.desc()).limit(limit)
+    if user_uid:
+        stmt = stmt.where(ChatLog.user_uid == user_uid)
+    result = await db.execute(stmt)
+    logs = result.scalars().all()
+
+    # Resolve each distinct asker to their current role in one batched
+    # query — same pattern get_audit_logs already uses — so the table can
+    # show "Head of School" instead of a bare email.
+    uids = {log.user_uid for log in logs}
+    role_rows = await db.execute(select(UserModel.email, UserModel.role).where(UserModel.email.in_(uids)))
+    role_map: dict[str, str] = dict(role_rows.all())
+
+    return {"logs": [_chat_log_to_dict(log, role=role_map.get(log.user_uid)) for log in logs]}
+
+
+@app.get("/api/chat-logs/users", tags=["Chat Logs"])
+async def list_chat_log_users(
+    user: dict = Depends(require_head_of_school),
+    db:   AsyncSession = Depends(get_db),
+):
+    """Distinct users who have ever asked the assistant a question, each
+    with how many — powers the Chat Logs page's "filter by user" dropdown.
+    Computed independent of whatever user_uid filter is currently applied
+    to GET /api/chat-logs, so the dropdown's own options never disappear
+    once you've picked one."""
+    result = await db.execute(
+        select(ChatLog.user_uid, func.count()).group_by(ChatLog.user_uid).order_by(desc(func.count()))
+    )
+    rows = result.all()
+    uids = [r[0] for r in rows]
+    role_rows = await db.execute(select(UserModel.email, UserModel.role).where(UserModel.email.in_(uids)))
+    role_map: dict[str, str] = dict(role_rows.all())
+    return {"users": [{"user_uid": uid, "role": role_map.get(uid), "count": count} for uid, count in rows]}
+
+
+@app.get("/api/chat-logs/{log_id}", tags=["Chat Logs"])
+async def get_chat_log(
+    log_id: int,
+    user:   dict         = Depends(require_head_of_school),
+    db:     AsyncSession = Depends(get_db),
+):
+    """Full detail for one logged chat question, including the actual answer given."""
+    log = await db.get(ChatLog, log_id)
+    if log is None:
+        raise HTTPException(404, "Chat log not found.")
+    role = (await db.execute(select(UserModel.role).where(UserModel.email == log.user_uid))).scalar_one_or_none()
+    return _chat_log_to_dict(log, role=role, include_answer=True)
+
+
 @app.post("/api/predict", tags=["ML"])
 async def predict_outcome(
     req:  PredictRequest,
@@ -5662,14 +5741,23 @@ async def chatbot_ask(
     )
 
     answer, tokens = await _ai_call(prompt)
+    model_name = f"{_AI_CONFIG_CACHE['provider']}/{_AI_CONFIG_CACHE['model']}"
     await _append_audit_db(
         db, user_uid=user["sub"], action_type="AI Request", status="Success",
         detail=f"Chatbot question: {req.question[:120]}",
     )
+    # Dedicated Chat Log entry — the AuditLog row above is a truncated,
+    # generic cross-feature trail; this is the full question/answer pair a
+    # Head of Technology/School can actually review and filter by user.
+    db.add(ChatLog(
+        user_uid=user["sub"], question=req.question, answer=answer,
+        study_period_used=study_period, model=model_name, tokens_used=tokens,
+    ))
+    await db.commit()
     return {
         "answer":            answer,
         "tokens_used":       tokens,
-        "model":             f"{_AI_CONFIG_CACHE['provider']}/{_AI_CONFIG_CACHE['model']}",
+        "model":             model_name,
         "study_period_used": study_period,
     }
 
