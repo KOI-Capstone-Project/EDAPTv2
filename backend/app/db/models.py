@@ -426,6 +426,16 @@ class User(AuditMixin, Base):
         comment="List of subject codes assigned to this lecturer (e.g. ['ICT104', 'ICT201'])",
     )
 
+    # Profile photo — stored server-side (not the browser's localStorage,
+    # where this used to live client-only: a raw, un-resized data: URL
+    # routinely blew the ~5-10MB per-origin quota on a real phone photo,
+    # and being localStorage-only meant nobody else could ever see it —
+    # not the sidebar's own avatar on another device, not Chat Logs, not
+    # User Management). The frontend resizes to a small JPEG/PNG before
+    # upload (see utils/photo.js), so this column stays small regardless.
+    photo: bytes | None = Column(LargeBinary, nullable=True)
+    photo_content_type: str | None = Column(String(50), nullable=True)
+
 
 # ===========================================================================
 # AUDIT LOG TABLE

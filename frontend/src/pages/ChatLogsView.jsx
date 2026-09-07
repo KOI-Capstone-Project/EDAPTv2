@@ -6,6 +6,7 @@
 // token count).
 import { useState, useEffect, useCallback } from 'react';
 import api from '../services/api';
+import { usePhotoUrl } from '../utils/photo';
 
 function fmt(iso) {
   if (!iso) return '—';
@@ -22,10 +23,9 @@ function Spinner() {
 }
 
 // Same initials-in-a-gradient-circle convention as the sidebar's own user
-// avatar (Sidebar.jsx) — this app has no photo-upload feature (User has no
-// avatar/photo column at all), so initials are the only "photo" it's ever
-// had anywhere. Falls back to the email's first character when no name is
-// resolved (a user_uid whose account was since deleted, say).
+// avatar (Sidebar.jsx), shown when this user has no uploaded photo (or as
+// a fallback while it loads) — falls back to the email's first character
+// when no name is resolved (a user_uid whose account was since deleted, say).
 function initialsFromName(name, fallback) {
   const source = name || fallback || '';
   const initials = source.trim().split(/\s+/).map(w => w[0] || '').join('').toUpperCase().slice(0, 2);
@@ -33,6 +33,10 @@ function initialsFromName(name, fallback) {
 }
 
 function UserAvatar({ name, userUid, size = 30 }) {
+  const photoUrl = usePhotoUrl(userUid);
+  if (photoUrl) {
+    return <img src={photoUrl} alt="" style={{ ...s.avatar, width: size, height: size, objectFit: 'cover' }} />;
+  }
   return (
     <span style={{ ...s.avatar, width: size, height: size, fontSize: size * 0.4 }}>
       {initialsFromName(name, userUid)}

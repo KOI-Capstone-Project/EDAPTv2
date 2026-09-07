@@ -1464,10 +1464,26 @@ async def public_oauth_providers(db: AsyncSession = Depends(get_db)):
     }
 
 
+_NO_MAIL_SERVER_MESSAGE = "Outgoing mail servers is not active. Please contact your administrator."
+
+
 @app.post("/api/auth/forgot-password", tags=["Auth"])
 async def forgot_password(req: ForgotPasswordRequest, db: AsyncSession = Depends(get_db)):
-    """Send a 6-digit OTP to the registered email; returns dev_otp when SMTP is unconfigured."""
-    # Always respond with the same message to avoid user enumeration
+    """Send a 6-digit OTP to the registered email.
+
+    Real bug, confirmed: with no active Outgoing Mail Server configured,
+    this used to silently succeed and hand the OTP straight back in the
+    response body ("dev_otp") — a dev/demo convenience that has no place
+    in a real deployment, since it both means the user never actually gets
+    a usable reset flow AND leaks a live OTP to anyone who can reach this
+    endpoint for an account that happens to exist. Now raises a clear,
+    actionable error instead — telling an admin to go configure a server,
+    same message an unconfigured Send Test Email/chatbot-adjacent feature
+    would use elsewhere in this app.
+    """
+    # Always respond with the same message on a missing/inactive account,
+    # to avoid user enumeration — reaching the mail-server branches below
+    # already implies a real, active account (this check runs first).
     result  = await db.execute(select(UserModel).where(UserModel.email == req.email))
     db_user = result.scalar_one_or_none()
     if not db_user or not db_user.is_active:
@@ -1480,10 +1496,9 @@ async def forgot_password(req: ForgotPasswordRequest, db: AsyncSession = Depends
         await _append_audit_db(db, user_uid=req.email, action_type="Password Reset Requested",
                                status="Success", detail="OTP sent to registered email")
     except RuntimeError:
-        # Email service not configured — return OTP in response for dev/demo only
         await _append_audit_db(db, user_uid=req.email, action_type="Password Reset Requested",
-                               status="Warning", detail="OTP generated but email service not configured")
-        return {"message": "Email service not configured. For demo use this code.", "dev_otp": otp}
+                               status="Error", detail="No active outgoing mail server configured")
+        raise HTTPException(503, _NO_MAIL_SERVER_MESSAGE)
     except Exception as exc:
         await _append_audit_db(db, user_uid=req.email, action_type="Password Reset Requested",
                                status="Error", detail="Failed to send OTP email")
@@ -1568,6 +1583,81 @@ async def update_profile(
         "message": "Profile updated successfully.",
         "user": {"email": db_user.email, "name": db_user.name, "role": db_user.role},
     }
+
+
+# Profile photo used to live entirely in the browser's own localStorage
+# (a raw, un-resized data: URL under "user_photo_<email>") — confirmed
+# real bug: a normal phone-camera photo is easily several MB as base64,
+# routinely exceeding localStorage's ~5-10MB per-origin quota and crashing
+# with an uncaught QuotaExceededError. It was also only ever visible in
+# that one browser (never synced anywhere, so nobody else — the sidebar on
+# another device, Chat Logs, User Management — could ever see it). Stored
+# server-side now; the frontend resizes to a small JPEG before uploading
+# (see utils/photo.js) so this stays small regardless of the source photo.
+MAX_PHOTO_UPLOAD_BYTES = 2 * 1024 * 1024  # 2 MiB — already resized client-side well under this
+
+
+@app.post("/api/users/me/photo", tags=["Auth"])
+async def upload_my_photo(
+    file: UploadFile = File(...),
+    user: dict = Depends(get_current_user),
+    db:   AsyncSession = Depends(get_db),
+):
+    """Upload/replace the authenticated user's own profile photo."""
+    if not (file.content_type or "").startswith("image/"):
+        raise HTTPException(400, "Only image files are accepted.")
+    content = await file.read()
+    if len(content) > MAX_PHOTO_UPLOAD_BYTES:
+        raise HTTPException(400, f"Photo exceeds the {MAX_PHOTO_UPLOAD_BYTES // (1024*1024)} MB limit.")
+
+    email   = user.get("sub", "")
+    result  = await db.execute(select(UserModel).where(UserModel.email == email))
+    db_user = result.scalar_one_or_none()
+    if not db_user:
+        raise HTTPException(404, "User not found.")
+
+    db_user.photo = content
+    db_user.photo_content_type = file.content_type
+    await _append_audit_db(db, user_uid=email, action_type="Profile Updated",
+                           status="Success", detail="User updated their profile photo")
+    return {"message": "Photo updated successfully."}
+
+
+@app.delete("/api/users/me/photo", tags=["Auth"])
+async def delete_my_photo(
+    user: dict = Depends(get_current_user),
+    db:   AsyncSession = Depends(get_db),
+):
+    """Remove the authenticated user's own profile photo."""
+    email   = user.get("sub", "")
+    result  = await db.execute(select(UserModel).where(UserModel.email == email))
+    db_user = result.scalar_one_or_none()
+    if not db_user:
+        raise HTTPException(404, "User not found.")
+    db_user.photo = None
+    db_user.photo_content_type = None
+    await _append_audit_db(db, user_uid=email, action_type="Profile Updated",
+                           status="Success", detail="User removed their profile photo")
+    return {"message": "Photo removed."}
+
+
+@app.get("/api/users/{email}/photo", tags=["Auth"])
+async def get_user_photo(
+    email: str,
+    user:  dict         = Depends(get_current_user),
+    db:    AsyncSession = Depends(get_db),
+):
+    """Serve a user's profile photo — a staff photo is visible to any other
+    signed-in staff member, same as their name/role already are everywhere
+    else (Sidebar, Chat Logs, User Management), so this needs no extra ACL
+    beyond being authenticated at all."""
+    result  = await db.execute(select(UserModel.photo, UserModel.photo_content_type).where(UserModel.email == email))
+    row = result.one_or_none()
+    if row is None or row[0] is None:
+        raise HTTPException(404, "No photo set for this user.")
+    photo_bytes, content_type = row
+    return Response(content=photo_bytes, media_type=content_type or "image/jpeg")
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Ingest Routes
@@ -6020,6 +6110,71 @@ async def delete_user(
     await _append_audit_db(db, user_uid=user["sub"], action_type="User Modified",
                            status="Success", detail=f"Account deleted: {email}")
     return {"message": "Account deleted"}
+
+
+class AdminSetPasswordRequest(BaseModel):
+    new_password: str = Field(..., min_length=1, max_length=255)
+
+
+@app.post("/api/users/{email}/set-password", tags=["Admin"])
+async def admin_set_user_password(
+    email:   str,
+    payload: AdminSetPasswordRequest,
+    user:    dict         = Depends(require_admin),
+    db:      AsyncSession = Depends(get_db),
+):
+    """Directly set a new password for a user — for when they're locked
+    out and can't complete the OTP flow themselves (no working email, lost
+    access to it, etc.). See POST /api/users/{email}/send-reset-link for
+    the alternative of emailing them a reset code instead."""
+    result  = await db.execute(select(UserModel).where(UserModel.email == email))
+    db_user = result.scalar_one_or_none()
+    if not db_user:
+        raise HTTPException(404, "User not found.")
+    if db_user.email == "admin":
+        raise HTTPException(403, "Cannot modify the system administrator account.")
+
+    _validate_password(payload.new_password)
+    db_user.hashed_password = _pwd.hash(payload.new_password)
+    await _append_audit_db(db, user_uid=user["sub"], action_type="Password Reset",
+                           status="Success", detail=f"Password set by admin for {email}")
+    return {"message": "Password updated successfully."}
+
+
+@app.post("/api/users/{email}/send-reset-link", tags=["Admin"])
+async def admin_send_reset_link(
+    email: str,
+    user:  dict         = Depends(require_admin),
+    db:    AsyncSession = Depends(get_db),
+):
+    """Trigger the same OTP reset-code email a user would get from Forgot
+    Password themselves, on an admin's behalf — for when they'd rather the
+    user set their own new password than have one handed to them
+    directly (see POST /api/users/{email}/set-password for that)."""
+    result  = await db.execute(select(UserModel).where(UserModel.email == email))
+    db_user = result.scalar_one_or_none()
+    if not db_user:
+        raise HTTPException(404, "User not found.")
+    if db_user.email == "admin":
+        raise HTTPException(403, "Cannot modify the system administrator account.")
+    if not db_user.is_active:
+        raise HTTPException(400, "Cannot send a reset link to a deactivated account.")
+
+    otp = _generate_otp(email)
+    try:
+        await _send_otp_email(db, email, otp)
+    except RuntimeError:
+        await _append_audit_db(db, user_uid=user["sub"], action_type="Password Reset Requested",
+                               status="Error", detail=f"No active outgoing mail server configured (requested for {email})")
+        raise HTTPException(503, _NO_MAIL_SERVER_MESSAGE)
+    except Exception as exc:
+        await _append_audit_db(db, user_uid=user["sub"], action_type="Password Reset Requested",
+                               status="Error", detail=f"Failed to send reset email to {email}")
+        raise HTTPException(500, "Failed to send reset email. Please try again later.") from exc
+
+    await _append_audit_db(db, user_uid=user["sub"], action_type="Password Reset Requested",
+                           status="Success", detail=f"Reset link sent by admin to {email}")
+    return {"message": f"Reset code sent to {email}."}
 
 
 # ═══════════════════════════════════════════════════════════════════════════

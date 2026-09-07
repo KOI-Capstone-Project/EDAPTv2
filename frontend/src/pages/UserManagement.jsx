@@ -3,6 +3,7 @@ import { Fragment, useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import api from '../services/api';
 import { getErrorMessage } from '../utils/apiError';
+import { usePhotoUrl } from '../utils/photo';
 
 const ROLE_BADGE = {
   'Lecturer':          { bg: '#EEEDFE', color: '#534AB7', border: '#C5C2F5' },
@@ -38,6 +39,17 @@ const genPassword = () => {
   }
   return chars.join('');
 };
+
+// Shows the user's uploaded photo (My Profile > Change photo) if they have
+// one, falling back to initials-in-a-circle otherwise — same convention
+// used in the sidebar and Chat Logs.
+function UserAvatar({ name, email }) {
+  const photoUrl = usePhotoUrl(email);
+  if (photoUrl) {
+    return <img src={photoUrl} alt="" style={{ ...s.avatar, objectFit: 'cover' }} />;
+  }
+  return <div style={s.avatar}>{name?.split(' ').map(w => w[0]).join('').slice(0, 2).toUpperCase()}</div>;
+}
 
 function Spinner({ cols = 6 }) {
   return (
@@ -131,6 +143,17 @@ export default function UserManagement() {
   const [editSubjects, setEditSubjects] = useState([]);
   const [editSaving,   setEditSaving]   = useState(false);
   const [editMsg,      setEditMsg]      = useState('');
+
+  // Password management — for a user who's locked out and can't complete
+  // the OTP flow themselves (no working email, lost access to it, etc.),
+  // an admin can either set a new password directly or send them the same
+  // reset-code email Forgot Password would.
+  const [pwdEmail,     setPwdEmail]     = useState(null);
+  const [newPassword,  setNewPassword]  = useState('');
+  const [showNewPwd,   setShowNewPwd]   = useState(false);
+  const [pwdSaving,    setPwdSaving]    = useState(false);
+  const [pwdMsg,       setPwdMsg]       = useState(null); // {type: 'success'|'error', text} | null
+  const [sendingLink,  setSendingLink]  = useState(false);
   const [showCreate,   setShowCreate]   = useState(false);
   const [createMsg,    setCreateMsg]    = useState('');
   const [nameErr,      setNameErr]      = useState('');
@@ -156,8 +179,38 @@ export default function UserManagement() {
       .finally(() => setLoading(false));
   };
 
-  const startEdit = user => { setEditingEmail(user.email); setEditSubjects([...(user.subjects || [])]); setEditMsg(''); };
+  const startEdit = user => { setEditingEmail(user.email); setEditSubjects([...(user.subjects || [])]); setEditMsg(''); setPwdEmail(null); };
   const cancelEdit = () => { setEditingEmail(null); setEditMsg(''); };
+
+  const startPwd = user => { setPwdEmail(user.email); setNewPassword(''); setPwdMsg(null); setEditingEmail(null); };
+  const cancelPwd = () => { setPwdEmail(null); setNewPassword(''); setPwdMsg(null); };
+
+  const handleSetPassword = async () => {
+    setPwdSaving(true);
+    setPwdMsg(null);
+    try {
+      await api.post(`/api/users/${encodeURIComponent(pwdEmail)}/set-password`, { new_password: newPassword });
+      setPwdMsg({ type: 'success', text: 'Password updated successfully.' });
+      setNewPassword('');
+    } catch (err) {
+      setPwdMsg({ type: 'error', text: getErrorMessage(err, 'Failed to update password.') });
+    } finally {
+      setPwdSaving(false);
+    }
+  };
+
+  const handleSendResetLink = async () => {
+    setSendingLink(true);
+    setPwdMsg(null);
+    try {
+      const res = await api.post(`/api/users/${encodeURIComponent(pwdEmail)}/send-reset-link`);
+      setPwdMsg({ type: 'success', text: res.data.message || 'Reset code sent.' });
+    } catch (err) {
+      setPwdMsg({ type: 'error', text: getErrorMessage(err, 'Failed to send reset link.') });
+    } finally {
+      setSendingLink(false);
+    }
+  };
 
   const saveEdit = async () => {
     setEditSaving(true);
@@ -402,7 +455,7 @@ export default function UserManagement() {
                   <tr style={{ background: editingEmail === user.email ? '#EFF6FF' : (i % 2 === 0 ? '#fff' : '#F8FAFB') }}>
                     <td style={s.td}>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                        <div style={s.avatar}>{user.name?.split(' ').map(w => w[0]).join('').slice(0,2).toUpperCase()}</div>
+                        <UserAvatar name={user.name} email={user.email} />
                         <span style={{ fontWeight: 500 }}>{user.name}</span>
                       </div>
                     </td>
@@ -431,6 +484,9 @@ export default function UserManagement() {
                             ✏️
                           </button>
                         )}
+                        <button style={s.iconBtn} title="Manage password" onClick={() => pwdEmail === user.email ? cancelPwd() : startPwd(user)}>
+                          🔑
+                        </button>
                         <button
                           style={{ ...s.iconBtn, background: user.active !== false ? '#FAEEDA' : '#E1F5EE' }}
                           title={user.active !== false ? 'Deactivate' : 'Activate'}
@@ -468,6 +524,60 @@ export default function UserManagement() {
                               {editSaving ? 'Saving…' : 'Save Changes'}
                             </button>
                             <button style={s.cancelLink} onClick={cancelEdit}>Cancel</button>
+                          </div>
+                        </div>
+                      </td>
+                    </tr>
+                  )}
+
+                  {pwdEmail === user.email && (
+                    <tr key={`pwd-${user.email}`}>
+                      <td colSpan={6} style={{ padding: '12px 20px', background: '#EFF6FF', borderBottom: '0.5px solid #DDE4EA' }}>
+                        <div style={{ maxWidth: 420 }}>
+                          <p style={{ margin: '0 0 8px', fontSize: 13, fontWeight: 500, color: '#1A2E40' }}>Manage Password for {user.name}</p>
+
+                          <label style={{ ...s.label, display: 'block', marginBottom: 4 }}>Set a new password directly</label>
+                          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                            <div style={{ position: 'relative', flex: 1 }}>
+                              <input
+                                type={showNewPwd ? 'text' : 'password'}
+                                style={{ ...s.input, paddingRight: 40 }}
+                                value={newPassword}
+                                onChange={e => setNewPassword(e.target.value)}
+                                placeholder="Min 10 characters"
+                              />
+                              <button type="button" onClick={() => setShowNewPwd(v => !v)}
+                                style={{ position: 'absolute', right: 10, top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', cursor: 'pointer', fontSize: 14 }}>
+                                {showNewPwd ? '🙈' : '👁'}
+                              </button>
+                            </div>
+                            <button
+                              style={{ ...s.createBtn, fontSize: 12, padding: '7px 16px', opacity: (pwdSaving || newPassword.length < 10) ? 0.6 : 1 }}
+                              disabled={pwdSaving || newPassword.length < 10}
+                              onClick={handleSetPassword}
+                            >
+                              {pwdSaving ? 'Saving…' : 'Set Password'}
+                            </button>
+                          </div>
+
+                          <div style={{ margin: '14px 0', fontSize: 11, color: '#94A3B8', textAlign: 'center' }}>— or —</div>
+
+                          <button
+                            style={{ ...s.autoGenBtn, width: '100%', opacity: sendingLink ? 0.6 : 1 }}
+                            disabled={sendingLink}
+                            onClick={handleSendResetLink}
+                          >
+                            {sendingLink ? 'Sending…' : `Send reset code to ${user.email}`}
+                          </button>
+
+                          {pwdMsg && (
+                            <div style={{ marginTop: 8, fontSize: 12, fontWeight: 500, color: pwdMsg.type === 'success' ? '#0F6E56' : '#DC2626' }}>
+                              {pwdMsg.text}
+                            </div>
+                          )}
+
+                          <div style={{ display: 'flex', gap: 10, marginTop: 12 }}>
+                            <button style={s.cancelLink} onClick={cancelPwd}>Close</button>
                           </div>
                         </div>
                       </td>

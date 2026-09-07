@@ -2,6 +2,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { NavLink, useLocation } from 'react-router-dom';
 import { getUser, getUserName, getUserInitials, CHAT_HISTORY_KEY } from '../utils/auth';
+import { usePhotoUrl } from '../utils/photo';
 import { INGEST_LAST_SEEN_KEY, INGEST_JOBS_SEEN_EVENT } from '../utils/ingestNotifications';
 import api from '../services/api';
 
@@ -269,6 +270,7 @@ export default function Sidebar() {
   };
 
   const initials = getUserInitials();
+  const photoUrl = usePhotoUrl(user?.email);
 
   // Cursor-follow spotlight (the soft glow-that-tracks-your-mouse effect
   // popular on AI product sites, e.g. claude.ai's own marketing pages) —
@@ -492,7 +494,9 @@ export default function Sidebar() {
       }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: collapsed ? 0 : 12 }}>
           <div style={s.userAvatarWrap} title={collapsed ? getUserName() : undefined}>
-            <div style={s.userAvatar}>{initials}</div>
+            {photoUrl
+              ? <img src={photoUrl} alt="" style={{ ...s.userAvatar, objectFit: 'cover' }} />
+              : <div style={s.userAvatar}>{initials}</div>}
             <span style={s.onlineDot} />
           </div>
           {!collapsed && (
