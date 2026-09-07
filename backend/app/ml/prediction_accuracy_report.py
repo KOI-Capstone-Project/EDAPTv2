@@ -41,6 +41,16 @@ from app.db.models import Prediction
 
 DB_URL = os.getenv("DATABASE_URL", "postgresql+asyncpg://sangamgurung@localhost:5432/edapt")
 
+# Below this, an accuracy/precision/recall percentage is closer to noise than
+# signal — a version or breakdown group with, say, 2 reconciled predictions
+# can show 100% or 0% "accuracy" by chance alone. Same value and reasoning as
+# MIN_GROUP_FOR_A_RATE in intervention_outcome_report.py, so the two reports
+# agree on what "enough data" means rather than each guessing its own floor.
+# Counts are still returned and shown; only the percentage gets flagged as
+# unreliable, the same "show the number, mark the confidence" approach the
+# bias-persistence and intervention reports already take.
+MIN_N_FOR_RELIABLE = 10
+
 
 def _fail_metrics(rows):
     """rows: list of (predicted_pass, actual_pass) bools. Returns dict or None if empty."""
@@ -54,6 +64,7 @@ def _fail_metrics(rows):
         "precision": precision_score(true_fail, pred_fail, zero_division=0),
         "recall":    recall_score(true_fail, pred_fail, zero_division=0),
         "f1":        f1_score(true_fail, pred_fail, zero_division=0),
+        "reliable":  len(rows) >= MIN_N_FOR_RELIABLE,
     }
 
 
@@ -61,7 +72,8 @@ def _print_metrics(label, m):
     if m is None:
         print(f"  {label}: no reconciled predictions yet")
         return
-    print(f"  {label}  (n={m['n']:,})")
+    caveat = "" if m["reliable"] else f"  ⚠ small sample (n<{MIN_N_FOR_RELIABLE}) — treat as noise, not a result"
+    print(f"  {label}  (n={m['n']:,}){caveat}")
     print(f"    accuracy={m['accuracy']:.3f}  Fail precision={m['precision']:.3f}  "
           f"Fail recall={m['recall']:.3f}  Fail f1={m['f1']:.3f}")
 
@@ -94,6 +106,7 @@ def summarise(reconciled) -> dict:
         "by_model_version":   by_version,
         "by_estimate_type":   by_estimate_type,
         "by_reconciliation":  by_reconciliation,
+        "min_n_for_reliable": MIN_N_FOR_RELIABLE,
         "note": (
             "Measured on real reconciled outcomes (predictions.actual_pass), not "
             "on the held-out training split. The two are different measurements "
