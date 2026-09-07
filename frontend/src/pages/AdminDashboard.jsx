@@ -2,28 +2,18 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, Cell,
-  LineChart, Line, PieChart, Pie, ResponsiveContainer,
+  AreaChart, Area, PieChart, Pie, ResponsiveContainer,
 } from 'recharts';
 import api from '../services/api';
 import { getUserName } from '../utils/auth';
+import {
+  DashboardKeyframes, KpiCard, ChartCard, NoData, ChartGradients, CustomTooltip, COLOR,
+} from '../components/DashboardKit';
 
 const ALL_PERIODS   = ['23.1','23.2','23.3','24.1','24.2','24.3','25.1','25.2','25.3'];
 const YEAR_PERIODS  = { '2023':['23.1','23.2','23.3'], '2024':['24.1','24.2','24.3'], '2025':['25.1','25.2','25.3'] };
 
 // ── Tiny helpers ──────────────────────────────────────────────────────────────
-
-const NoData = ({ h = 220 }) => (
-  <div style={{ height: h, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#94A3B8', fontSize: 13 }}>
-    No data available
-  </div>
-);
-
-const ChartCard = ({ title, children }) => (
-  <div style={s.chartCard}>
-    <h3 style={s.chartTitle}>{title}</h3>
-    {children}
-  </div>
-);
 
 const RADIAN = Math.PI / 180;
 const PieLabel = ({ cx, cy, midAngle, innerRadius, outerRadius, percent }) => {
@@ -39,26 +29,6 @@ const PieLabel = ({ cx, cy, midAngle, innerRadius, outerRadius, percent }) => {
 
 const delta = (curr, prev) =>
   curr != null && prev != null ? +(curr - prev).toFixed(1) : null;
-
-// ── Summary card ──────────────────────────────────────────────────────────────
-
-function SummaryCard({ label, value, sub, change, warn, green }) {
-  const d = change;
-  return (
-    <div style={s.kpiCard}>
-      <p style={s.kpiLabel}>{label}</p>
-      <p style={{ ...s.kpiValue, color: warn ? '#DC2626' : green ? '#059669' : '#1E293B' }}>
-        {value ?? '—'}
-      </p>
-      {sub  && <p style={s.kpiSub}>{sub}</p>}
-      {d !== null && d !== undefined && (
-        <p style={{ fontSize: 12, marginTop: 4, color: d >= 0 ? '#059669' : '#DC2626', fontWeight: 500 }}>
-          {d >= 0 ? '↑' : '↓'} {d >= 0 ? '+' : ''}{d}%
-        </p>
-      )}
-    </div>
-  );
-}
 
 // ── Searchable subject dropdown ───────────────────────────────────────────────
 
@@ -267,6 +237,7 @@ export default function AdminDashboard() {
 
   return (
     <div>
+      <DashboardKeyframes />
 
       {/* ── Welcome ─────────────────────────────────────────────── */}
       <div style={s.welcome}>
@@ -324,31 +295,32 @@ export default function AdminDashboard() {
 
       {/* ── 6 Summary cards ─────────────────────────────────────── */}
       {!loading && !error && <div style={s.kpiRow}>
-        <SummaryCard label="Total Students"       value={summary?.total_students?.toLocaleString()} sub="unique enrolments" />
-        <SummaryCard label="Total Subjects"        value={summary?.total_subjects} sub="subject codes" />
-        <SummaryCard label="Institution Avg Mark"  value={summary?.avg_mark != null ? `${summary.avg_mark}%` : '—'}
-          change={delta(summary?.avg_mark, summary?.avg_mark_prev)} />
-        <SummaryCard label="Institution Pass Rate" value={summary?.pass_rate != null ? `${summary.pass_rate}%` : '—'}
-          change={delta(summary?.pass_rate, summary?.pass_rate_prev)} />
-        <SummaryCard label="Total At Risk"         value={summary?.at_risk_count?.toLocaleString()} sub="below 50%" warn />
-        <SummaryCard label="Countries"             value={summary?.countries_count} sub="represented" />
+        <KpiCard index={0} icon="🎓" label="Total Students"       value={summary?.total_students} sub="unique enrolments" />
+        <KpiCard index={1} icon="📚" label="Total Subjects"        value={summary?.total_subjects} sub="subject codes" />
+        <KpiCard index={2} icon="📈" label="Institution Avg Mark"  value={summary?.avg_mark} decimals={1} suffix="%" accent={COLOR.teal}
+          delta={delta(summary?.avg_mark, summary?.avg_mark_prev)} />
+        <KpiCard index={3} icon="✅" label="Institution Pass Rate" value={summary?.pass_rate} decimals={1} suffix="%" accent={COLOR.green}
+          delta={delta(summary?.pass_rate, summary?.pass_rate_prev)} />
+        <KpiCard index={4} icon="⚠️" label="Total At Risk"         value={summary?.at_risk_count} sub="below 50%" warn />
+        <KpiCard index={5} icon="🌍" label="Countries"             value={summary?.countries_count} sub="represented" accent={COLOR.light} />
       </div>}
 
       {/* ── Charts (2-col grid) ──────────────────────────────────── */}
       {!loading && !error && <div style={s.chartGrid}>
 
         {/* Chart 1 — Grade Distribution */}
-        <ChartCard title="Grade Distribution">
+        <ChartCard index={0} title="Grade Distribution" subtitle="Students per mark band">
           {gradeDist.length === 0 ? <NoData /> : (
             <ResponsiveContainer width="100%" height={280}>
               <BarChart data={gradeDist} margin={{ top: 4, right: 12, left: 0, bottom: 0 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" />
-                <XAxis dataKey="band" tick={{ fontSize: 11 }} />
-                <YAxis tick={{ fontSize: 11 }} />
-                <Tooltip />
-                <Bar dataKey="count" name="Students" radius={[3,3,0,0]}>
+                <ChartGradients />
+                <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" vertical={false} />
+                <XAxis dataKey="band" tick={{ fontSize: 11 }} axisLine={{ stroke: '#E2E8F0' }} tickLine={false} />
+                <YAxis tick={{ fontSize: 11 }} axisLine={false} tickLine={false} />
+                <Tooltip content={<CustomTooltip />} cursor={{ fill: 'rgba(46,110,142,0.06)' }} />
+                <Bar dataKey="count" name="Students" radius={[6,6,0,0]} animationDuration={900} animationEasing="ease-out">
                   {gradeDist.map((entry, i) => (
-                    <Cell key={i} fill={parseInt(entry.band.split('-')[0]) < 50 ? '#E24B4A' : '#1D9E75'} />
+                    <Cell key={i} fill={parseInt(entry.band.split('-')[0]) < 50 ? 'url(#dkRed)' : 'url(#dkGreen)'} />
                   ))}
                 </Bar>
               </BarChart>
@@ -357,70 +329,77 @@ export default function AdminDashboard() {
         </ChartCard>
 
         {/* Chart 2 — Performance Trend */}
-        <ChartCard title="Performance Trend">
+        <ChartCard index={1} title="Performance Trend" subtitle="Average mark across study periods">
           {trendData.every(d => d.institution_avg === null) ? <NoData /> : (
             <ResponsiveContainer width="100%" height={280}>
-              <LineChart data={trendData} margin={{ top: 4, right: 12, left: 0, bottom: 0 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" />
-                <XAxis dataKey="period" type="category" tick={{ fontSize: 11 }} />
-                <YAxis domain={[0, 100]} unit="%" tick={{ fontSize: 11 }} />
-                <Tooltip formatter={v => v !== null ? `${v}%` : 'No data'} />
-                <Legend />
-                <Line type="monotone" dataKey="institution_avg" name="Institution Avg" stroke="#2E6E8E" strokeWidth={2} dot={false} connectNulls />
+              <AreaChart data={trendData} margin={{ top: 4, right: 12, left: 0, bottom: 0 }}>
+                <ChartGradients />
+                <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" vertical={false} />
+                <XAxis dataKey="period" type="category" tick={{ fontSize: 11 }} axisLine={{ stroke: '#E2E8F0' }} tickLine={false} />
+                <YAxis domain={[0, 100]} unit="%" tick={{ fontSize: 11 }} axisLine={false} tickLine={false} />
+                <Tooltip content={<CustomTooltip formatter={v => v !== null ? `${v}%` : 'No data'} />} />
+                <Legend wrapperStyle={{ fontSize: 12 }} />
+                <Area type="monotone" dataKey="institution_avg" name="Institution Avg" stroke={COLOR.teal} strokeWidth={2.5}
+                  fill="url(#dkTealArea)" dot={false} activeDot={{ r: 5 }} connectNulls animationDuration={1000} />
                 {(subjF || cgF) && (
-                  <Line type="monotone" dataKey="subject_avg" name="Selected Avg" stroke="#1A2E40" strokeWidth={2} strokeDasharray="5 3" dot={false} connectNulls />
+                  <Area type="monotone" dataKey="subject_avg" name="Selected Avg" stroke={COLOR.navy} strokeWidth={2}
+                    strokeDasharray="5 3" fill="url(#dkSlateArea)" dot={false} activeDot={{ r: 5 }} connectNulls animationDuration={1000} />
                 )}
-              </LineChart>
+              </AreaChart>
             </ResponsiveContainer>
           )}
         </ChartCard>
 
         {/* Chart 3 — Assessment Type Comparison */}
-        <ChartCard title="Assessment Type Comparison">
+        <ChartCard index={2} title="Assessment Type Comparison" subtitle="Average mark by assessment type">
           {assessment.length === 0 ? <NoData /> : (
             <ResponsiveContainer width="100%" height={280}>
               <BarChart data={assessment} margin={{ top: 4, right: 12, left: 0, bottom: 0 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" />
-                <XAxis dataKey="type" tick={{ fontSize: 11 }} />
-                <YAxis domain={[0, 100]} unit="%" tick={{ fontSize: 11 }} />
-                <Tooltip formatter={v => `${v}%`} />
-                <Bar dataKey="avg_mark" name="Avg Mark %" fill="#2E6E8E" radius={[3,3,0,0]} />
+                <ChartGradients />
+                <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" vertical={false} />
+                <XAxis dataKey="type" tick={{ fontSize: 11 }} axisLine={{ stroke: '#E2E8F0' }} tickLine={false} />
+                <YAxis domain={[0, 100]} unit="%" tick={{ fontSize: 11 }} axisLine={false} tickLine={false} />
+                <Tooltip content={<CustomTooltip formatter={v => `${v}%`} />} cursor={{ fill: 'rgba(46,110,142,0.06)' }} />
+                <Bar dataKey="avg_mark" name="Avg Mark %" fill="url(#dkTeal)" radius={[6,6,0,0]} animationDuration={900} animationEasing="ease-out" />
               </BarChart>
             </ResponsiveContainer>
           )}
         </ChartCard>
 
         {/* Chart 4 — Pass / Fail Donut */}
-        <ChartCard title="Pass / Fail">
+        <ChartCard index={3} title="Pass / Fail" subtitle="Institution-wide outcome split">
           {!passFail || (passFail.pass_count === 0 && passFail.fail_count === 0) ? <NoData /> : (
             <ResponsiveContainer width="100%" height={280}>
               <PieChart>
+                <ChartGradients />
                 <Pie
                   data={[{ name: 'Pass', value: passFail.pass_count }, { name: 'Fail', value: passFail.fail_count }]}
-                  innerRadius="38%" outerRadius="62%"
+                  innerRadius="38%" outerRadius="62%" paddingAngle={3} cornerRadius={6}
                   dataKey="value" labelLine={false} label={PieLabel}
+                  animationDuration={900} animationEasing="ease-out"
                 >
-                  <Cell fill="#1D9E75" />
-                  <Cell fill="#E24B4A" />
+                  <Cell fill="url(#dkGreen)" />
+                  <Cell fill="url(#dkRed)" />
                 </Pie>
-                <Tooltip formatter={(v, name) => [v.toLocaleString(), name]} />
-                <Legend />
+                <Tooltip content={<CustomTooltip formatter={(v, name) => [v.toLocaleString(), name]} />} />
+                <Legend wrapperStyle={{ fontSize: 12 }} />
               </PieChart>
             </ResponsiveContainer>
           )}
         </ChartCard>
 
         {/* Chart 5 — International Performance (admin only, horizontal) */}
-        <ChartCard title="International Performance">
+        <ChartCard index={4} title="International Performance" subtitle="Average mark by country">
           {intl.length === 0 ? <NoData /> : (
             <div style={{ overflowY: 'auto', maxHeight: 320 }}>
               <ResponsiveContainer width="100%" height={Math.max(260, intl.length * 22)}>
                 <BarChart layout="vertical" data={intl} margin={{ top: 4, right: 40, left: 0, bottom: 0 }}>
+                  <ChartGradients />
                   <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" horizontal={false} />
-                  <XAxis type="number" domain={[0, 100]} unit="%" tick={{ fontSize: 10 }} />
-                  <YAxis type="category" dataKey="country" width={90} tick={{ fontSize: 10 }} />
-                  <Tooltip formatter={v => `${v}%`} />
-                  <Bar dataKey="avg_mark" name="Avg Mark %" fill="#2E6E8E" radius={[0,3,3,0]} />
+                  <XAxis type="number" domain={[0, 100]} unit="%" tick={{ fontSize: 10 }} axisLine={false} tickLine={false} />
+                  <YAxis type="category" dataKey="country" width={90} tick={{ fontSize: 10 }} axisLine={false} tickLine={false} />
+                  <Tooltip content={<CustomTooltip formatter={v => `${v}%`} />} cursor={{ fill: 'rgba(46,110,142,0.06)' }} />
+                  <Bar dataKey="avg_mark" name="Avg Mark %" fill="url(#dkTealH)" radius={[0,6,6,0]} animationDuration={900} animationEasing="ease-out" />
                 </BarChart>
               </ResponsiveContainer>
             </div>
@@ -428,16 +407,17 @@ export default function AdminDashboard() {
         </ChartCard>
 
         {/* Chart 6 — Subject Difficulty Index (admin only) */}
-        <ChartCard title="Subject Difficulty Index">
+        <ChartCard index={5} title="Subject Difficulty Index" subtitle="Highest failure rates, top 10 highlighted">
           {diffTop20.length === 0 ? <NoData /> : (
             <ResponsiveContainer width="100%" height={280}>
               <BarChart data={diffTop20} margin={{ top: 4, right: 12, left: 0, bottom: 50 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" />
-                <XAxis dataKey="subject" tick={{ fontSize: 9 }} angle={-40} textAnchor="end" interval={0} />
-                <YAxis domain={[0, 100]} unit="%" tick={{ fontSize: 11 }} />
-                <Tooltip formatter={v => `${v}%`} />
-                <Bar dataKey="failure_rate" name="Failure Rate %" radius={[3,3,0,0]}>
-                  {diffTop20.map((_, i) => <Cell key={i} fill={i < 10 ? '#E24B4A' : '#1A2E40'} />)}
+                <ChartGradients />
+                <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" vertical={false} />
+                <XAxis dataKey="subject" tick={{ fontSize: 9 }} angle={-40} textAnchor="end" interval={0} axisLine={{ stroke: '#E2E8F0' }} tickLine={false} />
+                <YAxis domain={[0, 100]} unit="%" tick={{ fontSize: 11 }} axisLine={false} tickLine={false} />
+                <Tooltip content={<CustomTooltip formatter={v => `${v}%`} />} cursor={{ fill: 'rgba(46,110,142,0.06)' }} />
+                <Bar dataKey="failure_rate" name="Failure Rate %" radius={[6,6,0,0]} animationDuration={900} animationEasing="ease-out">
+                  {diffTop20.map((_, i) => <Cell key={i} fill={i < 10 ? 'url(#dkRed)' : 'url(#dkNavy)'} />)}
                 </Bar>
               </BarChart>
             </ResponsiveContainer>
@@ -445,16 +425,17 @@ export default function AdminDashboard() {
         </ChartCard>
 
         {/* Chart 7 — Attendance Rate Distribution */}
-        <ChartCard title="Attendance Rate Distribution">
+        <ChartCard index={6} title="Attendance Rate Distribution" subtitle="Enrolments per attendance band">
           {!attDist || attDist.data.every(d => d.count === 0) ? <NoData /> : (
             <>
               <ResponsiveContainer width="100%" height={280}>
                 <BarChart data={attDist.data} margin={{ top: 4, right: 12, left: 0, bottom: 0 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" />
-                  <XAxis dataKey="band" tick={{ fontSize: 11 }} />
-                  <YAxis tick={{ fontSize: 11 }} />
-                  <Tooltip />
-                  <Bar dataKey="count" name="Enrolments" fill="#2E6E8E" radius={[3,3,0,0]} />
+                  <ChartGradients />
+                  <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" vertical={false} />
+                  <XAxis dataKey="band" tick={{ fontSize: 11 }} axisLine={{ stroke: '#E2E8F0' }} tickLine={false} />
+                  <YAxis tick={{ fontSize: 11 }} axisLine={false} tickLine={false} />
+                  <Tooltip content={<CustomTooltip />} cursor={{ fill: 'rgba(46,110,142,0.06)' }} />
+                  <Bar dataKey="count" name="Enrolments" fill="url(#dkTeal)" radius={[6,6,0,0]} animationDuration={900} animationEasing="ease-out" />
                 </BarChart>
               </ResponsiveContainer>
               <p style={s.chartFootnote}>
@@ -465,7 +446,7 @@ export default function AdminDashboard() {
         </ChartCard>
 
         {/* Chart 8 — Attendance vs Outcome */}
-        <ChartCard title="Attendance vs Outcome">
+        <ChartCard index={7} title="Attendance vs Outcome" subtitle="Average attendance, pass vs fail">
           {!attOutcome || attOutcome.n === 0 ? <NoData /> : (
             <>
               <ResponsiveContainer width="100%" height={280}>
@@ -476,13 +457,14 @@ export default function AdminDashboard() {
                   ]}
                   margin={{ top: 4, right: 12, left: 0, bottom: 0 }}
                 >
-                  <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" />
-                  <XAxis dataKey="status" tick={{ fontSize: 11 }} />
-                  <YAxis domain={[0, 100]} unit="%" tick={{ fontSize: 11 }} />
-                  <Tooltip formatter={v => `${v}%`} />
-                  <Bar dataKey="rate" name="Avg Attendance %" radius={[3,3,0,0]}>
-                    <Cell fill="#1D9E75" />
-                    <Cell fill="#E24B4A" />
+                  <ChartGradients />
+                  <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" vertical={false} />
+                  <XAxis dataKey="status" tick={{ fontSize: 11 }} axisLine={{ stroke: '#E2E8F0' }} tickLine={false} />
+                  <YAxis domain={[0, 100]} unit="%" tick={{ fontSize: 11 }} axisLine={false} tickLine={false} />
+                  <Tooltip content={<CustomTooltip formatter={v => `${v}%`} />} cursor={{ fill: 'rgba(46,110,142,0.06)' }} />
+                  <Bar dataKey="rate" name="Avg Attendance %" radius={[6,6,0,0]} animationDuration={900} animationEasing="ease-out">
+                    <Cell fill="url(#dkGreen)" />
+                    <Cell fill="url(#dkRed)" />
                   </Bar>
                 </BarChart>
               </ResponsiveContainer>
@@ -494,17 +476,18 @@ export default function AdminDashboard() {
         </ChartCard>
 
         {/* Chart 9 — Attendance by Subject (lowest 20, admin only) */}
-        <ChartCard title="Attendance by Subject (lowest 20)">
+        <ChartCard index={8} title="Attendance by Subject (lowest 20)">
           {!attBySubj || attBySubj.length === 0 ? <NoData /> : (
             <>
               <div style={{ overflowY: 'auto', maxHeight: 320 }}>
                 <ResponsiveContainer width="100%" height={Math.max(260, Math.min(20, attBySubj.length) * 22)}>
                   <BarChart layout="vertical" data={attBySubj.slice(0, 20)} margin={{ top: 4, right: 40, left: 0, bottom: 0 }}>
+                    <ChartGradients />
                     <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" horizontal={false} />
-                    <XAxis type="number" domain={[0, 100]} unit="%" tick={{ fontSize: 10 }} />
-                    <YAxis type="category" dataKey="SUBJECTCODE" width={90} tick={{ fontSize: 10 }} />
-                    <Tooltip formatter={v => `${v}%`} />
-                    <Bar dataKey="avg_attendance_rate" name="Avg Attendance %" fill="#2E6E8E" radius={[0,3,3,0]} />
+                    <XAxis type="number" domain={[0, 100]} unit="%" tick={{ fontSize: 10 }} axisLine={false} tickLine={false} />
+                    <YAxis type="category" dataKey="SUBJECTCODE" width={90} tick={{ fontSize: 10 }} axisLine={false} tickLine={false} />
+                    <Tooltip content={<CustomTooltip formatter={v => `${v}%`} />} cursor={{ fill: 'rgba(46,110,142,0.06)' }} />
+                    <Bar dataKey="avg_attendance_rate" name="Avg Attendance %" fill="url(#dkTealH)" radius={[0,6,6,0]} animationDuration={900} animationEasing="ease-out" />
                   </BarChart>
                 </ResponsiveContainer>
               </div>
@@ -562,13 +545,7 @@ const s = {
   },
 
   kpiRow: { display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)', gap: 14, marginBottom: 28 },
-  kpiCard: { background: '#fff', border: '0.5px solid #DDE4EA', borderRadius: 12, padding: '20px 18px', transition: 'box-shadow 0.2s' },
-  kpiLabel: { margin: '0 0 8px', fontSize: 11, fontWeight: 600, color: '#8BA5B8', textTransform: 'uppercase', letterSpacing: 0.5 },
-  kpiValue: { margin: '0 0 4px', fontSize: 28, fontWeight: 500, letterSpacing: -0.5 },
-  kpiSub:   { margin: 0, fontSize: 11, color: '#8BA5B8' },
 
   chartGrid: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 20 },
-  chartCard: { background: '#fff', border: '0.5px solid #DDE4EA', borderRadius: 12, padding: '20px' },
-  chartTitle: { margin: '0 0 14px', fontSize: 14, fontWeight: 500, color: '#1A2E40' },
   chartFootnote: { margin: '10px 0 0', fontSize: 10.5, color: '#8BA5B8', lineHeight: 1.4 },
 };

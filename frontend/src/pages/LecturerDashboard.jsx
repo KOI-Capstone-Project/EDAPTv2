@@ -2,49 +2,29 @@
 import { useEffect, useState, useCallback } from 'react';
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
-  ResponsiveContainer, Legend, LineChart, Line,
+  ResponsiveContainer, Legend, AreaChart, Area,
   PieChart, Pie, Cell,
 } from 'recharts';
 import api from '../services/api';
 import { getUser, getUserName } from '../utils/auth';
 import GeminiPanel from '../components/GeminiPanel';
+import {
+  DashboardKeyframes, KpiCard, ChartCard, NoData, ChartGradients, CustomTooltip, COLOR,
+} from '../components/DashboardKit';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 const ALL_PERIODS  = ['23.1','23.2','23.3','24.1','24.2','24.3','25.1','25.2','25.3'];
 const YEAR_PERIODS = { '2023':['23.1','23.2','23.3'], '2024':['24.1','24.2','24.3'], '2025':['25.1','25.2','25.3'] };
-const GRADE_COLORS = band => parseInt(band.split('-')[0], 10) < 50 ? '#E24B4A' : '#1D9E75';
 const DONUT_COLORS = ['#1D9E75','#E24B4A'];
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
-
-const fmtPct = v => v != null ? `${Number(v).toFixed(1)}%` : '—';
 
 function Spinner() {
   return (
     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: 200 }}>
       <div style={{ width: 32, height: 32, border: '3px solid #F0F4F8', borderTop: '3px solid #2E6E8E', borderRadius: '50%', animation: 'spin 0.8s linear infinite' }} />
     </div>
-  );
-}
-
-function NoData() {
-  return (
-    <div style={{ textAlign: 'center', padding: '48px 20px', color: '#8BA5B8' }}>
-      <div style={{ fontSize: 28, marginBottom: 10 }}>📊</div>
-      <div style={{ fontSize: 13, fontWeight: 500, color: '#1A2E40', marginBottom: 4 }}>No data available</div>
-      <div style={{ fontSize: 12 }}>Try adjusting your filters</div>
-    </div>
-  );
-}
-
-function Delta({ val }) {
-  if (val == null) return null;
-  const pos = val >= 0;
-  return (
-    <span style={{ fontSize: 12, fontWeight: 500, color: pos ? '#1D9E75' : '#E24B4A', marginLeft: 6 }}>
-      {pos ? '↑' : '↓'} {Math.abs(val).toFixed(1)}%
-    </span>
   );
 }
 
@@ -58,42 +38,6 @@ function PieLabel({ cx, cy, midAngle, innerRadius, outerRadius, percent }) {
     <text x={x} y={y} fill="#fff" textAnchor="middle" dominantBaseline="central" fontSize={12} fontWeight={700}>
       {`${(percent * 100).toFixed(0)}%`}
     </text>
-  );
-}
-
-// ── KPI Card ─────────────────────────────────────────────────────────────────
-
-function KpiCard({ label, value, sub, delta, accent }) {
-  const [hovered, setHovered] = useState(false);
-  return (
-    <div
-      style={{
-        ...s.kpiCard,
-        borderTop: `3px solid ${accent || '#DDE4EA'}`,
-        boxShadow: hovered ? '0 2px 8px rgba(0,0,0,0.06)' : 'none',
-        transition: 'box-shadow 0.2s',
-      }}
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
-    >
-      <p style={s.kpiLabel}>{label}</p>
-      <p style={{ ...s.kpiValue, color: accent || '#1A2E40' }}>
-        {value}
-        {delta !== undefined && <Delta val={delta} />}
-      </p>
-      {sub && <p style={s.kpiSub}>{sub}</p>}
-    </div>
-  );
-}
-
-// ── Chart Card ────────────────────────────────────────────────────────────────
-
-function ChartCard({ title, children }) {
-  return (
-    <div style={s.chartCard}>
-      <h3 style={s.chartTitle}>{title}</h3>
-      {children}
-    </div>
   );
 }
 
@@ -174,6 +118,7 @@ export default function LecturerDashboard() {
 
   return (
     <div>
+      <DashboardKeyframes />
 
       {/* ── Welcome banner ─────────────────────────────────────────── */}
       <div style={s.welcome}>
@@ -248,27 +193,35 @@ export default function LecturerDashboard() {
       {!loading && !error && (
         <div style={s.kpiRow}>
           <KpiCard
+            index={0} icon="🎓"
             label="Total Students"
-            value={summary?.total_students?.toLocaleString() ?? '—'}
+            value={summary?.total_students}
             sub="in scope"
           />
           <KpiCard
+            index={1} icon="📈"
             label="Average Mark"
-            value={fmtPct(summary?.avg_mark)}
+            value={summary?.avg_mark}
+            decimals={1} suffix="%"
+            accent={COLOR.teal}
             delta={avgMarkDelta}
             sub="vs previous period"
           />
           <KpiCard
+            index={2} icon="✅"
             label="Pass Rate"
-            value={fmtPct(summary?.pass_rate)}
+            value={summary?.pass_rate}
+            decimals={1} suffix="%"
+            accent={COLOR.green}
             delta={passRateDelta}
             sub="≥ 50% mark"
           />
           <KpiCard
+            index={3} icon="⚠️"
             label="At Risk"
-            value={summary?.at_risk_count?.toLocaleString() ?? '—'}
+            value={summary?.at_risk_count}
             sub="below 50%"
-            accent="#E24B4A"
+            warn
           />
         </div>
       )}
@@ -277,17 +230,18 @@ export default function LecturerDashboard() {
       {!loading && !error && (
         <div style={s.chartGrid}>
 
-          <ChartCard title="Grade Distribution">
+          <ChartCard index={0} title="Grade Distribution" subtitle="Students per mark band">
             {noData || gradeDist.length === 0 ? <NoData /> : (
               <ResponsiveContainer width="100%" height={280}>
                 <BarChart data={gradeDist} margin={{ top: 8, right: 16, left: 0, bottom: 8 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" />
-                  <XAxis dataKey="band" tick={{ fontSize: 11 }} />
-                  <YAxis tick={{ fontSize: 11 }} />
-                  <Tooltip />
-                  <Bar dataKey="count" name="Students" radius={[4, 4, 0, 0]}>
+                  <ChartGradients />
+                  <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" vertical={false} />
+                  <XAxis dataKey="band" tick={{ fontSize: 11 }} axisLine={{ stroke: '#E2E8F0' }} tickLine={false} />
+                  <YAxis tick={{ fontSize: 11 }} axisLine={false} tickLine={false} />
+                  <Tooltip content={<CustomTooltip />} cursor={{ fill: 'rgba(46,110,142,0.06)' }} />
+                  <Bar dataKey="count" name="Students" radius={[6, 6, 0, 0]} animationDuration={900} animationEasing="ease-out">
                     {gradeDist.map(entry => (
-                      <Cell key={entry.band} fill={GRADE_COLORS(entry.band)} />
+                      <Cell key={entry.band} fill={parseInt(entry.band.split('-')[0], 10) < 50 ? 'url(#dkRed)' : 'url(#dkGreen)'} />
                     ))}
                   </Bar>
                 </BarChart>
@@ -295,60 +249,66 @@ export default function LecturerDashboard() {
             )}
           </ChartCard>
 
-          <ChartCard title="Performance Trend">
-            <div style={s.legendRow}>
-              <span style={{ ...s.dot, background: '#2E6E8E' }} /> My Subject(s)
-              <span style={{ ...s.dot, background: '#94A3B8', marginLeft: 16 }} /> Institution Avg
-            </div>
+          <ChartCard index={1} title="Performance Trend" subtitle="My subject(s) vs institution average">
             {noData || trend.every(t => t.subject_avg == null && t.institution_avg == null) ? <NoData /> : (
               <ResponsiveContainer width="100%" height={260}>
-                <LineChart data={trend} margin={{ top: 8, right: 16, left: 0, bottom: 8 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" />
-                  <XAxis dataKey="period" type="category" tick={{ fontSize: 11 }} />
-                  <YAxis domain={[0, 100]} unit="%" tick={{ fontSize: 11 }} />
-                  <Tooltip formatter={v => v != null ? `${Number(v).toFixed(1)}%` : 'N/A'} />
-                  <Line type="monotone" dataKey="subject_avg"     name="My Subject(s)"   stroke="#2E6E8E" strokeWidth={2} dot={{ r: 3 }} connectNulls />
-                  <Line type="monotone" dataKey="institution_avg" name="Institution Avg" stroke="#94A3B8" strokeWidth={1.5} strokeDasharray="4 3" dot={false} connectNulls />
-                </LineChart>
+                <AreaChart data={trend} margin={{ top: 8, right: 16, left: 0, bottom: 8 }}>
+                  <ChartGradients />
+                  <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" vertical={false} />
+                  <XAxis dataKey="period" type="category" tick={{ fontSize: 11 }} axisLine={{ stroke: '#E2E8F0' }} tickLine={false} />
+                  <YAxis domain={[0, 100]} unit="%" tick={{ fontSize: 11 }} axisLine={false} tickLine={false} />
+                  <Tooltip content={<CustomTooltip formatter={v => v != null ? `${Number(v).toFixed(1)}%` : 'N/A'} />} />
+                  <Legend wrapperStyle={{ fontSize: 12 }} />
+                  <Area type="monotone" dataKey="subject_avg"     name="My Subject(s)"   stroke={COLOR.teal}  strokeWidth={2.5}
+                    fill="url(#dkTealArea)" dot={{ r: 3 }} activeDot={{ r: 5 }} connectNulls animationDuration={1000} />
+                  <Area type="monotone" dataKey="institution_avg" name="Institution Avg" stroke={COLOR.slate} strokeWidth={1.5}
+                    strokeDasharray="4 3" fill="url(#dkSlateArea)" dot={false} activeDot={{ r: 5 }} connectNulls animationDuration={1000} />
+                </AreaChart>
               </ResponsiveContainer>
             )}
           </ChartCard>
 
-          <ChartCard title="Assessment Type Comparison">
+          <ChartCard index={2} title="Assessment Type Comparison" subtitle="Average mark and pass rate by type">
             {noData || assessment.length === 0 ? <NoData /> : (
               <ResponsiveContainer width="100%" height={280}>
                 <BarChart data={assessment} margin={{ top: 8, right: 16, left: 0, bottom: 8 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" />
-                  <XAxis dataKey="type" tick={{ fontSize: 11 }} />
-                  <YAxis domain={[0, 100]} unit="%" tick={{ fontSize: 11 }} />
-                  <Tooltip formatter={v => `${Number(v).toFixed(1)}%`} />
-                  <Legend verticalAlign="top" />
-                  <Bar dataKey="avg_mark"  name="Avg Mark %"  fill="#2E6E8E" radius={[4,4,0,0]} />
-                  <Bar dataKey="pass_rate" name="Pass Rate %"  fill="#1D9E75" radius={[4,4,0,0]} />
+                  <ChartGradients />
+                  <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" vertical={false} />
+                  <XAxis dataKey="type" tick={{ fontSize: 11 }} axisLine={{ stroke: '#E2E8F0' }} tickLine={false} />
+                  <YAxis domain={[0, 100]} unit="%" tick={{ fontSize: 11 }} axisLine={false} tickLine={false} />
+                  <Tooltip content={<CustomTooltip formatter={v => `${Number(v).toFixed(1)}%`} />} cursor={{ fill: 'rgba(46,110,142,0.06)' }} />
+                  <Legend verticalAlign="top" wrapperStyle={{ fontSize: 12 }} />
+                  <Bar dataKey="avg_mark"  name="Avg Mark %"  fill="url(#dkTeal)"  radius={[6,6,0,0]} animationDuration={900} animationEasing="ease-out" />
+                  <Bar dataKey="pass_rate" name="Pass Rate %" fill="url(#dkGreen)" radius={[6,6,0,0]} animationDuration={900} animationEasing="ease-out" />
                 </BarChart>
               </ResponsiveContainer>
             )}
           </ChartCard>
 
-          <ChartCard title="Pass / Fail Breakdown">
+          <ChartCard index={3} title="Pass / Fail Breakdown" subtitle="Outcome split for the current scope">
             {noData || passFail.length === 0 ? <NoData /> : (
               <>
                 <ResponsiveContainer width="100%" height={220}>
                   <PieChart>
+                    <ChartGradients />
                     <Pie
                       data={passFail}
                       dataKey="count"
                       nameKey="status"
                       innerRadius="38%"
                       outerRadius="62%"
+                      paddingAngle={3}
+                      cornerRadius={6}
                       labelLine={false}
                       label={PieLabel}
+                      animationDuration={900}
+                      animationEasing="ease-out"
                     >
                       {passFail.map((entry, i) => (
-                        <Cell key={entry.status} fill={DONUT_COLORS[i % DONUT_COLORS.length]} />
+                        <Cell key={entry.status} fill={i % 2 === 0 ? 'url(#dkGreen)' : 'url(#dkRed)'} />
                       ))}
                     </Pie>
-                    <Tooltip formatter={(v, name) => [v.toLocaleString(), name]} />
+                    <Tooltip content={<CustomTooltip formatter={(v, name) => [v.toLocaleString(), name]} />} />
                   </PieChart>
                 </ResponsiveContainer>
                 <div style={s.donutLegend}>
@@ -363,7 +323,7 @@ export default function LecturerDashboard() {
             )}
           </ChartCard>
 
-          <ChartCard title="Attendance vs Outcome">
+          <ChartCard index={4} title="Attendance vs Outcome" subtitle="Average attendance, pass vs fail">
             {noData || !attOutcome || attOutcome.n === 0 ? <NoData /> : (
               <>
                 <ResponsiveContainer width="100%" height={260}>
@@ -374,13 +334,14 @@ export default function LecturerDashboard() {
                     ]}
                     margin={{ top: 8, right: 16, left: 0, bottom: 8 }}
                   >
-                    <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" />
-                    <XAxis dataKey="status" tick={{ fontSize: 11 }} />
-                    <YAxis domain={[0, 100]} unit="%" tick={{ fontSize: 11 }} />
-                    <Tooltip formatter={v => `${v}%`} />
-                    <Bar dataKey="rate" name="Avg Attendance %" radius={[4,4,0,0]}>
-                      <Cell fill="#1D9E75" />
-                      <Cell fill="#E24B4A" />
+                    <ChartGradients />
+                    <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" vertical={false} />
+                    <XAxis dataKey="status" tick={{ fontSize: 11 }} axisLine={{ stroke: '#E2E8F0' }} tickLine={false} />
+                    <YAxis domain={[0, 100]} unit="%" tick={{ fontSize: 11 }} axisLine={false} tickLine={false} />
+                    <Tooltip content={<CustomTooltip formatter={v => `${v}%`} />} cursor={{ fill: 'rgba(46,110,142,0.06)' }} />
+                    <Bar dataKey="rate" name="Avg Attendance %" radius={[6,6,0,0]} animationDuration={900} animationEasing="ease-out">
+                      <Cell fill="url(#dkGreen)" />
+                      <Cell fill="url(#dkRed)" />
                     </Bar>
                   </BarChart>
                 </ResponsiveContainer>
@@ -391,16 +352,17 @@ export default function LecturerDashboard() {
             )}
           </ChartCard>
 
-          <ChartCard title="Attendance by Subject">
+          <ChartCard index={5} title="Attendance by Subject">
             {noData || !attBySubj || attBySubj.length === 0 ? <NoData /> : (
               <>
                 <ResponsiveContainer width="100%" height={Math.max(220, attBySubj.length * 26)}>
                   <BarChart layout="vertical" data={attBySubj} margin={{ top: 8, right: 30, left: 0, bottom: 8 }}>
+                    <ChartGradients />
                     <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" horizontal={false} />
-                    <XAxis type="number" domain={[0, 100]} unit="%" tick={{ fontSize: 10 }} />
-                    <YAxis type="category" dataKey="SUBJECTCODE" width={80} tick={{ fontSize: 10 }} />
-                    <Tooltip formatter={v => `${v}%`} />
-                    <Bar dataKey="avg_attendance_rate" name="Avg Attendance %" fill="#2E6E8E" radius={[0,4,4,0]} />
+                    <XAxis type="number" domain={[0, 100]} unit="%" tick={{ fontSize: 10 }} axisLine={false} tickLine={false} />
+                    <YAxis type="category" dataKey="SUBJECTCODE" width={80} tick={{ fontSize: 10 }} axisLine={false} tickLine={false} />
+                    <Tooltip content={<CustomTooltip formatter={v => `${v}%`} />} cursor={{ fill: 'rgba(46,110,142,0.06)' }} />
+                    <Bar dataKey="avg_attendance_rate" name="Avg Attendance %" fill="url(#dkTealH)" radius={[0,6,6,0]} animationDuration={900} animationEasing="ease-out" />
                   </BarChart>
                 </ResponsiveContainer>
                 <p style={s.chartFootnote}>My assigned subject(s) only</p>
@@ -472,20 +434,10 @@ const s = {
   },
 
   kpiRow: { display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 16, marginBottom: 24 },
-  kpiCard: {
-    background: '#fff', border: '0.5px solid #DDE4EA',
-    borderRadius: 12, padding: '20px',
-  },
-  kpiLabel: { margin: '0 0 8px', fontSize: 11, fontWeight: 600, color: '#8BA5B8', textTransform: 'uppercase', letterSpacing: 0.5 },
-  kpiValue: { margin: '0 0 4px', fontSize: 28, fontWeight: 500, letterSpacing: -0.5, display: 'flex', alignItems: 'center', color: '#1A2E40' },
-  kpiSub:   { margin: 0, fontSize: 12, color: '#8BA5B8' },
 
   chartGrid: { display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 20 },
-  chartCard: { background: '#fff', border: '0.5px solid #DDE4EA', borderRadius: 12, padding: '20px' },
-  chartTitle: { margin: '0 0 14px', fontSize: 14, fontWeight: 500, color: '#1A2E40' },
   chartFootnote: { margin: '10px 0 0', fontSize: 10.5, color: '#8BA5B8', lineHeight: 1.4 },
 
-  legendRow: { display: 'flex', alignItems: 'center', fontSize: 12, color: '#5A7A8A', marginBottom: 8 },
   dot: { display: 'inline-block', width: 10, height: 10, borderRadius: '50%', marginRight: 5 },
   donutLegend: { display: 'flex', gap: 20, marginTop: 8, justifyContent: 'center' },
   donutLegendItem: { display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, color: '#475569' },
