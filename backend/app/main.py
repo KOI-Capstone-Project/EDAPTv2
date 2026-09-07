@@ -4148,10 +4148,13 @@ async def get_email_log(
     return {**_email_log_to_dict(log), "body": log.body}
 
 
-def _chat_log_to_dict(log: ChatLog, *, role: Optional[str] = None, include_answer: bool = False) -> dict:
+def _chat_log_to_dict(
+    log: ChatLog, *, name: Optional[str] = None, role: Optional[str] = None, include_answer: bool = False,
+) -> dict:
     d = {
         "id":                log.id,
         "user_uid":          log.user_uid,
+        "name":              name,
         "role":              role,
         "question":          log.question,
         "study_period_used": log.study_period_used,
@@ -4183,14 +4186,20 @@ async def list_chat_logs(
     result = await db.execute(stmt)
     logs = result.scalars().all()
 
-    # Resolve each distinct asker to their current role in one batched
-    # query — same pattern get_audit_logs already uses — so the table can
-    # show "Head of School" instead of a bare email.
+    # Resolve each distinct asker to their current name/role in one batched
+    # query — same pattern get_audit_logs already uses for role — so the
+    # table can show a name + avatar initials instead of a bare email.
     uids = {log.user_uid for log in logs}
-    role_rows = await db.execute(select(UserModel.email, UserModel.role).where(UserModel.email.in_(uids)))
-    role_map: dict[str, str] = dict(role_rows.all())
+    user_rows = await db.execute(select(UserModel.email, UserModel.name, UserModel.role).where(UserModel.email.in_(uids)))
+    user_map: dict[str, tuple[str, str]] = {email: (name, role) for email, name, role in user_rows.all()}
 
-    return {"logs": [_chat_log_to_dict(log, role=role_map.get(log.user_uid)) for log in logs]}
+    return {
+        "logs": [
+            _chat_log_to_dict(log, name=user_map.get(log.user_uid, (None, None))[0],
+                               role=user_map.get(log.user_uid, (None, None))[1])
+            for log in logs
+        ]
+    }
 
 
 @app.get("/api/chat-logs/users", tags=["Chat Logs"])
@@ -4208,9 +4217,15 @@ async def list_chat_log_users(
     )
     rows = result.all()
     uids = [r[0] for r in rows]
-    role_rows = await db.execute(select(UserModel.email, UserModel.role).where(UserModel.email.in_(uids)))
-    role_map: dict[str, str] = dict(role_rows.all())
-    return {"users": [{"user_uid": uid, "role": role_map.get(uid), "count": count} for uid, count in rows]}
+    user_rows = await db.execute(select(UserModel.email, UserModel.name, UserModel.role).where(UserModel.email.in_(uids)))
+    user_map: dict[str, tuple[str, str]] = {email: (name, role) for email, name, role in user_rows.all()}
+    return {
+        "users": [
+            {"user_uid": uid, "name": user_map.get(uid, (None, None))[0],
+             "role": user_map.get(uid, (None, None))[1], "count": count}
+            for uid, count in rows
+        ]
+    }
 
 
 @app.get("/api/chat-logs/{log_id}", tags=["Chat Logs"])
@@ -4223,8 +4238,11 @@ async def get_chat_log(
     log = await db.get(ChatLog, log_id)
     if log is None:
         raise HTTPException(404, "Chat log not found.")
-    role = (await db.execute(select(UserModel.role).where(UserModel.email == log.user_uid))).scalar_one_or_none()
-    return _chat_log_to_dict(log, role=role, include_answer=True)
+    row = (await db.execute(
+        select(UserModel.name, UserModel.role).where(UserModel.email == log.user_uid)
+    )).one_or_none()
+    name, role = row if row else (None, None)
+    return _chat_log_to_dict(log, name=name, role=role, include_answer=True)
 
 
 @app.post("/api/predict", tags=["ML"])

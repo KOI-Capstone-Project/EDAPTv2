@@ -21,6 +21,37 @@ function Spinner() {
   return <span style={s.spinner} />;
 }
 
+// Same initials-in-a-gradient-circle convention as the sidebar's own user
+// avatar (Sidebar.jsx) — this app has no photo-upload feature (User has no
+// avatar/photo column at all), so initials are the only "photo" it's ever
+// had anywhere. Falls back to the email's first character when no name is
+// resolved (a user_uid whose account was since deleted, say).
+function initialsFromName(name, fallback) {
+  const source = name || fallback || '';
+  const initials = source.trim().split(/\s+/).map(w => w[0] || '').join('').toUpperCase().slice(0, 2);
+  return initials || '?';
+}
+
+function UserAvatar({ name, userUid, size = 30 }) {
+  return (
+    <span style={{ ...s.avatar, width: size, height: size, fontSize: size * 0.4 }}>
+      {initialsFromName(name, userUid)}
+    </span>
+  );
+}
+
+function UserCell({ name, userUid }) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+      <UserAvatar name={name} userUid={userUid} />
+      <div style={{ minWidth: 0 }}>
+        <div style={{ fontWeight: 500, color: '#1A2E40', whiteSpace: 'nowrap' }}>{name || userUid}</div>
+        {name && <div style={{ fontSize: 11, color: '#8BA5B8', whiteSpace: 'nowrap' }}>{userUid}</div>}
+      </div>
+    </div>
+  );
+}
+
 // Question/answer are shown as raw, escaped source (a <pre> block), not
 // rendered HTML — same reasoning as EmailLogsView's DetailPanel: a chat
 // answer is free text that could contain anything, and this panel is for
@@ -36,7 +67,8 @@ function DetailPanel({ log, onClose }) {
         </div>
         <div style={s.detailGrid}>
           <span style={s.detailLabel}>Asked At</span><span>{fmt(log.asked_at)}</span>
-          <span style={s.detailLabel}>User</span><span>{log.user_uid}</span>
+          <span style={s.detailLabel}>User</span>
+          <span><UserCell name={log.name} userUid={log.user_uid} /></span>
           <span style={s.detailLabel}>Role</span><span>{log.role || '—'}</span>
           <span style={s.detailLabel}>Study Period</span><span>{log.study_period_used || '—'}</span>
           <span style={s.detailLabel}>Model</span><span>{log.model || '—'}</span>
@@ -99,7 +131,7 @@ export default function ChatLogsView() {
           <option value="">All users</option>
           {users.map(u => (
             <option key={u.user_uid} value={u.user_uid}>
-              {u.user_uid}{u.role ? ` (${u.role})` : ''} — {u.count} {u.count === 1 ? 'question' : 'questions'}
+              {u.name || u.user_uid}{u.role ? ` (${u.role})` : ''} — {u.count} {u.count === 1 ? 'question' : 'questions'}
             </option>
           ))}
         </select>
@@ -130,7 +162,7 @@ export default function ChatLogsView() {
             ) : logs.map((log, i) => (
               <tr key={log.id} style={{ background: i % 2 === 0 ? '#fff' : '#F8FAFB' }}>
                 <td style={{ ...s.td, whiteSpace: 'nowrap' }}>{fmt(log.asked_at)}</td>
-                <td style={s.td}>{log.user_uid}</td>
+                <td style={s.td}><UserCell name={log.name} userUid={log.user_uid} /></td>
                 <td style={s.td}>{log.role || '—'}</td>
                 <td style={s.td}>{truncate(log.question)}</td>
                 <td style={s.td}>{log.study_period_used || '—'}</td>
@@ -166,6 +198,16 @@ const s = {
   spinner: {
     display: 'inline-block', width: 20, height: 20, borderRadius: '50%',
     border: '3px solid #F0F4F8', borderTopColor: '#2E6E8E', animation: 'chatLogSpin 0.8s linear infinite',
+  },
+
+  // Same gradient-circle-with-initials convention as the sidebar's own
+  // user avatar (components/Sidebar.jsx) — this app has no photo upload
+  // feature, so initials are the closest thing to a "photo" it has.
+  avatar: {
+    display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+    borderRadius: '50%', flexShrink: 0,
+    background: 'linear-gradient(135deg, #2E6E8E 0%, #4A9BC4 100%)',
+    color: '#fff', fontWeight: 600, lineHeight: 1,
   },
 
   tableWrapper: { background: '#fff', border: '0.5px solid #DDE4EA', borderRadius: 12, overflow: 'hidden' },
