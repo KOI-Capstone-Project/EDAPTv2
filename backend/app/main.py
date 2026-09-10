@@ -6766,10 +6766,17 @@ async def delete_risk_email_template(
 # nothing is recomputed locally, so the dashboard cannot disagree with what
 # the CLI reports.
 
-def _live_model_summary() -> dict:
-    """Current live model of each family, straight from its registry file."""
-    from app.ml.model_registry import load_registry as load_main_registry, get_live_entry as live_main
-    from app.ml.sim_model_registry import load_registry as load_sim_registry, get_live_entry as live_sim
+def _live_model_summary(main_reg: dict, sim_reg: dict) -> dict:
+    """Current live model of each family, straight from its registry file.
+
+    Takes already-loaded registries rather than loading them itself: the
+    caller (model_health()) also hands the complete-record one to
+    check_bias_persistence.collect(), and re-reading + re-parsing the same
+    registry.json a second time in the same request for no reason was a real,
+    if minor, redundant-I/O bug — not a hypothetical one.
+    """
+    from app.ml.model_registry import get_live_entry as live_main
+    from app.ml.sim_model_registry import get_live_entry as live_sim
     from app.ml import predictor
     # The complete-record threshold is a module constant; the mid-term one is
     # stored per-model in the package because it is re-selected on every
@@ -6831,7 +6838,6 @@ def _live_model_summary() -> dict:
             },
         }
 
-    main_reg, sim_reg = load_main_registry(), load_sim_registry()
     return {
         "complete_record": summarise(
             live_main(main_reg), main_reg, FAIL_THRESHOLD,
@@ -6860,9 +6866,17 @@ async def model_health(
     Gated with require_head_of_school (Head of Technology OR Head of School),
     matching the other institution-wide admin pages. A Lecturer gets 403.
     """
+    from app.ml.model_registry import load_registry as load_main_registry
+    from app.ml.sim_model_registry import load_registry as load_sim_registry
     from app.ml.check_bias_persistence import collect as collect_bias
     from app.ml.prediction_accuracy_report import summarise as summarise_accuracy
     from app.ml.intervention_outcome_report import collect as collect_interventions
+
+    # Loaded once and handed to both consumers below — _live_model_summary()
+    # and collect_bias() both read the complete-record registry.json, and
+    # loading it twice per request was pure redundant disk I/O.
+    main_reg = load_main_registry()
+    sim_reg = load_sim_registry()
 
     # Reuse the report's own summarise() on rows from THIS request's session,
     # rather than its collect() (which opens a second engine of its own).
@@ -6871,9 +6885,9 @@ async def model_health(
     )).scalars().all()
 
     return {
-        "live_models":      _live_model_summary(),
+        "live_models":      _live_model_summary(main_reg, sim_reg),
         "accuracy":         summarise_accuracy(reconciled),
-        "fairness":         collect_bias(),
+        "fairness":         collect_bias(main_reg),
         "interventions":    await collect_interventions(db),
         "generated_at":     datetime.now(timezone.utc).isoformat(),
     }

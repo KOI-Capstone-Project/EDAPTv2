@@ -943,6 +943,60 @@ async def test_model_health_matches_a_fresh_direct_run_of_the_source_scripts():
         assert sum(by_type) == acc["reconciled_count"]
 
 
+def test_prediction_accuracy_report_buckets_every_row_and_flags_small_samples():
+    """Regression test for the single-pass bucketing refactor in
+    prediction_accuracy_report.summarise(): every reconciled row must land in
+    exactly the same bucket(s) the original per-group re-filtering would have
+    put it in — none dropped, none duplicated, none crossed over — and a
+    breakdown group below MIN_N_FOR_RELIABLE must be flagged unreliable
+    rather than shown as a bare, confident percentage.
+
+    Builds transient (unsaved) Prediction rows directly — summarise() only
+    reads plain attributes, so no database is needed.
+    """
+    from app.db.models import Prediction
+    from app.ml.prediction_accuracy_report import summarise, MIN_N_FOR_RELIABLE
+
+    def row(*, predicted_pass, actual_pass, model_version, estimate_type=None, reconciled_via_resit=False):
+        return Prediction(
+            student_id_masked="s", subject_code="ICT104", study_period="25.3",
+            model_version=model_version, predicted_pass=predicted_pass, pass_probability=0.5,
+            risk_band="Safe" if predicted_pass else "High Risk",
+            actual_pass=actual_pass, estimate_type=estimate_type,
+            reconciled_via_resit=reconciled_via_resit,
+        )
+
+    rows = [
+        # 9 complete-record, standard-reconciliation rows on "v1" — one
+        # short of MIN_N_FOR_RELIABLE, all correct predictions.
+        *[row(predicted_pass=True, actual_pass=True, model_version="v1") for _ in range(9)],
+        # 1 mid-term-estimate row, resit-reconciled, on a different version —
+        # must not be counted as "v1", "complete-record", or "standard".
+        row(predicted_pass=False, actual_pass=False, model_version="v2",
+            estimate_type="mid-term estimate", reconciled_via_resit=True),
+    ]
+
+    out = summarise(rows)
+
+    assert out["reconciled_count"] == 10
+    assert out["min_n_for_reliable"] == MIN_N_FOR_RELIABLE == 10
+
+    # Every row is accounted for exactly once per breakdown dimension.
+    assert out["by_model_version"]["v1"]["n"] == 9
+    assert out["by_model_version"]["v2"]["n"] == 1
+    assert out["by_estimate_type"]["complete-record"]["n"] == 9
+    assert out["by_estimate_type"]["mid-term estimate"]["n"] == 1
+    assert out["by_reconciliation"]["standard (attempt-1)"]["n"] == 9
+    assert out["by_reconciliation"]["resit fallback (latest attempt)"]["n"] == 1
+
+    # The 9-row bucket is below the reliability floor; the 1-row bucket is
+    # too. Overall (n=10) sits exactly at the floor and must be reliable.
+    assert out["by_model_version"]["v1"]["reliable"] is False
+    assert out["by_estimate_type"]["mid-term estimate"]["reliable"] is False
+    assert out["overall"]["reliable"] is True
+    assert out["overall"]["n"] == 10
+
+
 def test_intervention_outcome_report_refuses_to_compare_on_thin_data():
     """The intervention/outcome comparison must decline to report a percentage
     when either group is too small, rather than printing a meaningless number.

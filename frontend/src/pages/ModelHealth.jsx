@@ -352,11 +352,28 @@ function ClassicalView({ data }) {
   const midTerm  = lm.mid_term;
   const bothLive = complete?.live && midTerm?.live;
 
-  const flaggedNow = (fair.flagged_groups || []);
-  const confirmedBias = fair.enough_for_a_trend && flaggedNow.length > 0;
+  // A group is only a real recurring signal if IT (not just the system as a
+  // whole) was flagged in >=2 independent retrains — matching
+  // check_bias_persistence.py's own per-group verdict ("elif n_flagged >= 2"
+  // in _print_trend()). fair.enough_for_a_trend only says the system has
+  // enough total independent retrains to judge a trend AT ALL — it says
+  // nothing about any specific group. Conflating the two would show a group
+  // flagged in just 1 of, say, 5 retrains as a "recurring pattern" — the
+  // exact kind of false positive this page exists to avoid.
+  const flaggedNow      = (fair.flagged_groups || []);
+  const recurringGroups = flaggedNow.filter(g => g.times_flagged >= 2);
+  const isolatedGroups = flaggedNow.filter(g => g.times_flagged < 2);
+  const confirmedBias   = fair.enough_for_a_trend && recurringGroups.length > 0;
 
+  // Deliberately only claims what's actually checked below (liveness,
+  // fairness) — it must NOT claim anything about accuracy being fine, since
+  // this banner never evaluates accuracy. This project has no established
+  // "accuracy is too low" threshold to check against (inventing one here
+  // would be exactly the kind of unearned number this page's own header
+  // comment says to avoid), so real-world accuracy is reported below as its
+  // own section, unsummarised into this verdict.
   let overallLevel = 'green';
-  let overallText = 'Both prediction models are active, and there are no confirmed accuracy or fairness problems.';
+  let overallText = 'Both prediction models are active, and no fairness problem has been confirmed. See "How accurate" below for real-world accuracy.';
   if (!bothLive) {
     overallLevel = 'red';
     overallText = 'Action needed — at least one prediction model is not currently active.';
@@ -445,17 +462,36 @@ function ClassicalView({ data }) {
             )}
           </>
         ) : confirmedBias ? (
-          <StatusPill level="amber">
-            <strong>{flaggedNow.map(g => `${g.group} (${g.category})`).join(', ')}</strong> {flaggedNow.length === 1 ? 'has' : 'have'} shown
-            a recurring pattern of less accurate predictions, across {fair.independent_retrains}{' '}
-            independent retraining checks. This should be reviewed by someone who understands the
-            model before it's dismissed as coincidence.
-          </StatusPill>
+          <>
+            <StatusPill level="amber">
+              <strong>{recurringGroups.map(g => `${g.group} (${g.category})`).join(', ')}</strong>{' '}
+              {recurringGroups.length === 1 ? 'has' : 'have'} shown a recurring pattern of less
+              accurate predictions, across {fair.independent_retrains} independent retraining checks.
+              This should be reviewed by someone who understands the model before it's dismissed as
+              coincidence.
+            </StatusPill>
+            {isolatedGroups.length > 0 && (
+              <p style={{ ...S.note, marginTop: 10 }}>
+                Also flagged once (but not recurring, so not yet a pattern):{' '}
+                <strong>{isolatedGroups.map(g => g.group).join(', ')}</strong>.
+              </p>
+            )}
+          </>
         ) : (
-          <StatusPill level="green">
-            No group of students (by country, gender, or age) has shown a consistent pattern of less
-            accurate predictions, across {fair.independent_retrains} independent retraining checks.
-          </StatusPill>
+          <>
+            <StatusPill level="green">
+              No group of students (by country, gender, or age) has shown a <strong>recurring</strong>{' '}
+              pattern of less accurate predictions, across {fair.independent_retrains} independent
+              retraining checks.
+            </StatusPill>
+            {isolatedGroups.length > 0 && (
+              <p style={{ ...S.note, marginTop: 10 }}>
+                Worth watching: <strong>{isolatedGroups.map(g => g.group).join(', ')}</strong> was
+                flagged in exactly one of those checks — an isolated result so far, not (yet) a
+                pattern.
+              </p>
+            )}
+          </>
         )}
       </div>
 

@@ -101,7 +101,7 @@ def _print_trend(distinct_points: list) -> None:
         print("\n  No group was flagged in any of the independent retrains checked.")
 
 
-def collect() -> dict:
+def collect(registry: dict | None = None) -> dict:
     """The same analysis main() prints, returned as data.
 
     Added so the model-health endpoint can surface these findings without
@@ -109,8 +109,16 @@ def collect() -> dict:
     is that a re-run on unchanged data is NOT independent evidence. A second
     implementation would be free to quietly forget that and inflate the
     apparent number of observations, so there is deliberately only one.
+
+    Accepts an already-loaded registry so a caller that has also loaded it
+    for another purpose in the same request (the model-health endpoint reads
+    this same file via model_registry.load_registry() for the live-model
+    summary too) doesn't read and re-parse registry.json twice for no
+    reason. Defaults to loading it fresh, so `python -m
+    app.ml.check_bias_persistence` is unaffected.
     """
-    registry = load_registry()
+    if registry is None:
+        registry = load_registry()
     versions = registry.get("versions", [])
     audited = [v for v in versions if "bias_audit" in v]
 

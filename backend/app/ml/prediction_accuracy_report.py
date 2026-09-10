@@ -88,18 +88,29 @@ def summarise(reconciled) -> dict:
     def group(rows):
         return _fail_metrics([(p.predicted_pass, p.actual_pass) for p in rows])
 
-    by_version = {
-        v: group([p for p in reconciled if p.model_version == v])
-        for v in sorted({p.model_version for p in reconciled})
-    }
-    by_estimate_type = {
-        "complete-record":   group([p for p in reconciled if p.estimate_type is None]),
-        "mid-term estimate": group([p for p in reconciled if p.estimate_type == "mid-term estimate"]),
-    }
-    by_reconciliation = {
-        "standard (attempt-1)":            group([p for p in reconciled if not p.reconciled_via_resit]),
-        "resit fallback (latest attempt)": group([p for p in reconciled if p.reconciled_via_resit]),
-    }
+    # Bucket in a single pass rather than re-scanning the full `reconciled`
+    # list once per version/type/method (that was O(distinct values × N) —
+    # with a dozen+ registered model versions, each adding a full extra pass
+    # over every reconciled row). Buckets, then group() each one — same
+    # output, one pass over the data instead of many.
+    version_rows: dict = {}
+    estimate_rows = {"complete-record": [], "mid-term estimate": []}
+    reconciliation_rows = {"standard (attempt-1)": [], "resit fallback (latest attempt)": []}
+    for p in reconciled:
+        version_rows.setdefault(p.model_version, []).append(p)
+        # Matches the original filter exactly: only these two estimate_type
+        # values are bucketed here (a row with any other value — which
+        # shouldn't occur — is still counted in reconciled_count/overall,
+        # just not attributed to either named bucket, same as before).
+        if p.estimate_type is None:
+            estimate_rows["complete-record"].append(p)
+        elif p.estimate_type == "mid-term estimate":
+            estimate_rows["mid-term estimate"].append(p)
+        reconciliation_rows["resit fallback (latest attempt)" if p.reconciled_via_resit else "standard (attempt-1)"].append(p)
+
+    by_version = {v: group(rows) for v, rows in sorted(version_rows.items())}
+    by_estimate_type = {k: group(rows) for k, rows in estimate_rows.items()}
+    by_reconciliation = {k: group(rows) for k, rows in reconciliation_rows.items()}
     return {
         "reconciled_count":   len(reconciled),
         "overall":            group(reconciled),
