@@ -4,6 +4,31 @@ All notable changes to EDAPT v2 are documented here.
 
 ---
 
+## [2026-09-10] — Background Risk Scoring, Prediction Caching, Model Health Two-View, Chatbot Fix
+
+### Added
+
+- **Background/on-demand bulk risk-prediction scoring** — new `ScoringJob` model + `POST /api/scoring/run` (Head of Technology/Head of School, 202 + job id, 409 if one's already running), `GET /api/scoring/jobs`, `GET /api/scoring/jobs/{id}`. Runs automatically right after a capstone or attendance ingestion succeeds (`trigger: "auto_after_ingest"`, scoped to exactly the study periods that upload touched), or on demand via a new "Run Risk Scoring Now" button on the Data Ingestion page. A new "Risk Scoring" tab there tracks live `subjects_completed/subjects_total` progress, polled the same way the existing Ingestion Activity tab already is. See the README's [Background risk-prediction scoring & prediction caching](README.md#background-risk-prediction-scoring--prediction-caching) section for the full design.
+- **`subject_roster()` now reuses a fresh cached `Prediction` row instead of always recomputing** — the real per-student ML+SHAP call is skipped only when the cached row's `model_version` matches the currently-live model, its `estimate_type` matches the current coverage tier, and its `predicted_at` is at or after the latest successful ingestion; any one guard failing forces a real recompute. `students_at_risk()` inherits the speedup with no changes of its own. The two remaining blocking model-call sites are now wrapped in `asyncio.to_thread(...)` so the event loop isn't held hostage for the full ~50s a full-roster call used to take.
+- **`predictions.top_actionable_factor`** (new JSON column) — persists the SHAP-derived "what would help most" conclusion so a cache-hit roster read can reconstruct the full row without re-running SHAP just for that one field.
+- **Model Health — Classical/Technical view toggle** (`/model-health`) — same `GET /api/admin/model-health` payload, rendered either as plain-English traffic-light verdicts for a non-technical reader or the existing full metrics/tables view. Preference remembered per-browser.
+- `test_roster_caching.py` (3 tests) — cache-hit (proven via a monkeypatch that raises if the model is called), superseded-`model_version` staleness, and stale-`predicted_at` staleness.
+
+### Fixed
+
+- **Chatbot false refusal for a real, in-scope subject with no data yet** — "How many students are at risk in ICT104?" was returning the hard out-of-scope refusal sentence for a subject that simply had zero `Prediction` rows for that period, not an actual scope violation. Fixed by enriching the AI's own context with `subjects_explicitly_asked_about` (any in-scope subject named in the question) plus a prompt instruction to explain a data gap honestly rather than refuse, instead of adding a second, narrower deterministic gate that risked blocking otherwise-answerable questions (marks/attendance) about the same subject.
+- **Model Health "confirmed recurring bias" false positive** — a flagged demographic group was reported as a confirmed, persistent bias if the system had run *any* 2+ independent retrains total, not if that specific group had recurred as flagged across 2+ of them. Split into `recurringGroups` vs. `isolatedGroups`.
+- **Model Health "Overall status" banner overclaiming** — reworded to state only what the endpoint actually checks (liveness + fairness), not a general accuracy guarantee it never verified.
+- **`prediction_accuracy_report.py` never flagged small-sample metrics** — added `MIN_N_FOR_RELIABLE = 10` (matching `intervention_outcome_report.py`'s existing threshold) with a `reliable: false` flag and a visible `⚠ small sample` caveat below it, in both the CLI and the dashboard.
+- **Dashboard charts (Admin + Lecturer) rendering with invisible bars/areas** — root-caused to Recharts silently dropping a custom `<ChartGradients/>` component (its internal `renderByOrder` only passes through children whose `type` is a literal native-SVG-tag string), compounded by duplicate gradient `id`s across multiple charts on one page (SVG ids are document-wide, not per-`<svg>`-root). Fixed by calling gradient-def generation as a plain function (`{chartGradientDefs(gid(n))}`) and giving every chart's gradient ids a `useId()`-based per-chart suffix.
+
+### Changed
+
+- `prediction_accuracy_report.summarise()` refactored from repeated per-group re-filtering (O(distinct-values × N)) to a single-pass bucketing pass, with identical output semantics.
+- `check_bias_persistence.collect()` now accepts an already-loaded registry dict (defaults to loading fresh for the CLI) so the Model Health endpoint loads each registry once instead of twice per request.
+
+---
+
 ## [2026-07-17] — Dead File Cleanup
 
 ### Removed

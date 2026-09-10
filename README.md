@@ -134,20 +134,21 @@ EDAPTv2/
 │   │           └── model_<timestamp>.pkl
 │   ├── scripts/
 │   │   └── retrain_loop.sh            # Sidecar scheduler loop (scheduled_retrain.py → sleep 24h → repeat)
-│   ├── tests/                          # 101 tests across 13 files — see Running Tests
+│   ├── tests/                          # 113 tests across 14 files (regenerated via pytest --collect-only) — see Running Tests
 │   │   ├── conftest.py                # runs the app's real startup handler for tests
-│   │   ├── test_smoke.py              # 24 tests
-│   │   ├── test_chatbot.py            # 14 tests — POST /api/chatbot/ask context/scoping/refusal
+│   │   ├── test_smoke.py              # 26 tests
+│   │   ├── test_chatbot.py            # 20 tests — POST /api/chatbot/ask context/scoping/refusal
 │   │   ├── test_ingestion_e2e.py      # 8 tests
 │   │   ├── test_mail_servers.py       # 8 tests — Outgoing Mail Servers CRUD + test-connection
 │   │   ├── test_incremental_merge.py  # 7 tests
 │   │   ├── test_batch_upload.py       # 7 tests — chunked large-file upload
 │   │   ├── test_oauth_provider_config.py  # 6 tests
 │   │   ├── test_oauth_login.py        # 6 tests
-│   │   ├── test_email_logs.py         # 5 tests — send-test-email + email log listing/detail
+│   │   ├── test_email_logs.py         # 6 tests — send-test-email + email log listing/detail
 │   │   ├── test_ai_config.py          # 5 tests — multi-provider AI Config CRUD
 │   │   ├── test_risk_email_and_interventions.py  # 5 tests
 │   │   ├── test_ingested_dataset_registry.py     # 4 tests
+│   │   ├── test_roster_caching.py     # 3 tests — subject_roster()'s prediction cache
 │   │   └── test_students_at_risk.py   # 2 tests
 │   ├── Dockerfile.dev
 │   └── Dockerfile.prod
@@ -480,9 +481,26 @@ The table's original design FK'd `student_id`/`trimester_id` into the empty `stu
 | `reconciled_at` | DateTime, nullable | |
 | `reconciled_via_resit` | Boolean, default `false` | `true` if `actual_pass` came from the resit-fallback reconciliation path rather than the standard attempt-1 check |
 | `gemini_insight` | Text, nullable | |
+| `top_actionable_factor` | JSON, nullable | Cached output of `actionable.py`'s `top_actionable_factor(shap_explanation)` for this row. Added specifically so a cache-hit roster read (see [Background risk-prediction scoring](#background-risk-prediction-scoring--prediction-caching) below) can reconstruct the full roster row — including the "what would help most" column — without re-running the SHAP call just to get this one field |
 | `predicted_at` | DateTime | |
 
 Unique constraint on `(student_id_masked, subject_code, study_period, model_version)` — one row per student/subject/period/model-version combination, upserted on repeat predictions.
+
+### `scoring_jobs` — bulk background risk-scoring runs
+
+Same `running → success/partial/failed` shape as `IngestJob`, but with genuine incremental progress rather than one flip at the end, since the work is naturally chunked one subject at a time. See [Background risk-prediction scoring](#background-risk-prediction-scoring--prediction-caching) for how it's used.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | Integer, PK | |
+| `status` | String(20) | `running` / `success` / `partial` (some subjects errored — see `result`) / `failed` |
+| `trigger` | String(20) | `auto_after_ingest` / `manual` / `cron` |
+| `study_periods` | JSON (list) | e.g. `["25.3"]` |
+| `subjects_total` / `subjects_completed` / `students_scored` | Integer | Live progress counters, committed after each subject |
+| `started_by` | String(254) | Email/uid, or `"system"` for an auto-triggered run |
+| `started_at` / `finished_at` | DateTime | |
+| `result` | JSON, nullable | `{"errors": [{"subject", "study_period", "error"}, ...]}` — populated for `partial`/`failed` |
+| `error_detail` | Text, nullable | |
 
 ### `interventions` — real actions a human took
 
@@ -704,6 +722,51 @@ Three exclusion categories, kept separate because they are separate arguments (s
 
 The two CLI scripts gained `collect()`/`summarise()` functions that `main()` now prints from, so the dashboard and the CLI share one implementation — notably of the dedupe rule that stops a re-run on unchanged data counting as independent evidence. A test asserts the endpoint matches a fresh direct call.
 
+### Two reading modes — Classical and Technical
+
+Same API response, two renderings, toggled client-side (`ModelHealth.jsx`, preference remembered in `localStorage`):
+
+- **Classical view** — for a non-technical reader (a Head of School, say): traffic-light verdicts and plain-English sentences, no "F1"/"precision"/"PR-AUC" jargon, and every caveat the backend already computes (small sample, single observation, not enough data yet) rendered as a visible sentence rather than silently omitted.
+- **Technical view** — the full breakdown: raw metrics, per-version tables, thresholds, feature lists, same as before the toggle existed.
+
+Neither view invents a number the other doesn't have — both render the identical `GET /api/admin/model-health` payload, so they cannot drift into disagreeing with each other.
+
+**Three false-positive risks found and fixed while building this, not assumed away:**
+
+- **"Confirmed recurring bias" used to conflate two different counts.** A group was reported as a confirmed, persistent bias if the system had run **any** 2+ independent retrains total — not if *that specific group* had actually recurred as flagged across 2+ of them. A group flagged once, with a second unrelated retrain having happened for other reasons, would misleadingly read as "confirmed." Fixed by splitting the check into `recurringGroups` (this group specifically flagged in ≥2 distinct-period audits) versus `isolatedGroups` (flagged once so far) — see [Fairness / bias auditing](#fairness--bias-auditing) above for the real current finding under this corrected logic.
+- **The "Overall status" banner overclaimed.** It read as a general health verdict but was only ever checking model liveness and fairness-flag state — never accuracy. Reworded to state only what is actually verified, rather than reading as a broader guarantee than the checks behind it support.
+- **`prediction_accuracy_report.py` never flagged a small-sample metric as unreliable.** A version or estimate-type bucket with, say, 3 reconciled predictions produced a precision/recall figure with no visible caveat, indistinguishable on screen from one backed by hundreds. Added `MIN_N_FOR_RELIABLE = 10` (matching the existing `MIN_GROUP_FOR_A_RATE` threshold `intervention_outcome_report.py` already uses for the same reason) — a `reliable: false` flag and a `⚠ small sample` caveat now surface in both the CLI output and the dashboard whenever a bucket falls under it.
+
+---
+
+## Background risk-prediction scoring & prediction caching
+
+Until this session, `subject_roster()` — the function behind both Predictor and Students at Risk — unconditionally re-ran the full per-student ML+SHAP inference on **every single page open**, regardless of what was already sitting in `predictions`. Confirmed live at 50s+ for a full institution-wide view (129 subjects). A newly-ingested study period also started with zero rows in `predictions`, so the chatbot (which only ever reads that table, never computes live — see [Assistant](#assistant--a-chatbot-restricted-to-this-systems-own-student-data)) had nothing to answer from until a human happened to open Predictor first. Two changes close this, together rather than either alone — a pre-scoring job alone would have fixed the chatbot's cold-start problem but done nothing for how long Predictor/Students at Risk themselves take to open:
+
+### 1. `subject_roster()` now reuses a fresh cached prediction instead of always recomputing
+
+A cached `Prediction` row is trusted, and the real model+SHAP call skipped entirely, only when **all three** independently hold — any one failing forces a real recompute, never a guess:
+
+1. **`model_version` matches whichever version is currently live** for that family (`model_registry`/`sim_model_registry`'s `get_live_entry`) — a stale row from a superseded model is never reused.
+2. **`estimate_type` matches what the current coverage tier expects** (`null` for complete, `"mid-term estimate"` for partial) — guards against a student moving between coverage tiers between requests.
+3. **`predicted_at` is at or after the latest successful ingestion** (capstone or attendance) — the student's underlying data may have changed since the cached row was computed.
+
+The existing coverage-tier branching and the exact `ml_predict()`/`ml_predict_partial()` call sites are untouched on the fallback path — this only adds a cache-check in front of them, plus persisting the new `top_actionable_factor` column so a cache hit can reconstruct the full roster row (SHAP-derived recommendation included) without re-running SHAP. The two blocking model calls are also now wrapped in `asyncio.to_thread(...)`, so `subject_roster` (an `async def` that used to hold the event loop hostage for the full duration) lets other requests through in the gaps between students — a scoped fix, not a broader refactor. `students_at_risk()` calls `subject_roster()` per subject and inherits all of this with no changes of its own.
+
+Verified live, not just in isolated tests: after the cache warmed a subject, a repeat `GET /api/subjects/{code}/roster` left that subject's `predictions.predicted_at` completely unchanged — proof no re-upsert/recompute happened, not just an inference from response time (a wall-clock comparison alone was confounded by an unrelated bulk-scoring job running concurrently in this single-process dev environment — production's 4 separate gunicorn workers don't share this contention).
+
+### 2. Bulk background scoring, triggered automatically or on demand
+
+A `ScoringJob` (see [Database](#database) above) walks every subject in one or more study periods, scoring and upserting each via the same cache-aware path above, committing live progress after each subject:
+
+- **Automatic** — right after a capstone or attendance ingestion succeeds, a `ScoringJob` is enqueued (`trigger: "auto_after_ingest"`) for exactly the study periods that upload touched, via the same `BackgroundTasks` pattern ingestion itself already uses. Runs sequentially inside the already-backgrounded ingest job function (not a detached `asyncio.create_task`), so it can't be garbage-collected mid-run before completion.
+- **Manual** — a "Run Risk Scoring Now" button on the Data Ingestion page (`POST /api/scoring/run`, Head of Technology/Head of School only), defaulting to the latest ingested study period if none is specified. Refuses with `409` while a scoring run is already in progress, rather than doing the same expensive work twice in parallel.
+- **Tracked** — a third "Risk Scoring" tab on Data Ingestion (`GET /api/scoring/jobs` / `GET /api/scoring/jobs/{id}`, polled the same 5s interval as the existing Ingestion Activity tab) shows a genuine `subjects_completed / subjects_total` percentage bar — real incremental progress, unlike ingestion's plain spinner, since this job is naturally chunked one subject at a time.
+
+Net effect: the chatbot has fresh `predictions` rows ready without anyone needing to open Predictor first, and Predictor/Students at Risk themselves return near-instantly once a period has been scored (by the auto-trigger, the manual button, or simply by someone having opened them before).
+
+**Test coverage**: `test_roster_caching.py` (3 tests) — a cache-hit case (fresh, live-version row; asserts `ml_predict` is monkeypatched to raise if called, proving it truly wasn't), and two staleness cases (superseded `model_version`; `predicted_at` older than the latest ingestion) each asserting the real model call happens and the fresh result wins. `test_students_at_risk.py` and `test_chatbot.py` were re-run alongside these (25/25) to confirm the refactor changed nothing observable about either endpoint's response shape or scoping.
+
 ---
 
 ## Running Tests
@@ -712,7 +775,7 @@ The two CLI scripts gained `collect()`/`summarise()` functions that `main()` now
 docker exec edaptv2_backend pytest tests/ -v
 ```
 
-**101 tests across 13 files** as of this README (regenerated via `pytest --collect-only`, not hand-typed — see the file-by-file breakdown in [Project Structure](#project-structure) — on a container built `--no-cache` from `requirements.txt`). **99 pass; the 2 in `test_oauth_login.py`** that assert "login rejected when no client ID is configured" fail specifically in an environment (like this one) that has real Google/Microsoft client IDs configured through Settings > OAuth Providers — that's the tests' own precondition no longer holding, not an application bug.
+**113 tests across 14 files** as of this README (regenerated via `pytest --collect-only`, not hand-typed — see the file-by-file breakdown in [Project Structure](#project-structure)). A full run (`pytest tests/ -q`) passes clean. The 2 tests in `test_oauth_login.py` that assert "login rejected when no client ID is configured" will fail specifically in an environment (like this one, sometimes) that has real Google/Microsoft client IDs configured through Settings > OAuth Providers — that's the tests' own precondition no longer holding, not an application bug.
 
 ### A real incident, found while regenerating this section — not papered over
 
@@ -738,6 +801,7 @@ Beyond the original `test_smoke.py`/`test_ingestion_e2e.py` coverage (health/aut
 | `test_students_at_risk.py` | Cross-subject risk aggregation, and that a lecturer only ever sees rows for subjects they're assigned to |
 | `test_oauth_provider_config.py` / `test_oauth_login.py` | OAuth provider config CRUD and the Google/Microsoft login flows themselves |
 | `test_incremental_merge.py` / `test_ingested_dataset_registry.py` / `test_risk_email_and_interventions.py` | Incremental data-merge behavior, the ingested-dataset registry, and Risk Email Template + intervention logging |
+| `test_roster_caching.py` | `subject_roster()`'s prediction cache — see [Background risk-prediction scoring](#background-risk-prediction-scoring--prediction-caching): a fresh cache hit skips the model call entirely (proven via a monkeypatch that raises if it's called), a superseded-`model_version` row and a row older than the latest ingestion are each correctly treated as stale and recomputed |
 
 ---
 
@@ -781,7 +845,7 @@ Without a real key configured (either path), every call above returns a fixed `"
   - **Named-student lookup** — a masked student id mentioned in the question (regex-matched, e.g. "Student4921") is looked up against that student's own `predictions` rows for the period. `Prediction` has no column storing a full SHAP explanation, so this can't give a genuine factor-by-factor "why" — it reports the recorded classification and points to that student's row in Predictor for the full breakdown, the same deep-link `StudentsAtRisk.jsx` already uses instead of duplicating SHAP rendering.
   - **Data freshness** — when the live dataset was last (successfully, still-active) ingested, so an answer isn't mistaken for more current than it is.
 - **Reads `predictions` directly rather than recomputing risk bands live.** An early version called the same `subject_roster()`/`students_at_risk()` aggregation the Students at Risk page uses — real per-student ML/SHAP inference across every visible subject, confirmed 50s+ end-to-end on the full dataset, unworkable for an interactive chat reply. Rewritten to a single indexed `DISTINCT ON` query against `predictions` (deduplicated to each student's *most recent* row, so a student re-predicted under a newer model version is never double-counted) — confirmed live at ~4s total, almost entirely the AI provider round-trip itself, not the query. The named-student lookup follows the same principle: one student's already-stored rows, never a live per-request recompute.
-- **Honest about missing data, not silently wrong.** A study period nobody has opened Students at Risk or Predictor for yet has zero rows in `predictions` — the chatbot reports this explicitly ("no risk predictions computed for this period yet") rather than rendering an empty result as "zero students at risk," which would be a different and false claim. Same treatment for a named student with no matching prediction, and for interventions with nothing logged yet.
+- **Honest about missing data, not silently wrong — and no longer confused with an out-of-scope refusal.** A study period nobody has opened Students at Risk or Predictor for yet has zero rows in `predictions` — the chatbot reports this explicitly ("no risk predictions computed for this period yet") rather than rendering an empty result as "zero students at risk," which would be a different and false claim. Same treatment for a named student with no matching prediction, and for interventions with nothing logged yet. **A real reported bug** — asking "How many students are at risk in ICT104?" returned the hard-scope-refusal sentence, even though ICT104 is a real, in-scope subject — was root-caused to exactly this case (zero `Prediction` rows for that subject/period, now covered by [background scoring](#background-risk-prediction-scoring--prediction-caching) too), not a scope violation or the roster's top-N cap. Fixed by adding `subjects_explicitly_asked_about` to the context handed to the AI (any in-scope subject named in the question, whether or not it has risk data yet) with an explicit prompt instruction to explain a data gap for a named subject rather than refuse — deliberately *not* a second hard-coded deterministic gate, since a narrower gate risked blocking otherwise-answerable questions about the same subject (marks or attendance questions that don't depend on `predictions` at all).
 - **Refuses, with one fixed sentence, anything outside that scope** — a question the context can't answer, or one unrelated to this system's data entirely (general knowledge, coding help, an instruction to ignore these rules) — rather than answering from the model's outside knowledge. This is a **prompt-level restriction**, the same class of control as every other endpoint in this file: it constrains an honest model's behavior, it is not a sandbox, and a sufficiently adversarial prompt could still try to talk the model out of it.
 - **Small talk gets small talk.** An earlier prompt version had no branch for a plain greeting, so asking "Hi" produced a full unsolicited statistics dump — confirmed live, then fixed by adding an explicit instruction to reply with one short, friendly sentence for a greeting and reserve the data context for an actual question.
 - **Renders Markdown in the chat bubble**, not literal `**`/`-` characters — a small dependency-free renderer (`renderMarkdownLite` in `AIChatbox.jsx`) turns the model's bold/bullet-list output into real React elements, never `dangerouslySetInnerHTML`.
@@ -819,6 +883,7 @@ Settings > Outgoing Mail Servers (multiple SMTP servers, lowest-`priority` activ
 | Explorer | `GET /api/explorer/records` · `filters` · `student/{id}` · `export` |
 | Subjects | `GET /api/subjects/list` · `analytics` · `{subject}/roster` · `{subject}/assessments` · `GET /api/students-at-risk` |
 | Ingest | `POST /api/ingest` · `GET /api/ingest/preview` · chunked upload: `POST /api/ingest/{kind}/batch/init` · `.../batch/{id}/chunk` · `GET /api/ingest/{kind}/batch/{id}` · `GET /api/ingest/batches` |
+| Scoring | `POST /api/scoring/run` (Head of Technology/Head of School, 202 + job id, 409 if one's already running) · `GET /api/scoring/jobs` · `GET /api/scoring/jobs/{id}` — see [Background risk-prediction scoring](#background-risk-prediction-scoring--prediction-caching) |
 | ML | `POST /api/predict` (routes to complete-record, mid-term-estimate, or insufficient-data based on server-computed coverage; includes `shap_explanation` and, for a real student, `top_actionable_factor`) |
 | Interventions | `POST /api/interventions` · `GET /api/interventions` · `GET /api/interventions/action-types` |
 | Model health | `GET /api/admin/model-health` (admin only, read-only) |
@@ -872,6 +937,7 @@ Stated plainly rather than rounded up or omitted:
 - **No GitHub-hosted CI run has been observed yet.** The pipeline in `.github/workflows/ci.yml` was proven locally with `act` and by running each job's exact commands, including a deliberate failure and recovery for every gate (see [CI and quality gates](#ci-and-quality-gates--automating-what-used-to-depend-on-remembering)). But no `gh` CLI or API token existed in the environment where it was written, so the first real run on GitHub's runners is still unverified. Two things could plausibly differ there: the `services:` Postgres wiring, and `--network host` reaching it. **Check the CI badge at the top of this file** — that, not this paragraph, is the current truth.
 - **Type-checking is absent.** mypy was deliberately not added at close-out (rationale in the CI section). A real gap, named as one.
 - **Resolved since this item was first written: `ml_model` is now fully merged into `main`.** The work this bullet originally warned about is in `main`. What's genuinely unmerged now is different: `api_console_branch` (the branch this update was written from) sits 15 commits ahead of `main` — the feature set this update documents (AI Assistant, multi-provider AI Config, Outgoing Mail Servers, Email Logs, chunked upload). See the "Note on repository state" callout at the top of this file for the exact verification.
+- **No cron/sidecar safety net for bulk risk scoring — flagged, not built, in the same pass that added it.** The auto-after-ingest trigger and the manual "Run Risk Scoring Now" button (see [Background risk-prediction scoring](#background-risk-prediction-scoring--prediction-caching)) cover the stated need, but neither catches the edge case where the auto-trigger itself silently fails or the backend process restarts mid-job — there is no periodic check that re-scores a period with no successful `ScoringJob` since its last ingestion. Would follow the existing `scheduler` sidecar's exact pattern (`scheduled_retrain.py` / `retrain_loop.sh`) if it turns out to matter in practice; not built speculatively.
 
 ---
 
