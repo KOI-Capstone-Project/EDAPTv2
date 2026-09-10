@@ -218,6 +218,66 @@ async def test_chatbot_reports_no_predictions_computed_yet_honestly(monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_chatbot_explains_missing_data_for_a_named_subject_instead_of_refusing(monkeypatch):
+    """Real bug, reported live: "How many students are at risk in ICT104?"
+    got the generic scope-refusal ("I'm restricted to answering questions
+    about this system's student data") — nothing to do with access. ICT104
+    simply had zero Prediction rows for the resolved period (nobody had
+    opened Students at Risk/Predictor for it yet), so it was silently absent
+    from subjects_by_risk_desc, and the model had no way to tell that apart
+    from "not your subject" or "doesn't exist" — both look like the same
+    silence. A subject with real data existing ELSEWHERE this period (so
+    has_any_predictions is True) makes this distinct from the
+    all-quiet-so-far case above: the gap here is per-subject, not global.
+
+    Uses the admin account (sees every subject) so the named subject is
+    unambiguously in scope — this must NOT be blocked like the deterministic
+    out-of-scope check above; it must reach the AI call with an honest,
+    non-alarming explanation in its context instead."""
+    synthetic = _synthetic_marks_df([
+        ("S1", "ICT104", TEST_PERIOD, 90.0), ("S2", "ACC100", TEST_PERIOD, 50.0),
+    ])
+    original_data = main_mod._DATA
+    main_mod._DATA = synthetic
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            token = await _login(client, "admin", "Admin@2025!")
+            headers = {"Authorization": f"Bearer {token}"}
+
+            async with _cleanup_test_predictions():
+                async with main_mod._AsyncSession() as db:
+                    # Only ICT104 has been scored this period — ACC100 (a real,
+                    # in-scope subject) has never been viewed in Students at
+                    # Risk/Predictor for TEST_PERIOD, so it has zero rows.
+                    await _seed_prediction(db, student_id="ChatS6", subject="ICT104", risk_band="High Risk")
+
+                captured_prompt = {}
+                ai_called = {"value": False}
+
+                async def _fake_ai_call(prompt):
+                    ai_called["value"] = True
+                    captured_prompt["value"] = prompt
+                    return "ok", 1
+
+                monkeypatch.setattr(main_mod, "_ai_call", _fake_ai_call)
+
+                r = await client.post(
+                    "/api/chatbot/ask", headers=headers,
+                    json={"question": "How many students are at risk in ACC100?", "study_period": TEST_PERIOD},
+                )
+            assert r.status_code == 200
+            # In scope for an admin — must reach the model, not the deterministic
+            # out-of-scope block (that returns tokens_used == 0, model is None).
+            assert ai_called["value"] is True
+            prompt = captured_prompt["value"]
+            assert '"subject": "ACC100"' in prompt
+            assert "No risk predictions have been generated yet for ACC100" in prompt
+            assert "not an access restriction" in prompt or "not a restriction" in prompt
+    finally:
+        main_mod._DATA = original_data
+
+
+@pytest.mark.asyncio
 async def test_chatbot_requires_ingested_data():
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         token = await _login(client, "admin", "Admin@2025!")

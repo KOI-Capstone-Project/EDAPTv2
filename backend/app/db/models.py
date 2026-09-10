@@ -177,6 +177,19 @@ class Prediction(AuditMixin, Base):
         comment="Gemini-generated NL explanation for this prediction (Mode 2 AI insight)",
     )
 
+    # The single actionable SHAP-derived conclusion (app/ml/actionable.py's
+    # top_actionable_factor()) shown on the student's roster row — e.g.
+    # {"feature": "ATTENDANCE_RATE", "value": 0.4, "contribution": -9.0,
+    # "direction": "Fail"}. Previously computed fresh from the SHAP
+    # explanation on every single roster view and never persisted, which
+    # meant a cached prediction could never be reused to skip the (SHAP)
+    # inference call — this column is what actually makes that caching
+    # possible; see subject_roster()'s cache-check in main.py.
+    top_actionable_factor: dict | None = Column(
+        JSON, nullable=True,
+        comment="Cached output of top_actionable_factor() for this prediction's SHAP explanation",
+    )
+
     predicted_at: datetime = Column(
         DateTime(timezone=True),
         server_default=func.now(),
@@ -580,6 +593,64 @@ class AnalyzeJob(Base):
     result: dict | None = Column(
         JSON, nullable=True,
         comment="Same {token, row_count, columns, ...} payload the old synchronous analyze endpoint returned",
+    )
+    error_detail: str | None = Column(Text, nullable=True)
+
+
+class ScoringJob(Base):
+    """
+    Tracks one bulk risk-prediction scoring run — every subject in one or
+    more study periods, scored and upserted into `predictions` in the
+    background, the same BackgroundTasks-plus-polled-row pattern IngestJob
+    already uses (see that model's docstring for why this needs to be a
+    real table rather than an in-memory dict under 4 gunicorn workers).
+
+    Exists so a newly-ingested period has real risk data cached and ready
+    — for the chatbot (which only ever reads `predictions`, never computes
+    live) and for Predictor/Students at Risk (which now check this cache
+    before re-running the expensive per-student ML+SHAP call, see
+    subject_roster()'s use_cache path in main.py) — without a human having
+    to open every subject's roster by hand first.
+
+    Unlike IngestJob's single running->success/failed flip, this reports
+    genuine incremental progress (subjects_completed/subjects_total) as it
+    goes, since the work is naturally chunked one subject at a time.
+    """
+
+    __tablename__ = "scoring_jobs"
+
+    id: int = Column(Integer, primary_key=True, autoincrement=True)
+
+    status: str = Column(
+        String(20), nullable=False, default="running", server_default="running",
+        comment="running | success | partial | failed — partial means some subjects errored, see result",
+    )
+
+    trigger: str = Column(
+        String(20), nullable=False,
+        comment="'auto_after_ingest' | 'manual' | 'cron' — what started this run",
+    )
+
+    study_periods: list = Column(
+        JSON, nullable=False,
+        comment="Study period strings this job is scoring, e.g. ['25.3']",
+    )
+
+    subjects_total:     int = Column(Integer, nullable=False, default=0, server_default="0")
+    subjects_completed: int = Column(Integer, nullable=False, default=0, server_default="0")
+    students_scored:    int = Column(Integer, nullable=False, default=0, server_default="0")
+
+    started_by: str = Column(
+        String(254), nullable=False,
+        comment="Email/uid of who triggered this, or 'system' for auto/cron triggers",
+    )
+
+    started_at:  datetime      = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    finished_at: datetime | None = Column(DateTime(timezone=True), nullable=True)
+
+    result: dict | None = Column(
+        JSON, nullable=True,
+        comment="{'errors': [{'subject': ..., 'study_period': ..., 'error': ...}, ...]} — populated for partial/failed",
     )
     error_detail: str | None = Column(Text, nullable=True)
 
