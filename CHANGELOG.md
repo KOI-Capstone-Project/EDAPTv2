@@ -4,6 +4,19 @@ All notable changes to EDAPT v2 are documented here.
 
 ---
 
+## [2026-09-13] — Fire-and-Forget Scoring Trigger; Unresolved Data-Corruption Finding
+
+### Changed
+
+- **Auto-after-ingest risk scoring is now fire-and-forget, not sequentially awaited.** `_run_capstone_confirm_job`/`_run_attendance_confirm_job` now call a new `_launch_scoring_job()` (`asyncio.create_task`, held in a module-level `_SCORING_BACKGROUND_TASKS` set and released via a done-callback so it can't be silently garbage-collected) instead of `await`ing `_run_scoring_job(...)` directly. A full institution-wide scoring pass can take from minutes to well over an hour; awaiting it inside the ingest job meant "Confirm and Ingest" stayed at "running" for that whole time, defeating the point of backgrounding ingestion in the first place. The `ScoringJob` row is still created and pollable immediately either way.
+- `test_ingestion_e2e.py`'s `_preserve_app_state()` cleanup now drains any still-pending fire-and-forget scoring tasks (`await asyncio.gather(...)`) before restoring `_DATA`/`_ATTENDANCE` and deleting job rows, to stop a task from one test racing a later test's isolation context.
+
+### Known issue — not yet fixed
+
+- **A real data-corruption incident was found while re-verifying the above, and is not yet root-caused.** Running `test_ingestion_e2e.py::test_retrain_trigger_same_period_vs_new_period` left the shared `backend/app/ml/ingested_capstone.csv` overwritten with a reduced, corrupted dataset (248,592 rows instead of 327,501, including one row with a student ID string in the `STUDYPERIOD` column) — the same class of incident already documented in the README's [Running Tests](README.md#running-tests) section, reappearing. The live dev server's in-memory dataset was confirmed unaffected at the time (`GET /api/health` still reported 327,501 rows), and a clean export was taken as a safety net, but the disk file itself was left for a manual restore rather than overwritten automatically. See the README's [Known Open Items](README.md#known-open-items) for the full account. **Do not treat the auto-after-ingest scoring trigger as verified-safe under test until this is resolved.**
+
+---
+
 ## [2026-09-10] — Background Risk Scoring, Prediction Caching, Model Health Two-View, Chatbot Fix
 
 ### Added
