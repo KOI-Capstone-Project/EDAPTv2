@@ -82,11 +82,7 @@ export default function ForgotPassword() {
     setLoading(true);
     setError(null);
     try {
-      const res = await api.post('/api/auth/forgot-password', { email });
-      // dev_otp is returned when email service is not configured
-      if (res.data.dev_otp) {
-        setSuccess(`Demo mode: your code is ${res.data.dev_otp}`);
-      }
+      await api.post('/api/auth/forgot-password', { email });
       setStep(2);
       startTimer();
     } catch (err) {
@@ -101,12 +97,8 @@ export default function ForgotPassword() {
     setSuccess(null);
     setLoading(true);
     try {
-      const res = await api.post('/api/auth/forgot-password', { email });
-      if (res.data.dev_otp) {
-        setSuccess(`Demo mode: your new code is ${res.data.dev_otp}`);
-      } else {
-        setSuccess('A new reset code has been sent to your email.');
-      }
+      await api.post('/api/auth/forgot-password', { email });
+      setSuccess('A new reset code has been sent to your email.');
       startTimer();
     } catch (err) {
       setError(getErrorMessage(err, 'Failed to resend code. Please try again.'));

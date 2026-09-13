@@ -22,6 +22,7 @@ verified as the cause of a real production-data-quality incident (see
 _isolate_ml_paths's docstring for the full account).
 """
 
+import asyncio
 import contextlib
 import io
 import json
@@ -362,12 +363,27 @@ async def _preserve_app_state():
     try:
         yield
     finally:
+        # A successful confirm() inside this test may have fire-and-forget
+        # launched a real ScoringJob (see main.py's _launch_scoring_job —
+        # deliberately not awaited by the confirm job itself, so an admin
+        # isn't stuck watching "Confirm and Ingest" for as long as a full
+        # institution-wide scoring pass takes). That task is real work still
+        # running on this SAME session-scoped event loop, using whatever
+        # main.py globals are current — waiting for it HERE, before
+        # _isolate_ml_paths's own restore/cleanup below and before the next
+        # test starts touching those same globals, is what stops it from
+        # racing a later test's isolation context. Cancelled/failed tasks
+        # are fine to ignore; only a genuine hang would be a problem.
+        pending_scoring = [t for t in main_mod._SCORING_BACKGROUND_TASKS if not t.done()]
+        if pending_scoring:
+            await asyncio.gather(*pending_scoring, return_exceptions=True)
         main_mod._DATA       = original_data
         main_mod._ATTENDANCE = original_attendance
         async with main_mod._AsyncSession() as session:
-            from app.db.models import AnalyzeJob, IngestJob, PendingIngest, UploadBatch
+            from app.db.models import AnalyzeJob, IngestJob, PendingIngest, ScoringJob, UploadBatch
             await session.execute(delete(PendingIngest))
             await session.execute(delete(IngestJob))
+            await session.execute(delete(ScoringJob))
             await session.execute(delete(UploadBatch))
             await session.execute(delete(AnalyzeJob))
             await session.commit()

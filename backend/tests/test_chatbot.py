@@ -218,6 +218,66 @@ async def test_chatbot_reports_no_predictions_computed_yet_honestly(monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_chatbot_explains_missing_data_for_a_named_subject_instead_of_refusing(monkeypatch):
+    """Real bug, reported live: "How many students are at risk in ICT104?"
+    got the generic scope-refusal ("I'm restricted to answering questions
+    about this system's student data") — nothing to do with access. ICT104
+    simply had zero Prediction rows for the resolved period (nobody had
+    opened Students at Risk/Predictor for it yet), so it was silently absent
+    from subjects_by_risk_desc, and the model had no way to tell that apart
+    from "not your subject" or "doesn't exist" — both look like the same
+    silence. A subject with real data existing ELSEWHERE this period (so
+    has_any_predictions is True) makes this distinct from the
+    all-quiet-so-far case above: the gap here is per-subject, not global.
+
+    Uses the admin account (sees every subject) so the named subject is
+    unambiguously in scope — this must NOT be blocked like the deterministic
+    out-of-scope check above; it must reach the AI call with an honest,
+    non-alarming explanation in its context instead."""
+    synthetic = _synthetic_marks_df([
+        ("S1", "ICT104", TEST_PERIOD, 90.0), ("S2", "ACC100", TEST_PERIOD, 50.0),
+    ])
+    original_data = main_mod._DATA
+    main_mod._DATA = synthetic
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            token = await _login(client, "admin", "Admin@2025!")
+            headers = {"Authorization": f"Bearer {token}"}
+
+            async with _cleanup_test_predictions():
+                async with main_mod._AsyncSession() as db:
+                    # Only ICT104 has been scored this period — ACC100 (a real,
+                    # in-scope subject) has never been viewed in Students at
+                    # Risk/Predictor for TEST_PERIOD, so it has zero rows.
+                    await _seed_prediction(db, student_id="ChatS6", subject="ICT104", risk_band="High Risk")
+
+                captured_prompt = {}
+                ai_called = {"value": False}
+
+                async def _fake_ai_call(prompt):
+                    ai_called["value"] = True
+                    captured_prompt["value"] = prompt
+                    return "ok", 1
+
+                monkeypatch.setattr(main_mod, "_ai_call", _fake_ai_call)
+
+                r = await client.post(
+                    "/api/chatbot/ask", headers=headers,
+                    json={"question": "How many students are at risk in ACC100?", "study_period": TEST_PERIOD},
+                )
+            assert r.status_code == 200
+            # In scope for an admin — must reach the model, not the deterministic
+            # out-of-scope block (that returns tokens_used == 0, model is None).
+            assert ai_called["value"] is True
+            prompt = captured_prompt["value"]
+            assert '"subject": "ACC100"' in prompt
+            assert "No risk predictions have been generated yet for ACC100" in prompt
+            assert "not an access restriction" in prompt or "not a restriction" in prompt
+    finally:
+        main_mod._DATA = original_data
+
+
+@pytest.mark.asyncio
 async def test_chatbot_requires_ingested_data():
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         token = await _login(client, "admin", "Admin@2025!")
@@ -359,6 +419,75 @@ async def test_chatbot_subject_comparison_covers_every_visible_subject(monkeypat
         assert '"subject": "ICT201"' in prompt and '"avg_mark": 35.0' in prompt
         assert '"difficulty": "Low"' in prompt   # ICT104: 0% fail rate
         assert '"difficulty": "High"' in prompt  # ICT201: 100% fail rate
+    finally:
+        main_mod._DATA = original_data
+
+
+@pytest.mark.asyncio
+async def test_chatbot_blocks_a_lecturer_asking_about_an_out_of_scope_subject(monkeypatch):
+    """A lecturer naming a real subject they aren't assigned to must be
+    refused deterministically, with NO call to the AI model at all — not
+    just left to the model's own "only answer from context" instruction,
+    which is a strong steer but not a hard guarantee. ACC100 is a real
+    subject (present in _DATA) that the test lecturer (subjects: ICT104,
+    ICT201, ICT301) is not assigned to."""
+    synthetic = _synthetic_marks_df([
+        ("S1", "ICT104", TEST_PERIOD, 90.0),
+        ("S2", "ACC100", TEST_PERIOD, 50.0),
+    ])
+    original_data = main_mod._DATA
+    main_mod._DATA = synthetic
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            token = await _login(client, "user", "Lect@2025!")  # subjects: ICT104, ICT201, ICT301
+            headers = {"Authorization": f"Bearer {token}"}
+
+            ai_called = {"value": False}
+
+            async def _fake_ai_call(prompt):
+                ai_called["value"] = True
+                return "ok", 1
+
+            monkeypatch.setattr(main_mod, "_ai_call", _fake_ai_call)
+
+            # Out-of-scope subject named directly: blocked, no model call.
+            r1 = await client.post(
+                "/api/chatbot/ask", headers=headers,
+                json={"question": "What is the average mark for ACC100?", "study_period": TEST_PERIOD},
+            )
+            assert r1.status_code == 200
+            body1 = r1.json()
+            assert "ACC100" in body1["answer"]
+            assert "ICT104" in body1["answer"]  # tells them what they CAN ask about
+            assert body1["tokens_used"] == 0
+            assert body1["model"] is None
+            assert ai_called["value"] is False
+
+            # Out-of-scope subject named alongside an in-scope one: still blocked.
+            r2 = await client.post(
+                "/api/chatbot/ask", headers=headers,
+                json={"question": "Compare ICT104 and ACC100", "study_period": TEST_PERIOD},
+            )
+            assert r2.status_code == 200
+            assert ai_called["value"] is False
+
+            # The lecturer's own subject: proceeds normally, model IS called.
+            r3 = await client.post(
+                "/api/chatbot/ask", headers=headers,
+                json={"question": "What is the average mark for ICT104?", "study_period": TEST_PERIOD},
+            )
+            assert r3.status_code == 200
+            assert ai_called["value"] is True
+
+            # An admin asking about the same subject is never blocked.
+            ai_called["value"] = False
+            admin_token = await _login(client, "admin", "Admin@2025!")
+            r4 = await client.post(
+                "/api/chatbot/ask", headers={"Authorization": f"Bearer {admin_token}"},
+                json={"question": "What is the average mark for ACC100?", "study_period": TEST_PERIOD},
+            )
+            assert r4.status_code == 200
+            assert ai_called["value"] is True
     finally:
         main_mod._DATA = original_data
 

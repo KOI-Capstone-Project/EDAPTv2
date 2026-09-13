@@ -177,6 +177,19 @@ class Prediction(AuditMixin, Base):
         comment="Gemini-generated NL explanation for this prediction (Mode 2 AI insight)",
     )
 
+    # The single actionable SHAP-derived conclusion (app/ml/actionable.py's
+    # top_actionable_factor()) shown on the student's roster row — e.g.
+    # {"feature": "ATTENDANCE_RATE", "value": 0.4, "contribution": -9.0,
+    # "direction": "Fail"}. Previously computed fresh from the SHAP
+    # explanation on every single roster view and never persisted, which
+    # meant a cached prediction could never be reused to skip the (SHAP)
+    # inference call — this column is what actually makes that caching
+    # possible; see subject_roster()'s cache-check in main.py.
+    top_actionable_factor: dict | None = Column(
+        JSON, nullable=True,
+        comment="Cached output of top_actionable_factor() for this prediction's SHAP explanation",
+    )
+
     predicted_at: datetime = Column(
         DateTime(timezone=True),
         server_default=func.now(),
@@ -426,6 +439,16 @@ class User(AuditMixin, Base):
         comment="List of subject codes assigned to this lecturer (e.g. ['ICT104', 'ICT201'])",
     )
 
+    # Profile photo — stored server-side (not the browser's localStorage,
+    # where this used to live client-only: a raw, un-resized data: URL
+    # routinely blew the ~5-10MB per-origin quota on a real phone photo,
+    # and being localStorage-only meant nobody else could ever see it —
+    # not the sidebar's own avatar on another device, not Chat Logs, not
+    # User Management). The frontend resizes to a small JPEG/PNG before
+    # upload (see utils/photo.js), so this column stays small regardless.
+    photo: bytes | None = Column(LargeBinary, nullable=True)
+    photo_content_type: str | None = Column(String(50), nullable=True)
+
 
 # ===========================================================================
 # AUDIT LOG TABLE
@@ -574,6 +597,64 @@ class AnalyzeJob(Base):
     error_detail: str | None = Column(Text, nullable=True)
 
 
+class ScoringJob(Base):
+    """
+    Tracks one bulk risk-prediction scoring run — every subject in one or
+    more study periods, scored and upserted into `predictions` in the
+    background, the same BackgroundTasks-plus-polled-row pattern IngestJob
+    already uses (see that model's docstring for why this needs to be a
+    real table rather than an in-memory dict under 4 gunicorn workers).
+
+    Exists so a newly-ingested period has real risk data cached and ready
+    — for the chatbot (which only ever reads `predictions`, never computes
+    live) and for Predictor/Students at Risk (which now check this cache
+    before re-running the expensive per-student ML+SHAP call, see
+    subject_roster()'s use_cache path in main.py) — without a human having
+    to open every subject's roster by hand first.
+
+    Unlike IngestJob's single running->success/failed flip, this reports
+    genuine incremental progress (subjects_completed/subjects_total) as it
+    goes, since the work is naturally chunked one subject at a time.
+    """
+
+    __tablename__ = "scoring_jobs"
+
+    id: int = Column(Integer, primary_key=True, autoincrement=True)
+
+    status: str = Column(
+        String(20), nullable=False, default="running", server_default="running",
+        comment="running | success | partial | failed — partial means some subjects errored, see result",
+    )
+
+    trigger: str = Column(
+        String(20), nullable=False,
+        comment="'auto_after_ingest' | 'manual' | 'cron' — what started this run",
+    )
+
+    study_periods: list = Column(
+        JSON, nullable=False,
+        comment="Study period strings this job is scoring, e.g. ['25.3']",
+    )
+
+    subjects_total:     int = Column(Integer, nullable=False, default=0, server_default="0")
+    subjects_completed: int = Column(Integer, nullable=False, default=0, server_default="0")
+    students_scored:    int = Column(Integer, nullable=False, default=0, server_default="0")
+
+    started_by: str = Column(
+        String(254), nullable=False,
+        comment="Email/uid of who triggered this, or 'system' for auto/cron triggers",
+    )
+
+    started_at:  datetime      = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    finished_at: datetime | None = Column(DateTime(timezone=True), nullable=True)
+
+    result: dict | None = Column(
+        JSON, nullable=True,
+        comment="{'errors': [{'subject': ..., 'study_period': ..., 'error': ...}, ...]} — populated for partial/failed",
+    )
+    error_detail: str | None = Column(Text, nullable=True)
+
+
 class MailServer(AuditMixin, Base):
     """
     Admin-configurable outgoing SMTP server (Settings > Outgoing Mail
@@ -676,6 +757,44 @@ class EmailLog(Base):
         comment="Admin who triggered this (test emails) — NULL for system-triggered emails like password resets",
     )
     sent_at: datetime = Column(DateTime(timezone=True), server_default=func.now(), nullable=False, index=True)
+
+
+class ChatLog(Base):
+    """
+    Record of one question asked to the EDAPT Assistant (POST
+    /api/chatbot/ask) and the answer it gave. Powers Settings > Chat Logs.
+
+    Before this table existed, a chatbot question only ever produced a
+    generic AuditLog row (action_type="AI Request") with the question
+    truncated to 120 characters and no answer, model, token count, or
+    resolved study period at all — enough for a system-wide audit trail,
+    not enough to actually review what the assistant told people. This
+    table is written IN ADDITION to that AuditLog row, not instead of it —
+    the audit trail's job (a flat cross-feature timeline of every
+    significant action) is unrelated to this one's (a dedicated, filterable
+    history of assistant conversations).
+
+    user_uid is indexed since the whole point of this table is letting an
+    admin filter/group by who asked — same column name and meaning as
+    AuditLog.user_uid for consistency, not a foreign key (same reasoning as
+    AuditLog: the acting user's account may later be deleted, and the
+    historical record of who asked what must survive that).
+    """
+
+    __tablename__ = "chat_logs"
+
+    id: int = Column(BigInteger, primary_key=True, autoincrement=True)
+
+    user_uid: str = Column(String(254), nullable=False, index=True, comment="Email of the user who asked")
+
+    question: str = Column(Text, nullable=False)
+    answer:   str = Column(Text, nullable=False)
+
+    study_period_used: str | None = Column(String(10), nullable=True)
+    model:             str | None = Column(String(120), nullable=True, comment="e.g. 'gemini/gemini-3.7-flash'")
+    tokens_used:       int | None = Column(Integer, nullable=True)
+
+    asked_at: datetime = Column(DateTime(timezone=True), server_default=func.now(), nullable=False, index=True)
 
 
 class UploadBatch(Base):

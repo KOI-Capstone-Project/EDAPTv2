@@ -587,6 +587,73 @@ function BatchUploadsPanel({ batches, nowMs }) {
   );
 }
 
+// ── Risk prediction scoring panel ──────────────────────────────────────────────
+// Unlike ingestion jobs (a single running -> success/failed flip), a scoring
+// job reports genuine incremental progress (subjects_completed/
+// subjects_total) as it works through each subject — a real percentage bar,
+// not a spinner standing in for one.
+
+const TRIGGER_LABEL = { auto_after_ingest: 'Auto (after ingestion)', manual: 'Manual', cron: 'Scheduled' };
+
+function ScoringJobRow({ job, nowMs }) {
+  const isRunning = job.status === 'running';
+  const isFailed  = job.status === 'failed';
+  const isPartial = job.status === 'partial';
+  const dotStyle  = isRunning ? s.jobDotRunning : (isFailed || isPartial) ? s.jobDotFailed : s.jobDotSuccess;
+  const pillStyle = isRunning ? s.jobStatusRunning : (isFailed || isPartial) ? s.jobStatusFailed : s.jobStatusSuccess;
+  const pct = job.subjects_total ? Math.round((job.subjects_completed / job.subjects_total) * 100) : 0;
+  const errorCount = job.result?.errors?.length || 0;
+
+  return (
+    <div style={s.jobRow}>
+      <div style={s.jobRowTop}>
+        <span style={{ ...s.jobDot, ...dotStyle }} />
+        <span style={s.jobKind}>Risk Scoring</span>
+        <span style={s.jobPhaseTag}>{TRIGGER_LABEL[job.trigger] || job.trigger}</span>
+        <span style={s.jobFilename}>{(job.study_periods || []).join(', ')}</span>
+        <span style={{ ...s.jobStatusPill, ...pillStyle }}>
+          {isRunning ? `${pct}%` : isFailed ? 'Failed' : isPartial ? 'Partial' : 'Completed'}
+        </span>
+      </div>
+      {isRunning && (
+        <div style={s.jobProgressTrack}>
+          <div style={{ ...s.jobProgressFill, width: `${pct}%` }} />
+        </div>
+      )}
+      <div style={s.jobRowMeta}>
+        {isRunning
+          ? <>Started by {job.started_by} — {job.subjects_completed}/{job.subjects_total} subjects, {job.students_scored.toLocaleString()} students scored, running {formatElapsed(job.started_at, nowMs)}. Safe to navigate away.</>
+          : <>Started by {job.started_by} · {timeAgo(job.finished_at || job.started_at, nowMs)}</>}
+      </div>
+      {!isRunning && (
+        <div style={s.jobResult}>
+          <span><strong>{job.subjects_completed}</strong>/{job.subjects_total} subjects scored</span>
+          <span><strong>{job.students_scored.toLocaleString()}</strong> students</span>
+          {errorCount > 0 && <span>⚠ {errorCount} subject{errorCount === 1 ? '' : 's'} errored</span>}
+        </div>
+      )}
+      {isFailed && <div style={s.jobError}>⚠ {job.error_detail || 'Scoring failed.'}</div>}
+    </div>
+  );
+}
+
+function ScoringJobsPanel({ jobs, nowMs }) {
+  return (
+    <div style={s.card}>
+      <h3 style={s.cardTitle}>Risk Prediction Scoring</h3>
+      {jobs.length === 0 ? (
+        <p style={s.emptyNote}>
+          No scoring runs yet — this runs automatically after an ingestion, or use "Run Risk Scoring Now" above.
+        </p>
+      ) : (
+        <div style={s.jobList}>
+          {jobs.map(j => <ScoringJobRow key={j.id} job={j} nowMs={nowMs} />)}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Incremental vs. Override wizard ────────────────────────────────────────────
 // Shown at confirm time only for a kind that already has live data — with
 // nothing to merge into or replace yet, there's no real choice to make, so a
@@ -658,7 +725,7 @@ export default function DataIngestion() {
   const [committing, setCommitting] = useState(false);
   const [commitError, setCommitError] = useState(null);
 
-  const [activityTab, setActivityTab] = useState('ingestion'); // 'ingestion' | 'batches'
+  const [activityTab, setActivityTab] = useState('ingestion'); // 'ingestion' | 'batches' | 'scoring'
 
   // Info about a pending upload resumed from the server on page load (no
   // File object — the browser never held one this session). Kept separate
@@ -684,6 +751,38 @@ export default function DataIngestion() {
       markIngestJobsSeen(res.data.jobs);
     } catch { /* history is best-effort; leave the prior list showing */ }
   }, []);
+
+  // Bulk risk-prediction scoring — runs automatically right after a
+  // successful ingestion (see _run_capstone_confirm_job/
+  // _run_attendance_confirm_job in main.py) or on demand via the button
+  // below. Own tab rather than folded into Ingestion Activity: this job
+  // reports genuine incremental progress (subjects_completed/
+  // subjects_total), which the ingestion jobs above don't have anything
+  // comparable to show.
+  const [scoringJobs, setScoringJobs] = useState([]);
+  const [scoringRunError, setScoringRunError] = useState(null);
+  const [startingScoring, setStartingScoring] = useState(false);
+  const fetchScoringJobs = useCallback(async () => {
+    try {
+      const res = await api.get('/api/scoring/jobs', { params: { limit: 20 } });
+      setScoringJobs(res.data.jobs);
+    } catch { /* history is best-effort; leave the prior list showing */ }
+  }, []);
+  const scoringRunning = scoringJobs.some(j => j.status === 'running');
+
+  const handleRunScoring = async () => {
+    setStartingScoring(true);
+    setScoringRunError(null);
+    try {
+      await api.post('/api/scoring/run', {});
+      await fetchScoringJobs();
+      setActivityTab('scoring');
+    } catch (err) {
+      setScoringRunError(getErrorMessage(err, 'Failed to start risk scoring.'));
+    } finally {
+      setStartingScoring(false);
+    }
+  };
 
   // Analyze jobs (see AnalyzeJob in backend/app/db/models.py) merged into
   // the same Ingestion Activity timeline as confirm jobs, tagged by phase,
@@ -711,11 +810,11 @@ export default function DataIngestion() {
     } catch { /* history is best-effort; leave the prior list showing */ }
   }, []);
 
-  useEffect(() => { fetchJobs(); fetchAnalyzeJobsHistory(); fetchBatches(); }, [fetchJobs, fetchAnalyzeJobsHistory, fetchBatches]);
+  useEffect(() => { fetchJobs(); fetchAnalyzeJobsHistory(); fetchBatches(); fetchScoringJobs(); }, [fetchJobs, fetchAnalyzeJobsHistory, fetchBatches, fetchScoringJobs]);
   useEffect(() => {
-    const timer = setInterval(() => { fetchJobs(); fetchAnalyzeJobsHistory(); fetchBatches(); }, 5000);
+    const timer = setInterval(() => { fetchJobs(); fetchAnalyzeJobsHistory(); fetchBatches(); fetchScoringJobs(); }, 5000);
     return () => clearInterval(timer);
-  }, [fetchJobs, fetchAnalyzeJobsHistory, fetchBatches]);
+  }, [fetchJobs, fetchAnalyzeJobsHistory, fetchBatches, fetchScoringJobs]);
   useEffect(() => {
     const timer = setInterval(() => setNowMs(Date.now()), 1000);
     return () => clearInterval(timer);
@@ -1039,12 +1138,26 @@ export default function DataIngestion() {
         >
           {committing ? <Spinner label="Starting…" /> : 'Confirm and Ingest'}
         </button>
+        <button
+          style={{ ...s.btnSecondary, opacity: scoringRunning || startingScoring ? 0.5 : 1 }}
+          disabled={scoringRunning || startingScoring}
+          onClick={handleRunScoring}
+          title="Pre-computes risk predictions for the latest study period, so the chatbot, Predictor, and Students at Risk are all fast and ready without waiting for someone to open a roster first."
+        >
+          {startingScoring
+            ? <Spinner label="Starting…" />
+            : scoringRunning ? <Spinner label="Scoring in progress…" />
+            : 'Run Risk Scoring Now'}
+        </button>
       </div>
+      {scoringRunError && <div style={s.errorBanner}>⚠ {scoringRunError}</div>}
 
-      {/* ── Ingestion activity / Batch uploads — real background job status,
-          not an estimate. Ingestion Activity covers analyze (parse/classify)
-          and confirm (commit); Batch Uploads covers the chunked-upload
-          transfer phase for large files (see UploadBatch's docstring). ── */}
+      {/* ── Ingestion activity / Batch uploads / Risk Scoring — real
+          background job status, not an estimate. Ingestion Activity covers
+          analyze (parse/classify) and confirm (commit); Batch Uploads
+          covers the chunked-upload transfer phase for large files (see
+          UploadBatch's docstring); Risk Scoring covers bulk prediction
+          pre-computation (see ScoringJob's docstring). ── */}
       <div style={s.tabRow}>
         <button
           style={activityTab === 'ingestion' ? s.tabActive : s.tab}
@@ -1058,10 +1171,16 @@ export default function DataIngestion() {
         >
           Batch Uploads
         </button>
+        <button
+          style={activityTab === 'scoring' ? s.tabActive : s.tab}
+          onClick={() => setActivityTab('scoring')}
+        >
+          Risk Scoring{scoringRunning ? ' •' : ''}
+        </button>
       </div>
-      {activityTab === 'ingestion'
-        ? <IngestJobsPanel jobs={activity} nowMs={nowMs} />
-        : <BatchUploadsPanel batches={batches} nowMs={nowMs} />}
+      {activityTab === 'ingestion' && <IngestJobsPanel jobs={activity} nowMs={nowMs} />}
+      {activityTab === 'batches'   && <BatchUploadsPanel batches={batches} nowMs={nowMs} />}
+      {activityTab === 'scoring'   && <ScoringJobsPanel jobs={scoringJobs} nowMs={nowMs} />}
 
       {wizardPending && (
         <IngestModeWizard
@@ -1242,10 +1361,21 @@ const s = {
     border: '1px solid #BFDBFE', borderRadius: 6, padding: '6px 10px',
   },
   jobError:  { fontSize: 12.5, color: '#DC2626' },
+  jobProgressTrack: {
+    height: 6, borderRadius: 999, background: '#F1F5F9', overflow: 'hidden',
+  },
+  jobProgressFill: {
+    height: '100%', borderRadius: 999, background: '#2E6E8E', transition: 'width 0.4s ease',
+  },
   btnPrimary: {
     padding: '12px 32px', background: '#2E6E8E', color: '#fff',
     border: 'none', borderRadius: 8, fontSize: 14, fontWeight: 600,
     cursor: 'pointer', transition: 'opacity 0.15s', minWidth: 200,
+  },
+  btnSecondary: {
+    padding: '12px 24px', background: '#fff', color: '#2E6E8E',
+    border: '1px solid #2E6E8E', borderRadius: 8, fontSize: 14, fontWeight: 600,
+    cursor: 'pointer', transition: 'opacity 0.15s',
   },
 
   modalOverlay: {

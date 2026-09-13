@@ -3,10 +3,11 @@
 // lecturer role additionally sees its assigned-subjects list and a
 // default-subject preference that doesn't apply to an admin, who has no
 // fixed subject scope.
-import { useState, useRef } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import { getUser, getUserName, getUserInitials } from '../utils/auth';
 import api from '../services/api';
 import { getErrorMessage } from '../utils/apiError';
+import { resizeImageToBlob } from '../utils/photo';
 
 const ALL_PERIODS = ['23.1','23.2','23.3','24.1','24.2','24.3','25.1','25.2','25.3'];
 
@@ -15,7 +16,6 @@ export default function SettingsView({ isLecturer }) {
   const email    = user?.email    || '';
   const role     = user?.role     || (isLecturer ? 'Lecturer' : 'Head of Technology');
   const subjects = user?.subjects || [];
-  const PHOTO_KEY = `user_photo_${email}`;
 
   // ── Section 1: Profile ───────────────────────────────────────────────────
   const [name,       setName]       = useState(getUserName());
@@ -25,21 +25,57 @@ export default function SettingsView({ isLecturer }) {
   const [profileMsg, setProfileMsg] = useState(null);
   const [profSaving, setProfSaving] = useState(false);
 
-  const [photoSrc, setPhotoSrc] = useState(
-    localStorage.getItem(PHOTO_KEY) || null
-  );
+  // Stored server-side now (POST/GET/DELETE /api/users/.../photo), not in
+  // the browser's own localStorage — a raw, un-resized data: URL from a
+  // real phone photo routinely blew localStorage's ~5-10MB per-origin
+  // quota (confirmed live: "QuotaExceededError: Setting the value of
+  // 'user_photo_admin' exceeded the quota"), and was never visible to
+  // anyone but that one browser anyway (not the sidebar on another
+  // device, not Chat Logs, not User Management).
+  const [photoSrc,   setPhotoSrc]   = useState(null);
+  const [photoError, setPhotoError] = useState(null);
   const fileRef = useRef(null);
 
-  const handlePhotoChange = e => {
+  useEffect(() => {
+    let objectUrl = null;
+    api.get(`/api/users/${encodeURIComponent(email)}/photo`, { responseType: 'blob' })
+      .then(res => { objectUrl = URL.createObjectURL(res.data); setPhotoSrc(objectUrl); })
+      .catch(() => setPhotoSrc(null));
+    return () => { if (objectUrl) URL.revokeObjectURL(objectUrl); };
+  }, [email]);
+
+  const handlePhotoChange = async e => {
     const file = e.target.files?.[0];
     if (!file) return;
-    const reader = new FileReader();
-    reader.onload = ev => {
-      const base64 = ev.target.result;
-      localStorage.setItem(PHOTO_KEY, base64);
-      setPhotoSrc(base64);
-    };
-    reader.readAsDataURL(file);
+    e.target.value = ''; // lets picking the same file again re-fire onChange
+    setPhotoError(null);
+    try {
+      const blob = await resizeImageToBlob(file);
+      const formData = new FormData();
+      formData.append('file', blob, 'photo.jpg');
+      // The shared api client hardcodes Content-Type: application/json as
+      // a default header on every request (api/client.js) — left in place
+      // here, it overrides the multipart/form-data; boundary=... header a
+      // FormData body needs, so the backend never sees a real multipart
+      // body and reports "file" as a missing field. Setting it to
+      // undefined here (not omitting it) is what actually removes it from
+      // the merged request headers, letting axios/the browser compute the
+      // correct boundary automatically.
+      await api.post('/api/users/me/photo', formData, { headers: { 'Content-Type': undefined } });
+      setPhotoSrc(URL.createObjectURL(blob));
+    } catch (err) {
+      setPhotoError(getErrorMessage(err, 'Failed to update photo.'));
+    }
+  };
+
+  const handleRemovePhoto = async () => {
+    setPhotoError(null);
+    try {
+      await api.delete('/api/users/me/photo');
+      setPhotoSrc(null);
+    } catch (err) {
+      setPhotoError(getErrorMessage(err, 'Failed to remove photo.'));
+    }
   };
 
   const handleSaveProfile = async () => {
@@ -154,12 +190,13 @@ export default function SettingsView({ isLecturer }) {
             <button style={s.linkBtn} onClick={() => fileRef.current?.click()}>Change photo</button>
             {photoSrc && (
               <button style={{ ...s.linkBtn, color: '#A32D2D', marginLeft: 12 }}
-                onClick={() => { localStorage.removeItem(PHOTO_KEY); setPhotoSrc(null); }}>
+                onClick={handleRemovePhoto}>
                 Remove
               </button>
             )}
           </div>
         </div>
+        {photoError && <p style={{ color: '#DC2626', fontSize: 12, margin: '-12px 0 16px' }}>{photoError}</p>}
 
         <div style={s.divider} />
 
