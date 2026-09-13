@@ -2284,15 +2284,11 @@ async def _run_capstone_confirm_job(
         # Auto-trigger risk scoring for the period(s) THIS upload touched —
         # normalized the same way _do_capstone_confirm normalizes STUDYPERIOD
         # (str(round(float(x), 1))) so it matches _DATA's own format
-        # regardless of override/incremental mode. Runs sequentially here
-        # rather than as a separate asyncio.create_task: this whole function
-        # is already a background task (the HTTP response was sent long
-        # ago), so the added time costs nothing user-facing, and a
-        # fire-and-forget task risks being garbage-collected before it
-        # completes once this function returns — a real asyncio pitfall,
-        # not a hypothetical one. The new ScoringJob row is created and
-        # already pollable before the (potentially slow) scoring loop itself
-        # runs. See "Bulk risk-prediction scoring" below.
+        # regardless of override/incremental mode. Launched via
+        # _launch_scoring_job (fire-and-forget, GC-safe) rather than awaited
+        # here — see that function's docstring for why this job's own
+        # duration must not gate this ingest job's reported completion. The
+        # new ScoringJob row is created and already pollable immediately.
         try:
             periods = sorted({
                 str(round(float(p), 1)) for p in pending_df["STUDYPERIOD"].dropna().unique().tolist()
@@ -2308,7 +2304,7 @@ async def _run_capstone_confirm_job(
             db.add(scoring_job)
             await db.commit()
             await db.refresh(scoring_job)
-            await _run_scoring_job(scoring_job.id, periods)
+            _launch_scoring_job(scoring_job.id, periods)
 
 
 CAPSTONE_MERGE_KEY_COLS = ["STUDENTID_MASKED", "SUBJECTCODE", "STUDYPERIOD", "ASSESSMENTTYPECODE", "ATTEMPTNUMBER"]
@@ -2875,7 +2871,7 @@ async def _run_attendance_confirm_job(
                 db.add(scoring_job)
                 await db.commit()
                 await db.refresh(scoring_job)
-                await _run_scoring_job(scoring_job.id, latest_periods)
+                _launch_scoring_job(scoring_job.id, latest_periods)
 
 
 async def _do_attendance_confirm(csv_bytes: bytes, mode: str = "override") -> dict:
@@ -5583,6 +5579,35 @@ async def students_at_risk(
 # itself calls) so this can never disagree with what a human sees by opening
 # a roster directly, and its cache-check means re-running this on
 # already-scored data is a cheap no-op rather than wasted duplicate work.
+
+# Fire-and-forget scoring tasks launched from inside another already-
+# backgrounded job (the ingest-confirm auto-trigger) rather than via a
+# request-bound BackgroundTasks object. A bare asyncio.create_task(...) here
+# would risk the task being silently garbage-collected before it completes,
+# since nothing would otherwise hold a reference to it — this set is that
+# reference, discarded automatically via the done-callback once the task
+# finishes (success or failure either way).
+_SCORING_BACKGROUND_TASKS: set = set()
+
+
+def _launch_scoring_job(job_id: int, study_periods: list[str], subjects: Optional[list[str]] = None) -> None:
+    """Start a scoring job without making the caller wait for it.
+
+    Deliberately NOT `await`ed: a bulk scoring pass over a full newly-
+    ingested period can genuinely take from minutes to well over an hour
+    (one real model + SHAP call per student, sequentially — see
+    _run_scoring_job's own docstring), and coupling that duration to the
+    ingest job's own reported "success" status would defeat the entire
+    point of backgrounding ingestion — an admin uploading a new term's data
+    would watch "Confirm and Ingest" sit at "running" for an hour before
+    seeing it succeed. The ScoringJob row this creates is already visible
+    and pollable (Data Ingestion's Risk Scoring tab) the moment this
+    function returns, independent of the ingest job's own status.
+    """
+    task = asyncio.create_task(_run_scoring_job(job_id, study_periods, subjects))
+    _SCORING_BACKGROUND_TASKS.add(task)
+    task.add_done_callback(_SCORING_BACKGROUND_TASKS.discard)
+
 
 def _scoring_job_to_dict(job: ScoringJob) -> dict:
     return {
