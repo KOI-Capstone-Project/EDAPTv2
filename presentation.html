@@ -1,0 +1,701 @@
+<title>EDAPT v2</title>
+<meta name="description" content="Capstone Phase II presentation deck for EDAPT v2, with the section-by-section speaker split">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  /* ---------- tokens (monochrome — no accent hue) ---------- */
+  :root{
+    --paper:#FAFAF9;
+    --ink:#121212;
+    --ink-soft:#68686A;
+    --ink-faint:#A0A09E;
+    --line:#DEDEDA;
+    --invert-bg:#121212;
+    --invert-ink:#FAFAF9;
+    --invert-soft:#8C8C8A;
+    --invert-line:#333331;
+    --focus:#121212;
+    --font-body:'Manrope', -apple-system, 'Segoe UI', sans-serif;
+    --font-mono:'IBM Plex Mono', 'SFMono-Regular', Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark){
+    :root:not([data-theme="light"]){
+      --paper:#111110;
+      --ink:#F2F2F0;
+      --ink-soft:#9C9C99;
+      --ink-faint:#5C5C59;
+      --line:#2C2C29;
+      --invert-bg:#F2F2F0;
+      --invert-ink:#111110;
+      --invert-soft:#5C5C59;
+      --invert-line:#D8D8D4;
+      --focus:#F2F2F0;
+    }
+  }
+  :root[data-theme="dark"]{
+    --paper:#111110; --ink:#F2F2F0; --ink-soft:#9C9C99; --ink-faint:#5C5C59; --line:#2C2C29;
+    --invert-bg:#F2F2F0; --invert-ink:#111110; --invert-soft:#5C5C59; --invert-line:#D8D8D4; --focus:#F2F2F0;
+  }
+
+  *{box-sizing:border-box;}
+  html,body{height:100%;}
+  body{
+    margin:0; background:var(--paper); color:var(--ink);
+    font-family:var(--font-body); overflow:hidden; -webkit-tap-highlight-color:transparent;
+  }
+  h1,h2,h3{margin:0; text-wrap:balance; font-weight:500;}
+  p{margin:0;}
+  em{ font-style:normal; font-weight:800; }
+  ::selection{background:var(--ink); color:var(--paper);}
+
+  .stage{ position:fixed; inset:0; bottom:52px; }
+  .slide{
+    position:absolute; inset:0; display:flex; align-items:center;
+    padding: clamp(28px,6vw,100px) clamp(20px,7vw,130px);
+    opacity:0; visibility:hidden; transition: opacity .35s ease;
+    background:var(--paper);
+  }
+  .slide.active{ opacity:1; visibility:visible; }
+  @media (prefers-reduced-motion: reduce){ .slide{ transition:none; } }
+  .slide-inner{ width:100%; max-width:1180px; margin:0 auto; }
+
+  .eyebrow{
+    display:block; font-family:var(--font-mono); font-size:11.5px; letter-spacing:.09em; text-transform:uppercase;
+    color:var(--ink-faint); margin-bottom:16px;
+  }
+  .eyebrow .n{ color:var(--ink-soft); }
+  .ref{ font-family:var(--font-mono); font-size:11.5px; color:var(--ink-faint); letter-spacing:.02em; }
+
+  .headline{ font-family:var(--font-body); font-weight:500; font-size:clamp(32px,5vw,60px); line-height:1.08; letter-spacing:-.015em; }
+  .sub{ font-size:clamp(14.5px,1.5vw,17px); color:var(--ink-soft); max-width:60ch; line-height:1.6; margin-top:20px; }
+
+  .grid{ display:grid; gap:36px; }
+  .g2{ grid-template-columns:1fr 1fr; }
+  .g3{ grid-template-columns:repeat(3,1fr); }
+  .g4{ grid-template-columns:repeat(4,1fr); }
+  @media (max-width:760px){ .g2,.g3,.g4{ grid-template-columns:1fr; gap:26px; } }
+
+  .block{ border-top:1px solid var(--line); padding-top:16px; }
+  .block h3{ font-size:16.5px; font-weight:600; margin-bottom:8px; }
+  .block p{ color:var(--ink-soft); font-size:14px; line-height:1.6; }
+  .block .m{ font-family:var(--font-mono); font-size:11px; letter-spacing:.05em; text-transform:uppercase; color:var(--ink-faint); display:block; margin-bottom:9px; }
+
+  .stat{ border-top:1px solid var(--line); padding-top:14px; }
+  .stat .num{ font-family:var(--font-mono); font-weight:600; font-size:clamp(28px,3.8vw,44px); color:var(--ink); font-variant-numeric:tabular-nums; line-height:1; }
+  .stat .lbl{ font-size:12.5px; color:var(--ink-soft); margin-top:8px; line-height:1.5; }
+
+  /* ---------- diagrams & charts ---------- */
+  .arch-grid{ display:grid; grid-template-columns:1fr 30px 1fr 30px 1fr; align-items:center; gap:0 10px; margin-top:34px; }
+  .arch-grid svg{ display:block; margin:0 auto; opacity:.4; }
+  @media (max-width:760px){ .arch-grid{ grid-template-columns:1fr; gap:22px 0; } .arch-grid svg{ transform:rotate(90deg); } }
+
+  .flow{ display:grid; grid-template-columns:1fr 26px 1fr 26px 1fr 26px 1fr; align-items:center; gap:0 6px; margin-top:34px; }
+  .flow svg{ display:block; margin:0 auto; opacity:.4; }
+  @media (max-width:900px){ .flow{ grid-template-columns:1fr; gap:20px 0; } .flow svg{ transform:rotate(90deg); } }
+
+  .barchart{ margin-top:34px; display:flex; flex-direction:column; gap:20px; }
+  .barrow{ display:grid; grid-template-columns:150px 1fr 64px; align-items:center; gap:16px; }
+  .barrow .barlbl{ font-size:13px; color:var(--ink-soft); }
+  .bartrack{ height:7px; background:var(--line); position:relative; }
+  .barfill{ position:absolute; left:0; top:0; height:100%; background:var(--ink); }
+  .barval{ font-family:var(--font-mono); font-size:13px; text-align:right; font-variant-numeric:tabular-nums; }
+
+  .compare{ margin-top:34px; display:flex; flex-direction:column; gap:24px; }
+  .comprow .complbl{ display:flex; justify-content:space-between; font-size:13px; color:var(--ink-soft); margin-bottom:8px; }
+  .comprow .complbl b{ font-family:var(--font-mono); color:var(--ink); font-weight:600; }
+  .comptrack{ height:22px; background:var(--line); position:relative; }
+  .compfill{ position:absolute; left:0; top:0; height:100%; background:var(--ink); }
+  .compfill.dashed{ background-image:repeating-linear-gradient(135deg, var(--ink), var(--ink) 4px, transparent 4px, transparent 9px); background-color:transparent; opacity:.55; }
+
+  .scalechart{ margin-top:34px; display:flex; flex-direction:column; gap:18px; }
+  .scalerow{ display:grid; grid-template-columns:130px 1fr 128px; align-items:center; gap:16px; }
+  .scalerow .scalelbl{ font-size:13px; color:var(--ink-soft); }
+  .scaletrack{ height:9px; background:var(--line); position:relative; }
+  .scalefill{ position:absolute; left:0; top:0; height:100%; background:var(--ink); }
+  .scaleval{ font-family:var(--font-mono); font-size:12.5px; text-align:right; font-variant-numeric:tabular-nums; }
+
+  .figure-frame{ background:#fff; border:1px solid var(--line); padding:14px; }
+  .figure-frame img{ display:block; width:100%; height:auto; }
+  .figure-cap{ margin-top:10px; font-family:var(--font-mono); font-size:11.5px; color:var(--ink-faint); }
+
+  .thumb-grid{ display:grid; grid-template-columns:repeat(3,1fr); gap:20px; margin-top:30px; }
+  .thumb{ background:#fff; border:1px solid var(--line); overflow:hidden; }
+  .thumb img{ display:block; width:100%; height:auto; }
+  .thumb figcaption{ padding:9px 11px; font-size:12px; color:var(--ink-soft); border-top:1px solid var(--line); }
+  @media (max-width:760px){ .thumb-grid{ grid-template-columns:1fr 1fr; } }
+
+  .reqlist{ list-style:none; margin:26px 0 0; padding:0; display:grid; grid-template-columns:1fr 1fr; gap:0 40px; }
+  .reqlist li{ display:grid; grid-template-columns:150px 1fr; gap:16px; padding:12px 0; border-top:1px solid var(--line); font-size:13.5px; }
+  .reqlist li b{ color:var(--ink); font-weight:600; }
+  .reqlist li span{ color:var(--ink-soft); line-height:1.5; }
+  @media (max-width:760px){ .reqlist{ grid-template-columns:1fr; } }
+
+  .phase-track{ margin-top:40px; }
+  .phase-bar{ display:flex; height:30px; }
+  .phase-bar div{ border-right:2px solid var(--paper); display:flex; align-items:center; justify-content:center; font-family:var(--font-mono); font-size:11px; color:var(--paper); background:var(--ink); }
+  .phase-bar div:nth-child(even){ background:var(--ink-soft); }
+  .phase-bar div:last-child{ border-right:none; }
+  .phase-labels{ display:flex; margin-top:8px; }
+  .phase-labels span{ flex:1; text-align:center; font-size:12px; color:var(--ink-soft); padding:0 4px; }
+
+  ul.plain{ list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:15px; }
+  ul.plain li{ display:flex; gap:14px; align-items:baseline; font-size:15.5px; line-height:1.5; border-bottom:1px solid var(--line); padding-bottom:15px; }
+  ul.plain li:last-child{ border-bottom:none; padding-bottom:0; }
+  ul.plain li .n{ font-family:var(--font-mono); color:var(--ink-faint); font-size:12.5px; min-width:22px; padding-top:2px; }
+
+  .invert{ background:var(--invert-bg); color:var(--invert-ink); padding:clamp(28px,4.5vw,52px); }
+  .invert .sub{ color:var(--invert-soft); }
+  .invert .eyebrow, .invert .eyebrow .n{ color:var(--invert-soft); }
+  .invert .block{ border-color:var(--invert-line); }
+  .invert .block p{ color:var(--invert-soft); }
+  .invert hr{ border-color:var(--invert-line); }
+
+  hr.rule{ border:none; border-top:1px solid var(--line); margin:26px 0; }
+  .foot-note{ margin-top:24px; font-size:12.5px; color:var(--ink-faint); }
+
+  .rail{
+    position:fixed; left:0; right:0; bottom:0; height:52px;
+    display:grid; grid-template-columns:auto 1fr auto; align-items:center; gap:20px;
+    padding:0 clamp(16px,3vw,40px); background:var(--paper); border-top:1px solid var(--line);
+    font-family:var(--font-mono); font-size:11.5px; color:var(--ink-soft);
+  }
+  .rail .section-name b{ color:var(--ink); font-weight:600; }
+  .track{ position:relative; height:1px; background:var(--line); cursor:pointer; padding:10px 0; }
+  .track::before{ content:''; position:absolute; left:0; right:0; top:10px; height:1px; background:var(--line); }
+  .track .fill{ position:absolute; left:0; top:10px; height:1px; background:var(--ink); }
+  .right{ display:flex; align-items:center; gap:16px; }
+  .navbtns{ display:flex; align-items:center; gap:4px; }
+  .navbtns button, .fsbtn{
+    width:26px; height:26px; border:none; background:none; color:var(--ink); display:flex; align-items:center; justify-content:center; cursor:pointer;
+  }
+  .navbtns button:disabled{ opacity:.3; cursor:default; }
+  .navbtns button:hover:not(:disabled), .fsbtn:hover{ color:var(--ink-soft); }
+  .navbtns button:focus-visible, .fsbtn:focus-visible{ outline:1px solid var(--focus); outline-offset:2px; }
+  .counter{ font-variant-numeric:tabular-nums; }
+  @media (max-width:640px){ .rail{ font-size:10.5px; padding:0 12px; gap:10px; } .rail .section-name{ display:none; } }
+</style>
+
+<div class="stage" id="stage">
+
+  <!-- 1 — TITLE -->
+  <section class="slide active" data-section="Foundations" data-ref="—">
+    <div class="slide-inner">
+      <span class="eyebrow">Capstone Project — Phase II — King's Own Institute</span>
+      <h1 class="headline">EDAPT v2</h1>
+      <p class="sub">Educational Data Analytics &amp; Predictive Tool — a role-based analytics platform that turns disconnected CSV extracts into early, explainable warnings about student risk.</p>
+      <div style="margin-top:48px; display:flex; align-items:flex-end; gap:24px; flex-wrap:wrap;">
+        <svg width="200" height="46" viewBox="0 0 200 46" style="opacity:.55;">
+          <polyline fill="none" stroke="var(--ink)" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"
+            points="4,12 40,19 76,27 112,16 148,22 196,38"/>
+        </svg>
+        <span class="ref">ICT104 pass rate, periods 24.1 → 25.3 — §7.1</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- 2 — AGENDA -->
+  <section class="slide" data-section="Foundations" data-ref="Overview">
+    <div class="slide-inner">
+      <span class="eyebrow">Running order</span>
+      <h2 class="headline" style="font-size:clamp(26px,3.2vw,38px);">What we'll cover, and where it lives in the report</h2>
+      <div class="grid g2" style="margin-top:36px;">
+        <ul class="plain">
+          <li><span class="n">§1–2</span> The problem, who it's for, and what it's required to do</li>
+          <li><span class="n">§3–4</span> Architecture, system design and the database</li>
+          <li><span class="n">§5</span> The tech stack, the two models, and the build timeline</li>
+        </ul>
+        <ul class="plain">
+          <li><span class="n">§6–7</span> How we tested it, and what we actually found</li>
+          <li><span class="n">§8–9</span> Ethics, fairness and security — including what's still open</li>
+          <li><span class="n">§11–12</span> Benefits to KOI, what's next, and a live walkthrough</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- 3 — THE PROBLEM -->
+  <section class="slide" data-section="Foundations" data-ref="§1.3">
+    <div class="slide-inner">
+      <span class="eyebrow">Before EDAPT <span class="n">·</span> §1.3 Problem Statement</span>
+      <h2 class="headline" style="font-size:clamp(26px,3.2vw,38px);">Academic risk was found by accident, not by design</h2>
+      <div class="grid g2" style="margin-top:34px;">
+        <ul class="plain">
+          <li><span class="n">01</span> Assessment &amp; attendance data sat in CSV dumps too large to read by hand</li>
+          <li><span class="n">02</span> Risk was flagged only after a staff member happened to notice</li>
+          <li><span class="n">03</span> No standard way to compare subjects, cohorts, or terms</li>
+        </ul>
+        <ul class="plain">
+          <li><span class="n">04</span> Manual aggregation carried a real risk of human error</li>
+          <li><span class="n">05</span> Nothing predicted an outcome before it had already happened</li>
+          <li><span class="n">06</span> No channel to act on a flagged student directly</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- 4 — AIM -->
+  <section class="slide" data-section="Foundations" data-ref="§1.4">
+    <div class="slide-inner" style="max-width:880px;">
+      <span class="eyebrow">The aim <span class="n">·</span> §1.4</span>
+      <h2 class="headline" style="font-size:clamp(26px,4vw,46px);">Build a system KOI can trust to say <em>why</em> — not just who's at risk.</h2>
+      <p class="sub" style="margin-top:24px;">Descriptive and predictive analytics, evaluated to a technically and ethically defensible standard — not a black box, and not a single reported accuracy figure.</p>
+    </div>
+  </section>
+
+  <!-- 5 — ROLES -->
+  <section class="slide" data-section="Foundations" data-ref="§1.6">
+    <div class="slide-inner">
+      <span class="eyebrow">Who it's built for <span class="n">·</span> §1.6 Stakeholders</span>
+      <h2 class="headline" style="font-size:clamp(26px,3.2vw,38px);">Three roles, three scopes of data</h2>
+      <div class="grid g3" style="margin-top:32px;">
+        <div class="block"><span class="m">Subject-scoped</span><h3>Lecturer</h3><p>Dashboards, predictions and at-risk students for the subjects they actually teach.</p></div>
+        <div class="block"><span class="m">Institution-wide</span><h3>Head of School</h3><p>Academic analytics and shared admin across data ingestion, model health and AI configuration.</p></div>
+        <div class="block"><span class="m">Full admin</span><h3>Head of Technology</h3><p>Everything above, plus the audit log, user management and the API console.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 6 — FUNCTIONAL REQUIREMENTS -->
+  <section class="slide" data-section="Foundations" data-ref="§2.1">
+    <div class="slide-inner">
+      <span class="eyebrow">What the system must do <span class="n">·</span> §2.1 Functional Requirements</span>
+      <h2 class="headline" style="font-size:clamp(26px,3.2vw,38px);">Nine capabilities, from login to audit trail</h2>
+      <ul class="reqlist">
+        <li><b>Authentication</b><span>Role-based access control at every endpoint.</span></li>
+        <li><b>Data ingestion</b><span>Accepts institutional CSV extracts, validating column structure on the way in.</span></li>
+        <li><b>Descriptive analysis</b><span>Institution-wide analytics, filterable by year, subject and lecturer.</span></li>
+        <li><b>Predictive analysis</b><span>A pass-probability for a given student and subject, from data confirmed available at prediction time.</span></li>
+        <li><b>Model governance</b><span>Every trained model is kept on record; nothing reaches production without human-authorised promotion.</span></li>
+        <li><b>Intervention tracking</b><span>A record of action taken against a flagged student — contact made, meeting scheduled, referral made.</span></li>
+        <li><b>AI-assisted functionality</b><span>Gemini, Anthropic or OpenAI, switchable at runtime with no redeploy.</span></li>
+        <li><b>Outgoing communication</b><span>One or more SMTP servers, credentials encrypted at rest.</span></li>
+        <li><b>Auditability</b><span>A permanent trail of key administrative activity, available to authorised roles.</span></li>
+      </ul>
+    </div>
+  </section>
+
+  <!-- 7 — NON-FUNCTIONAL REQUIREMENTS -->
+  <section class="slide" data-section="Foundations" data-ref="§2.2">
+    <div class="slide-inner">
+      <span class="eyebrow">How it must behave <span class="n">·</span> §2.2 Non-Functional Requirements</span>
+      <h2 class="headline" style="font-size:clamp(26px,3.2vw,38px);">Ten quality attributes, each with a stated target</h2>
+      <ul class="reqlist">
+        <li><b>Performance</b><span>A normal-sized institutional extract loads the dashboard within 3 seconds.</span></li>
+        <li><b>Model performance</b><span>Fail-class precision/recall as the real criteria; ≥75% accuracy only as a sanity check.</span></li>
+        <li><b>Reliability</b><span>Fails gracefully on missing data — never a confident, wrong answer.</span></li>
+        <li><b>Security</b><span>JWT-authenticated sessions and role-based access on every sensitive endpoint.</span></li>
+        <li><b>Privacy</b><span>Masked identifiers throughout — no claim of full anonymisation the system can't prove.</span></li>
+        <li><b>Auditability</b><span>Every major admin action recorded and traceable.</span></li>
+        <li><b>Usability</b><span>Usable by academic staff with no SQL or data-analysis background.</span></li>
+        <li><b>Maintainability</b><span>Modular, documented, with an automated regression suite run on every change.</span></li>
+        <li><b>Scalability</b><span>Modular architecture — React, FastAPI, PostgreSQL, Docker — extendable with no redesign.</span></li>
+        <li><b>Portability</b><span>Deployable from source via Docker Compose, dev and prod alike.</span></li>
+      </ul>
+    </div>
+  </section>
+
+  <!-- 8 — ARCHITECTURE -->
+  <section class="slide" data-section="System & Models" data-ref="§3">
+    <div class="slide-inner">
+      <span class="eyebrow">Under the hood <span class="n">·</span> §3 System Architecture</span>
+      <h2 class="headline" style="font-size:clamp(26px,3.2vw,38px);">Three layers, each replaceable on its own</h2>
+      <div class="arch-grid">
+        <div class="block"><span class="m">Presentation</span><h3>React 18 + Recharts</h3><p>Role-scoped SPA; navigation guards for UX, never the security boundary.</p></div>
+        <svg width="30" height="24" viewBox="0 0 30 24"><path d="M4 12H24M24 12L17 6M24 12L17 18" stroke="var(--ink)" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <div class="block"><span class="m">Application</span><h3>FastAPI · Gunicorn</h3><p>Auth, business logic, the ML pipeline, and every external-service call.</p></div>
+        <svg width="30" height="24" viewBox="0 0 30 24"><path d="M4 12H24M24 12L17 6M24 12L17 18" stroke="var(--ink)" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <div class="block"><span class="m">Data</span><h3>PostgreSQL 16 + Pandas</h3><p>Relational store for operations; academic data lives in-memory for speed.</p></div>
+      </div>
+      <p class="foot-note">Proven in practice: the AI provider layer went from one hardcoded integration to a runtime-configurable one — with zero changes to the layers on either side.</p>
+    </div>
+  </section>
+
+  <!-- 9 — TECHNOLOGY STACK -->
+  <section class="slide" data-section="System & Models" data-ref="§5.2">
+    <div class="slide-inner">
+      <span class="eyebrow">What it's actually built with <span class="n">·</span> §5.2 Technology Stack</span>
+      <h2 class="headline" style="font-size:clamp(26px,3.2vw,38px);">One stack per layer, nothing exotic</h2>
+      <div class="flow" style="grid-template-columns:1fr 26px 1fr 26px 1fr;">
+        <div class="block"><span class="m">Backend</span><h3>Python 3.12 · FastAPI</h3><p>Uvicorn for development; Gunicorn with multiple Uvicorn workers in production.</p></div>
+        <svg width="26" height="20" viewBox="0 0 26 20"><path d="M2 10H20M20 10L14 5M20 10L14 15" stroke="var(--ink)" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <div class="block"><span class="m">Database</span><h3>PostgreSQL 16</h3><p>SQLAlchemy 2.0 with the async driver asyncpg end to end.</p></div>
+        <svg width="26" height="20" viewBox="0 0 26 20"><path d="M2 10H20M20 10L14 5M20 10L14 15" stroke="var(--ink)" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <div class="block"><span class="m">Data &amp; ML</span><h3>Pandas · Scikit-Learn · XGBoost</h3><p>SMOTE for class imbalance, SHAP for explanation, Joblib for model serialisation.</p></div>
+      </div>
+      <div class="grid g2" style="margin-top:30px;">
+        <div class="block"><span class="m">Frontend</span><h3>React 18 · React Router 6</h3><p>Recharts for data presentation, Axios for the API calls.</p></div>
+        <div class="block"><span class="m">Infrastructure</span><h3>Docker Compose</h3><p>Separate configurations for development and production.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 10 — IMPLEMENTATION TIMELINE -->
+  <section class="slide" data-section="System & Models" data-ref="§5 Implementation Timeline">
+    <div class="slide-inner">
+      <span class="eyebrow">How the build was tracked <span class="n">·</span> §5 Implementation Timeline</span>
+      <h2 class="headline" style="font-size:clamp(26px,3.2vw,38px);">A work breakdown structure, checked weekly</h2>
+      <div class="phase-track">
+        <div class="phase-bar">
+          <div style="width:14%;">Definition</div>
+          <div style="width:16%;">Requirements</div>
+          <div style="width:18%;">Design</div>
+          <div style="width:24%;">Development</div>
+          <div style="width:16%;">Iteration</div>
+          <div style="width:12%;">Deployment</div>
+        </div>
+      </div>
+      <p class="foot-note">The trimester was tracked against these six phases, with weekly snapshots cross-referenced against the project's own progress log — not a plan made once and forgotten.</p>
+    </div>
+  </section>
+
+  <!-- 11 — SYSTEM DESIGN -->
+  <section class="slide" data-section="System & Models" data-ref="§4.1–4.2">
+    <div class="slide-inner">
+      <span class="eyebrow">Modelling it before building it <span class="n">·</span> §4.1–4.2 System Design</span>
+      <h2 class="headline" style="font-size:clamp(24px,2.8vw,32px);">Three roles, one set of classes, mapped before a line of code</h2>
+      <div class="grid g2" style="margin-top:24px;">
+        <figure class="figure-frame" style="margin:0;">
+          <img src="figs/usecase.png" alt="Use case diagram showing Lecturer, Head of School and Head of Technology actors against the system's core functions">
+          <figcaption class="figure-cap">Fig. 2 — Use Case Diagram</figcaption>
+        </figure>
+        <figure class="figure-frame" style="margin:0;">
+          <img src="figs/classdiagram.png" alt="System class diagram grouped into five functional areas including access and identity, and explainability">
+          <figcaption class="figure-cap">Fig. 3 — System Class Diagram</figcaption>
+        </figure>
+      </div>
+    </div>
+  </section>
+
+  <!-- 12 — DATABASE ERD -->
+  <section class="slide" data-section="System & Models" data-ref="§4.4">
+    <div class="slide-inner" style="max-width:1000px;">
+      <span class="eyebrow">What's actually in Postgres <span class="n">·</span> §4.4 Database Design</span>
+      <h2 class="headline" style="font-size:clamp(24px,2.8vw,32px);">Operations and governance are relational — academic data isn't</h2>
+      <div class="grid g2" style="margin-top:22px; align-items:start;">
+        <figure class="figure-frame" style="margin:0;">
+          <img src="figs/erd.png" alt="Entity relationship diagram of the PostgreSQL schema: users, predictions, interventions, audit logs, mail servers and AI provider configs">
+          <figcaption class="figure-cap">Fig. 5 — Database ERD</figcaption>
+        </figure>
+        <p class="sub" style="margin-top:6px;">Users, predictions, interventions, audit logs, mail servers and AI provider configs live here. Academic source records don't — they're processed through Pandas DataFrames, not maintained as empty relational tables.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- 13 — TWO MODELS -->
+  <section class="slide" data-section="System & Models" data-ref="§5.5.1">
+    <div class="slide-inner">
+      <span class="eyebrow">Predictive analytics <span class="n">·</span> §5.5.1</span>
+      <h2 class="headline" style="font-size:clamp(26px,3.2vw,38px);">Two models, because a term in progress isn't a finished record</h2>
+      <div class="compare">
+        <div class="comprow">
+          <div class="complbl"><span>Complete-record model — <b>65,903</b> finished enrolments, 124 subjects</span><span>Used once a full record exists</span></div>
+          <div class="comptrack"><div class="compfill" style="width:100%"></div></div>
+        </div>
+        <div class="comprow">
+          <div class="complbl"><span>Mid-term model — trained on truncated snapshots <em style="font-weight:600;">(illustrative)</em></span><span>Rest of term: unknown at prediction time</span></div>
+          <div class="comptrack">
+            <div class="compfill" style="width:42%"></div>
+            <div class="compfill dashed" style="left:42%; width:58%"></div>
+          </div>
+        </div>
+      </div>
+      <p class="foot-note">Feeding partial data to the complete-record model first hit 100% training accuracy — a textbook sign of leakage, not skill. Hence a second model, trained only on what a mid-term snapshot actually contains.</p>
+    </div>
+  </section>
+
+  <!-- 8 — MODEL PERFORMANCE -->
+  <section class="slide" data-section="System & Models" data-ref="§7.4.1">
+    <div class="slide-inner">
+      <span class="eyebrow">Model performance <span class="n">·</span> §7.4.1</span>
+      <h2 class="headline" style="font-size:clamp(26px,3.2vw,38px);">95.40% accuracy isn't the number that matters</h2>
+      <p class="sub">Passing students outnumber failing ones — accuracy alone would flatter a model that misses the exact students it exists to find. We report the fail-class metrics instead, each on the same 0–1 scale.</p>
+      <div class="barchart">
+        <div class="barrow"><span class="barlbl">Precision</span><div class="bartrack"><div class="barfill" style="width:79.3%"></div></div><span class="barval">.7931</span></div>
+        <div class="barrow"><span class="barlbl">Recall</span><div class="bartrack"><div class="barfill" style="width:78.1%"></div></div><span class="barval">.7809</span></div>
+        <div class="barrow"><span class="barlbl">F1</span><div class="bartrack"><div class="barfill" style="width:78.7%"></div></div><span class="barval">.7869</span></div>
+        <div class="barrow"><span class="barlbl">PR-AUC</span><div class="bartrack"><div class="barfill" style="width:88.1%"></div></div><span class="barval">.8808</span></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 9 — INTEGRATIONS & APIs -->
+  <section class="slide" data-section="System & Models" data-ref="§5.8–5.9">
+    <div class="slide-inner">
+      <span class="eyebrow">Talking to the outside world <span class="n">·</span> §5.8–5.9</span>
+      <h2 class="headline" style="font-size:clamp(26px,3.2vw,38px);">Integrations &amp; the API surface</h2>
+      <div class="grid g3" style="margin-top:32px;">
+        <div class="block">
+          <span class="m">AI Providers</span>
+          <h3>Gemini, Anthropic, OpenAI</h3>
+          <p>Configured at runtime through one dispatch function — switching providers, models or keys needs no redeploy.</p>
+        </div>
+        <div class="block">
+          <span class="m">Outgoing Mail</span>
+          <h3>SMTP + templated email</h3>
+          <p>One or more mail servers, credentials encrypted at rest. Templated notifications for password-reset OTPs and connection tests — every send logged as "sent" or "failed," never falsely "delivered."</p>
+        </div>
+        <div class="block">
+          <span class="m">REST API</span>
+          <h3>FastAPI, self-documenting</h3>
+          <p>Every capability is a versioned endpoint with OpenAPI docs generated automatically — exposed to Head of Technology as the API Console.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 10 — EXPLAINABLE BY DESIGN -->
+  <section class="slide" data-section="Explainability & Evaluation" data-ref="§5.5.4">
+    <div class="slide-inner">
+      <span class="eyebrow">Explainability <span class="n">·</span> §5.5.4</span>
+      <h2 class="headline" style="font-size:clamp(26px,3.2vw,38px);">Every prediction ships with its reasons — filtered to what a student can act on</h2>
+      <div class="grid g2" style="margin-top:32px;">
+        <div class="block"><span class="m">Surfaced</span><h3>Actionable factors</h3><p>Behaviour the student can actually change — attendance, assessment coverage, submission timing.</p></div>
+        <div class="block"><span class="m">Excluded</span><h3>Structural &amp; demographic factors</h3><p>Subject difficulty, assessment weighting, age, background — high SHAP weight, zero use to a student.</p></div>
+      </div>
+      <p class="foot-note">SHAP contributions are reconstructed against the model's real output as part of the automated test suite — the explanation is checked, not just displayed.</p>
+    </div>
+  </section>
+
+  <!-- WALKTHROUGH — PRODUCT SCREENS -->
+  <section class="slide" data-section="Explainability & Evaluation" data-ref="§4.5.3">
+    <div class="slide-inner">
+      <span class="eyebrow">What it looks like <span class="n">·</span> §4.5.3 T2 Refinements</span>
+      <h2 class="headline" style="font-size:clamp(26px,3.2vw,38px);">Refined against client feedback, not redesigned from scratch</h2>
+      <div class="thumb-grid">
+        <figure class="thumb"><img src="figs/dashboard.png" alt="Institution-wide dashboard for the Head of Technology role"><figcaption>Institution-wide dashboard</figcaption></figure>
+        <figure class="thumb"><img src="figs/risk_analytics.png" alt="Students at-risk analytics screen"><figcaption>Students at-risk analytics</figcaption></figure>
+        <figure class="thumb"><img src="figs/predictive_report.png" alt="Student-wise predictive report screen"><figcaption>Student-wise predictive report</figcaption></figure>
+        <figure class="thumb"><img src="figs/ai_insights.png" alt="Student-wise AI insights screen"><figcaption>Student-wise AI insights</figcaption></figure>
+        <figure class="thumb"><img src="figs/login.png" alt="EDAPT v2 login page"><figcaption>Login</figcaption></figure>
+        <figure class="thumb"><img src="figs/api_console.png" alt="API console for third-party integrations"><figcaption>API console</figcaption></figure>
+      </div>
+    </div>
+  </section>
+
+  <!-- 15 — EVALUATION STRATEGY -->
+  <section class="slide" data-section="Explainability & Evaluation" data-ref="§6">
+    <div class="slide-inner">
+      <span class="eyebrow">How we tested it <span class="n">·</span> §6 Evaluation Strategy</span>
+      <h2 class="headline" style="font-size:clamp(26px,3.2vw,38px);">Testing to find faults, not to confirm we were right</h2>
+      <div class="flow">
+        <div class="block"><span class="m">01</span><h3>Unit</h3><p>Validation rules, boundary conditions, SHAP reconstruction.</p></div>
+        <svg width="26" height="20" viewBox="0 0 26 20"><path d="M2 10H20M20 10L14 5M20 10L14 15" stroke="var(--ink)" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <div class="block"><span class="m">02</span><h3>Integration</h3><p>Frontend → API → DB → background jobs, end to end.</p></div>
+        <svg width="26" height="20" viewBox="0 0 26 20"><path d="M2 10H20M20 10L14 5M20 10L14 15" stroke="var(--ink)" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <div class="block"><span class="m">03</span><h3>Data verification</h3><p>Every dashboard number checked against a real institutional extract.</p></div>
+        <svg width="26" height="20" viewBox="0 0 26 20"><path d="M2 10H20M20 10L14 5M20 10L14 15" stroke="var(--ink)" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <div class="block"><span class="m">04</span><h3>User acceptance</h3><p>Walked through with the client, role by role.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 12 — WHAT WE FOUND -->
+  <section class="slide" data-section="Evidence & Rigor" data-ref="§7.3">
+    <div class="slide-inner">
+      <span class="eyebrow">What we found <span class="n">·</span> §7.3 Key Defects</span>
+      <h2 class="headline" style="font-size:clamp(26px,3.2vw,38px);">The evaluation earned its keep</h2>
+      <div class="grid g2" style="margin-top:32px; align-items:start;">
+        <div>
+          <span class="m" style="display:block; margin-bottom:9px;">TC-07 — same count, to scale</span>
+          <div class="compare" style="margin-top:0; gap:16px;">
+            <div class="comprow"><div class="complbl"><span>Before fix</span><b>57,710</b></div><div class="comptrack"><div class="compfill" style="width:100%"></div></div></div>
+            <div class="comprow"><div class="complbl"><span>After fix</span><b>7,926</b></div><div class="comptrack"><div class="compfill" style="width:13.7%"></div></div></div>
+          </div>
+          <p style="color:var(--ink-soft); font-size:14px; line-height:1.6; margin-top:14px;">An "at-risk" count was tallying assessment rows, not students. Fixed to count unique students.</p>
+        </div>
+        <div class="grid" style="gap:26px;">
+          <div class="block"><span class="m">§7.3</span><h3>Passing tests, failing predictions</h3><p>A live prediction outage ran undetected — the suite only ever tested half the serving path.</p></div>
+          <div class="block"><span class="m">TC-03</span><h3>Deleted, but still signed in</h3><p>A valid JWT outlived the account it belonged to. Now checked against the database, every request.</p></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 13 — MODEL HONESTY -->
+  <section class="slide" data-section="Evidence & Rigor" data-ref="§7.4.1">
+    <div class="slide-inner" style="max-width:880px;">
+      <span class="eyebrow">When our own number looked too good <span class="n">·</span> §7.4.1</span>
+      <h2 class="headline" style="font-size:clamp(24px,3.6vw,38px);">An earlier model reported 0.8374 recall. We didn't believe it — and we were right not to.</h2>
+      <div class="grid g3" style="margin-top:32px;">
+        <div class="stat"><span class="num">205</span><span class="lbl">enrolments had been mislabelled, all fail→pass</span></div>
+        <div class="stat"><span class="num">5σ</span><span class="lbl">how far the resulting recall drop sat from ordinary noise</span></div>
+        <div class="stat"><span class="num">2.98pp</span><span class="lbl">the real cost of correcting the ground truth</span></div>
+      </div>
+      <p class="sub" style="margin-top:24px;">Once corrected and compared fairly, the current model wins on F1 and PR-AUC — on its own merits, not an inflated one.</p>
+    </div>
+  </section>
+
+  <!-- 14 — ETHICS: PRIVACY -->
+  <section class="slide" data-section="Ethics, Fairness & Security" data-ref="§8.1">
+    <div class="slide-inner">
+      <span class="eyebrow">Data privacy <span class="n">·</span> §8.1</span>
+      <h2 class="headline" style="font-size:clamp(26px,3.2vw,38px);">Pseudonymised, and we say so plainly</h2>
+      <div class="scalechart">
+        <div class="scalerow"><span class="scalelbl">Students</span><div class="scaletrack"><div class="scalefill" style="width:61%"></div></div><span class="scaleval">7,926</span></div>
+        <div class="scalerow"><span class="scalelbl">Assessment records</span><div class="scaletrack"><div class="scalefill" style="width:86%"></div></div><span class="scaleval">327,501</span></div>
+        <div class="scalerow"><span class="scalelbl">Attendance sessions</span><div class="scaletrack"><div class="scalefill" style="width:100%"></div></div><span class="scaleval">2.5M</span></div>
+      </div>
+      <p class="foot-note">Shown on a log scale — each row is a different unit (students, then records, then sessions), not a single comparable total.</p>
+      <p class="sub" style="margin-top:14px;">Pseudonymised is not anonymised, and we don't claim otherwise — re-identification risk from combined attributes hasn't been ruled out.</p>
+    </div>
+  </section>
+
+  <!-- 15 — ETHICS: THE INCIDENT -->
+  <section class="slide" data-section="Ethics, Fairness & Security" data-ref="§8.2">
+    <div class="slide-inner invert">
+      <span class="eyebrow">The incident we're not hiding <span class="n">·</span> §8.2</span>
+      <h2 class="headline" style="font-size:clamp(24px,3.6vw,38px); color:var(--invert-ink);">A routine check found the repository set to public.</h2>
+      <div class="grid g3" style="margin-top:28px;">
+        <div class="block"><p style="font-size:14px;">Made private the moment it was found</p></div>
+        <div class="block"><p style="font-size:14px;">Exposed history scrubbed; other files audited for the same risk</p></div>
+        <div class="block"><p style="font-size:14px;">One action still outstanding — deliberately not marked "resolved"</p></div>
+      </div>
+      <hr class="rule">
+      <p style="font-size:14.5px;">We'd rather report an honest, incomplete fix than a tidy, false one.</p>
+    </div>
+  </section>
+
+  <!-- 16 — FAIRNESS & SECURITY -->
+  <section class="slide" data-section="Ethics, Fairness & Security" data-ref="§8.4 · §9">
+    <div class="slide-inner">
+      <span class="eyebrow">Open questions we're tracking <span class="n">·</span> §8.4 &amp; §9</span>
+      <h2 class="headline" style="font-size:clamp(26px,3.2vw,38px);">Fairness and security, held to the same standard</h2>
+      <div class="grid g2" style="margin-top:32px;">
+        <div class="block"><h3>Fairness — one observation, not a verdict</h3><p>Students aged 0–20 currently show lower fail-class recall; one building shows an unexplained pass-rate gap. Neither is dismissed, neither is overstated — both wait on more retraining cycles.</p></div>
+        <div class="block"><h3>Security — tested, not assumed</h3><p>JWT + bcrypt for sessions, Fernet-encrypted credentials, a scoped audit log. A leaked env-file's credentials were found already dead — verified by testing them, not by hoping.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 17 — BENEFITS & NEXT -->
+  <section class="slide" data-section="Impact & Close" data-ref="§11–12">
+    <div class="slide-inner">
+      <span class="eyebrow">Closing the loop <span class="n">·</span> §11–12</span>
+      <h2 class="headline" style="font-size:clamp(26px,3.2vw,38px);">Back to the problems we started with</h2>
+      <div class="grid g2" style="margin-top:32px;">
+        <ul class="plain">
+          <li><span class="n">i</span> Risk flagged from the start of term, not after a bad grade</li>
+          <li><span class="n">iii</span> Every intervention logged and reviewable over time</li>
+          <li><span class="n">vi</span> Reports drawn live from one dataset — not five spreadsheets</li>
+        </ul>
+        <ul class="plain">
+          <li><span class="n">→</span> Direct LMS integration, replacing manual ingestion</li>
+          <li><span class="n">→</span> Counterfactual recommendations — modelled impact, not just a suggestion</li>
+          <li><span class="n">→</span> Explainability rolled up to cohort and institution level</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- 18 — DEMO -->
+  <section class="slide" data-section="Impact & Close" data-ref="Live">
+    <div class="slide-inner" style="max-width:820px;">
+      <span class="eyebrow">Now, live</span>
+      <h2 class="headline">Let's look at EDAPT v2 itself</h2>
+      <ul class="plain" style="margin-top:28px;">
+        <li><span class="n">01</span> An institution-wide dashboard, filtered down to one subject</li>
+        <li><span class="n">02</span> A single student's prediction, with its SHAP explanation</li>
+        <li><span class="n">03</span> Logging an intervention against that prediction</li>
+        <li><span class="n">04</span> Switching the AI provider live, from the admin settings</li>
+      </ul>
+    </div>
+  </section>
+
+  <!-- 19 — THANK YOU -->
+  <section class="slide" data-section="Impact & Close" data-ref="—">
+    <div class="slide-inner">
+      <svg width="200" height="46" viewBox="0 0 200 46" style="opacity:.4; margin-bottom:30px;">
+        <polyline fill="none" stroke="var(--ink)" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"
+          points="4,12 40,19 76,27 112,16 148,22 196,38"/>
+      </svg>
+      <h2 class="headline">Thank you.</h2>
+      <p class="sub">Questions — about the model, the incident, or anything in between.</p>
+    </div>
+  </section>
+
+</div>
+
+<div class="rail">
+  <div class="navbtns">
+    <button id="prevBtn" aria-label="Previous slide" title="Previous (←)">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none"><path d="M15 4L7 12L15 20" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </button>
+    <span class="section-name" id="sectionName"></span>
+  </div>
+  <div class="track" id="track"><div class="fill" id="fill" style="width:0%"></div></div>
+  <div class="right">
+    <span class="counter" id="counter"></span>
+    <span class="ref" id="refTag"></span>
+    <button class="fsbtn" id="fsBtn" aria-label="Toggle fullscreen" title="Fullscreen">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </button>
+    <button id="nextBtn" aria-label="Next slide" title="Next (→)">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none"><path d="M9 4L17 12L9 20" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </button>
+  </div>
+</div>
+
+<script>
+(function(){
+  var slides = Array.prototype.slice.call(document.querySelectorAll('.slide'));
+  var counterEl = document.getElementById('counter');
+  var refEl = document.getElementById('refTag');
+  var sectionEl = document.getElementById('sectionName');
+  var prevBtn = document.getElementById('prevBtn');
+  var nextBtn = document.getElementById('nextBtn');
+  var fsBtn = document.getElementById('fsBtn');
+  var track = document.getElementById('track');
+  var fill = document.getElementById('fill');
+  var current = 0;
+
+  function render(){
+    slides.forEach(function(s, i){ s.classList.toggle('active', i === current); });
+    counterEl.textContent = String(current+1).padStart(2,'0') + ' / ' + slides.length;
+    refEl.textContent = slides[current].dataset.ref || '';
+    sectionEl.innerHTML = '<b>' + (slides[current].dataset.section || '') + '</b>';
+    prevBtn.disabled = current === 0;
+    nextBtn.disabled = current === slides.length - 1;
+    fill.style.width = (((current+1) / slides.length) * 100) + '%';
+    try{ localStorage.setItem('edapt-deck-slide', String(current)); }catch(e){}
+  }
+  function goTo(i){ current = Math.max(0, Math.min(slides.length-1, i)); render(); }
+  function next(){ goTo(current+1); }
+  function prev(){ goTo(current-1); }
+
+  prevBtn.addEventListener('click', prev);
+  nextBtn.addEventListener('click', next);
+  track.addEventListener('click', function(e){
+    var r = track.getBoundingClientRect();
+    var ratio = (e.clientX - r.left) / r.width;
+    goTo(Math.round(ratio * (slides.length - 1)));
+  });
+
+  window.addEventListener('keydown', function(e){
+    if (e.key === 'ArrowRight' || e.key === ' ' || e.key === 'PageDown'){ e.preventDefault(); next(); }
+    else if (e.key === 'ArrowLeft' || e.key === 'PageUp'){ e.preventDefault(); prev(); }
+    else if (e.key === 'Home'){ goTo(0); }
+    else if (e.key === 'End'){ goTo(slides.length-1); }
+  });
+
+  var touchX = null;
+  document.getElementById('stage').addEventListener('touchstart', function(e){ touchX = e.touches[0].clientX; }, {passive:true});
+  document.getElementById('stage').addEventListener('touchend', function(e){
+    if (touchX === null) return;
+    var dx = e.changedTouches[0].clientX - touchX;
+    if (Math.abs(dx) > 50){ dx < 0 ? next() : prev(); }
+    touchX = null;
+  }, {passive:true});
+
+  fsBtn.addEventListener('click', function(){
+    if (!document.fullscreenElement){ document.documentElement.requestFullscreen?.(); }
+    else { document.exitFullscreen?.(); }
+  });
+
+  try{
+    var saved = parseInt(localStorage.getItem('edapt-deck-slide'), 10);
+    if (!isNaN(saved) && saved >= 0 && saved < slides.length) current = saved;
+  }catch(e){}
+  render();
+})();
+</script>

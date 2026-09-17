@@ -360,30 +360,53 @@ async def _preserve_app_state():
     original_attendance = main_mod._ATTENDANCE
     ingested_override_path = Path(main_mod.__file__).parent / "ml" / "ingested_capstone.csv"
     original_override_bytes = ingested_override_path.read_bytes() if ingested_override_path.exists() else None
+
+    # ScoringJob is NOT blanket-deleted/waited-on like the four tables below
+    # — it shares the same table with whatever REAL scoring jobs a real
+    # admin has running on this same dev database at the same time (unlike
+    # PendingIngest/IngestJob/UploadBatch/AnalyzeJob, which only ever hold
+    # short-lived bookkeeping rows). Confirmed live, not hypothetical: a
+    # blanket `delete(ScoringJob)` here once deleted two real, genuinely
+    # in-progress scoring jobs — a capstone ingestion's and an attendance
+    # ingestion's own auto-triggered runs — out from under a real admin
+    # simply because this test suite happened to run at the same time.
+    # Snapshotting ids on entry and diffing on exit means only rows THIS
+    # test's own confirm() calls actually created are touched.
+    from app.db.models import ScoringJob
+    async with main_mod._AsyncSession() as session:
+        scoring_job_ids_before = set((await session.execute(select(ScoringJob.id))).scalars().all())
+
     try:
         yield
     finally:
+        async with main_mod._AsyncSession() as session:
+            scoring_job_ids_after = set((await session.execute(select(ScoringJob.id))).scalars().all())
+        new_scoring_job_ids = scoring_job_ids_after - scoring_job_ids_before
+
         # A successful confirm() inside this test may have fire-and-forget
-        # launched a real ScoringJob (see main.py's _launch_scoring_job —
-        # deliberately not awaited by the confirm job itself, so an admin
-        # isn't stuck watching "Confirm and Ingest" for as long as a full
-        # institution-wide scoring pass takes). That task is real work still
-        # running on this SAME session-scoped event loop, using whatever
-        # main.py globals are current — waiting for it HERE, before
-        # _isolate_ml_paths's own restore/cleanup below and before the next
-        # test starts touching those same globals, is what stops it from
+        # launched one of those new ScoringJobs (see main.py's
+        # _launch_scoring_job — deliberately not awaited by the confirm job
+        # itself, so an admin isn't stuck watching "Confirm and Ingest" for
+        # as long as a full institution-wide scoring pass takes). Waiting
+        # for just this test's own task(s) here, before _isolate_ml_paths's
+        # own restore/cleanup below and before the next test starts
+        # touching those same globals, is what stops one of them from
         # racing a later test's isolation context. Cancelled/failed tasks
         # are fine to ignore; only a genuine hang would be a problem.
-        pending_scoring = [t for t in main_mod._SCORING_BACKGROUND_TASKS if not t.done()]
+        pending_scoring = [
+            t for jid, t in main_mod._SCORING_BACKGROUND_TASKS.items()
+            if jid in new_scoring_job_ids and not t.done()
+        ]
         if pending_scoring:
             await asyncio.gather(*pending_scoring, return_exceptions=True)
         main_mod._DATA       = original_data
         main_mod._ATTENDANCE = original_attendance
         async with main_mod._AsyncSession() as session:
-            from app.db.models import AnalyzeJob, IngestJob, PendingIngest, ScoringJob, UploadBatch
+            from app.db.models import AnalyzeJob, IngestJob, PendingIngest, UploadBatch
             await session.execute(delete(PendingIngest))
             await session.execute(delete(IngestJob))
-            await session.execute(delete(ScoringJob))
+            if new_scoring_job_ids:
+                await session.execute(delete(ScoringJob).where(ScoringJob.id.in_(new_scoring_job_ids)))
             await session.execute(delete(UploadBatch))
             await session.execute(delete(AnalyzeJob))
             await session.commit()

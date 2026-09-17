@@ -4,6 +4,21 @@ All notable changes to EDAPT v2 are documented here.
 
 ---
 
+## [2026-09-18] — Scoring Job Cancel, Startup Self-Heal, and Concurrent Scoring
+
+### Added
+
+- **`POST /api/scoring/jobs/{id}/cancel`** — stops a running scoring job. Actually cancels the underlying `asyncio.Task` when it's still alive in this process (via a new job-id-keyed `_SCORING_BACKGROUND_TASKS` dict, upgraded from a plain set); either way, immediately clears `POST /api/scoring/run`'s `409` "already running" guard, which is the main reason to use it — restarting a scan of newly-ingested data without waiting for a stale or unwanted run first. Rejects (400) cancelling a job that isn't `"running"`. A "Cancel" button was added next to any running job on the Data Ingestion page's Risk Scoring tab.
+- **Startup self-heal for orphaned `ScoringJob` rows.** Found live: three rows stuck `"running"` for multiple days, left behind by earlier container kills in this dev environment, silently blocking every subsequent scoring attempt via the `409` guard with no way to clear them short of a manual DB fix. The app's own startup handler now marks any row still `"running"` as `"failed"` ("Orphaned by a backend restart") before serving traffic — such a row can never be a real, still-executing job, since the process that was running it no longer exists.
+- **Concurrent subject scoring.** `_run_scoring_job` now scores `_SCORING_CONCURRENCY` (4) subjects at a time instead of one at a time — each subject's own per-student loop stays sequential, but different subjects share no mutable state (each gets its own DB session), so this is safe and turns idle CPU cores into real wall-clock speedup. A 120-subject/~9,000-student run that previously took ~47 minutes completed dramatically faster in a live test.
+- `test_scoring_job_control.py` (3 tests) covering all three of the above.
+
+### Changed
+
+- The manual "Run Risk Scoring Now" trigger (`POST /api/scoring/run`) now launches via `_launch_scoring_job()` (the same fire-and-forget path the auto-after-ingest trigger uses) instead of a request-bound `BackgroundTasks.add_task` — needed so every scoring job, manual or automatic, is tracked uniformly and can be found and cancelled by job id.
+
+---
+
 ## [2026-09-13] — Fire-and-Forget Scoring Trigger; Unresolved Data-Corruption Finding
 
 ### Changed

@@ -595,7 +595,7 @@ function BatchUploadsPanel({ batches, nowMs }) {
 
 const TRIGGER_LABEL = { auto_after_ingest: 'Auto (after ingestion)', manual: 'Manual', cron: 'Scheduled' };
 
-function ScoringJobRow({ job, nowMs }) {
+function ScoringJobRow({ job, nowMs, onCancel, cancelling }) {
   const isRunning = job.status === 'running';
   const isFailed  = job.status === 'failed';
   const isPartial = job.status === 'partial';
@@ -614,6 +614,17 @@ function ScoringJobRow({ job, nowMs }) {
         <span style={{ ...s.jobStatusPill, ...pillStyle }}>
           {isRunning ? `${pct}%` : isFailed ? 'Failed' : isPartial ? 'Partial' : 'Completed'}
         </span>
+        {isRunning && (
+          <button
+            type="button"
+            onClick={() => onCancel(job.id)}
+            disabled={cancelling}
+            style={s.jobCancelBtn}
+            title="Stop this scoring run — also clears the way for a fresh run to start"
+          >
+            {cancelling ? 'Cancelling…' : 'Cancel'}
+          </button>
+        )}
       </div>
       {isRunning && (
         <div style={s.jobProgressTrack}>
@@ -637,7 +648,7 @@ function ScoringJobRow({ job, nowMs }) {
   );
 }
 
-function ScoringJobsPanel({ jobs, nowMs }) {
+function ScoringJobsPanel({ jobs, nowMs, onCancel, cancellingJobId }) {
   return (
     <div style={s.card}>
       <h3 style={s.cardTitle}>Risk Prediction Scoring</h3>
@@ -647,7 +658,12 @@ function ScoringJobsPanel({ jobs, nowMs }) {
         </p>
       ) : (
         <div style={s.jobList}>
-          {jobs.map(j => <ScoringJobRow key={j.id} job={j} nowMs={nowMs} />)}
+          {jobs.map(j => (
+            <ScoringJobRow
+              key={j.id} job={j} nowMs={nowMs}
+              onCancel={onCancel} cancelling={cancellingJobId === j.id}
+            />
+          ))}
         </div>
       )}
     </div>
@@ -781,6 +797,23 @@ export default function DataIngestion() {
       setScoringRunError(getErrorMessage(err, 'Failed to start risk scoring.'));
     } finally {
       setStartingScoring(false);
+    }
+  };
+
+  // Stops a job that's stuck, taking too long, or simply not wanted
+  // anymore — also what clears "already running" so a fresh run (e.g. for
+  // data that was just re-ingested) can start right away instead of
+  // waiting for this one, or a stale one, to finish first.
+  const [cancellingJobId, setCancellingJobId] = useState(null);
+  const handleCancelScoring = async (jobId) => {
+    setCancellingJobId(jobId);
+    try {
+      await api.post(`/api/scoring/jobs/${jobId}/cancel`);
+      await fetchScoringJobs();
+    } catch (err) {
+      setScoringRunError(getErrorMessage(err, 'Failed to cancel that scoring run.'));
+    } finally {
+      setCancellingJobId(null);
     }
   };
 
@@ -1180,7 +1213,12 @@ export default function DataIngestion() {
       </div>
       {activityTab === 'ingestion' && <IngestJobsPanel jobs={activity} nowMs={nowMs} />}
       {activityTab === 'batches'   && <BatchUploadsPanel batches={batches} nowMs={nowMs} />}
-      {activityTab === 'scoring'   && <ScoringJobsPanel jobs={scoringJobs} nowMs={nowMs} />}
+      {activityTab === 'scoring'   && (
+        <ScoringJobsPanel
+          jobs={scoringJobs} nowMs={nowMs}
+          onCancel={handleCancelScoring} cancellingJobId={cancellingJobId}
+        />
+      )}
 
       {wizardPending && (
         <IngestModeWizard
@@ -1354,6 +1392,11 @@ const s = {
   jobStatusRunning: { background: '#EFF6FF', color: '#1D4ED8' },
   jobStatusSuccess: { background: '#ECFDF5', color: '#065F46' },
   jobStatusFailed:  { background: '#FEF2F2', color: '#991B1B' },
+  jobCancelBtn: {
+    marginLeft: 8, fontSize: 11, fontWeight: 600, color: '#991B1B',
+    background: '#fff', border: '1px solid #FCA5A5', borderRadius: 6,
+    padding: '3px 9px', cursor: 'pointer',
+  },
   jobRowMeta: { fontSize: 12, color: '#8BA5B8' },
   jobResult: { display: 'flex', gap: 16, flexWrap: 'wrap', fontSize: 12.5, color: '#334155' },
   jobMergeStats: {
