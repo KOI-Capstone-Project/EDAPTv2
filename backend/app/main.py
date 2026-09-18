@@ -1190,6 +1190,26 @@ async def _startup():
     else:
         logger.warning("Email service not configured — forgot password will not work")
 
+    # A ScoringJob left "running" cannot be a real, still-executing job at
+    # this point — the asyncio task that was running it (fire-and-forget,
+    # see _launch_scoring_job) belonged to whatever process existed before
+    # this one started, and died with it. Left alone, a row like this blocks
+    # POST /api/scoring/run's "already running" 409 guard forever, silently
+    # preventing anyone from ever triggering a fresh scoring run again —
+    # confirmed as a real, live incident (three such rows, days old, found
+    # stuck after this dev container had been killed/restarted mid-job).
+    async with _AsyncSession() as db:
+        stuck_jobs = (await db.execute(
+            select(ScoringJob).where(ScoringJob.status == "running")
+        )).scalars().all()
+        for job in stuck_jobs:
+            job.status = "failed"
+            job.finished_at = datetime.now(timezone.utc)
+            job.error_detail = "Orphaned by a backend restart — no process was still running this job."
+        if stuck_jobs:
+            await db.commit()
+            logger.warning(f"Cleared {len(stuck_jobs)} orphaned scoring job(s) left 'running' from a prior process")
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Middleware
 # ─────────────────────────────────────────────────────────────────────────────
@@ -3245,6 +3265,66 @@ async def ingest_attendance_preview(
 # Dashboard Routes
 # ─────────────────────────────────────────────────────────────────────────────
 
+async def _predicted_at_risk_count(df: pd.DataFrame, db: AsyncSession) -> Optional[int]:
+    """Distinct students currently predicted "At Risk" or "High Risk" by the
+    real ML model, scoped to exactly the (student, subject, study_period)
+    combinations present in `df` (already role/query-filtered by the
+    caller) — the same risk_band the Students at Risk page and the chatbot
+    report, so this headline dashboard KPI can never disagree with them.
+
+    Deliberately NOT "how many students have ever scored below 50% on a
+    single assessment item" (the metric this replaced): with several years
+    of multi-subject history per student, nearly every student has one weak
+    item somewhere, which is a real but nearly meaningless number to show
+    beside a pass rate — see the git history of this function for the exact
+    incident (looked alarming: ~88% "at risk" beside an 82% pass rate,
+    which is the raw-marks metric and the ML risk_band answering two
+    unrelated questions, not a real contradiction).
+
+    Returns None (not 0) when no scoped subject/period has been scored at
+    all yet — a real "we haven't looked" gap, not "nobody's at risk".
+    """
+    if df.empty or "STUDENTID_MASKED" not in df.columns or "SUBJECTCODE" not in df.columns:
+        return None
+
+    periods  = df["STUDYPERIOD"].dropna().unique().tolist()
+    subjects = df["SUBJECTCODE"].dropna().unique().tolist()
+    if not periods or not subjects:
+        return None
+
+    scoped_keys = set(zip(df["STUDENTID_MASKED"], df["SUBJECTCODE"], df["STUDYPERIOD"]))
+
+    rows = (await db.execute(
+        select(
+            Prediction.student_id_masked, Prediction.subject_code, Prediction.study_period,
+            Prediction.risk_band, Prediction.predicted_at,
+        ).where(
+            Prediction.study_period.in_(periods),
+            Prediction.subject_code.in_(subjects),
+        )
+    )).all()
+
+    # Most recent prediction per (student, subject, period) — a re-predicted
+    # enrolment (newer model version, or a later ingestion) must count once,
+    # at its latest risk band, same dedup rule the chatbot's own risk
+    # context already applies to this same table.
+    latest: dict[tuple, tuple] = {}
+    for student, subj, period, risk_band, predicted_at in rows:
+        key = (student, subj, period)
+        if key not in scoped_keys:
+            continue
+        if key not in latest or predicted_at > latest[key][1]:
+            latest[key] = (risk_band, predicted_at)
+
+    if not latest:
+        return None  # real data in scope, but none of it has been scored yet
+
+    return len({
+        student for (student, _subj, _period), (risk_band, _predicted_at) in latest.items()
+        if risk_band in ("At Risk", "High Risk")
+    })
+
+
 @app.get("/api/dashboard/summary", tags=["Dashboard"])
 async def dashboard_summary(
     subject:    Optional[str] = Query(None),
@@ -3252,12 +3332,13 @@ async def dashboard_summary(
     year:       Optional[str] = Query(None),
     classgroup: Optional[str] = Query(None),
     user: dict = Depends(get_current_user),
+    db:   AsyncSession = Depends(get_db),
 ):
     """Return KPI summary metrics for the selected scope and role."""
     empty = {
         "total_students": 0, "total_subjects": 0, "avg_mark": 0.0,
         "avg_mark_prev": None, "pass_rate": 0.0, "pass_rate_prev": None,
-        "at_risk_count": 0, "countries_count": 0,
+        "at_risk_count": None, "countries_count": 0,
     }
     if _DATA is None or _DATA.empty:
         return empty
@@ -3266,6 +3347,8 @@ async def dashboard_summary(
     df = df.dropna(subset=["MARKPERCENT"])
     if df.empty:
         return empty
+
+    at_risk_count = await _predicted_at_risk_count(df, db)
 
     avg_mark  = _safe(df["MARKPERCENT"].mean())
     pass_rate = _safe((df["MARKPERCENT"] >= 50).mean() * 100)
@@ -3296,16 +3379,14 @@ async def dashboard_summary(
         "avg_mark_prev":   round(avg_mark_prev,  1) if avg_mark_prev  is not None else None,
         "pass_rate":       round(pass_rate,      1) if pass_rate      is not None else 0.0,
         "pass_rate_prev":  round(pass_rate_prev, 1) if pass_rate_prev is not None else None,
-        # Distinct STUDENTS with at least one mark below 50%, not a row count of
-        # failing assessment items — the dashboard shows this right next to
-        # total_students (a student count), so it must never exceed it. A raw
-        # `(MARKPERCENT < 50).sum()` counts every failing assessment across every
-        # subject/period, which is not bounded by student count at all (confirmed
-        # live: 57,710 vs. 7,926 total students, a QA-flagged impossible reading).
-        "at_risk_count": (
-            int(df.loc[df["MARKPERCENT"] < 50, "STUDENTID_MASKED"].nunique())
-            if "STUDENTID_MASKED" in df.columns else int((df["MARKPERCENT"] < 50).sum())
-        ),
+        # Real ML-predicted "At Risk"/"High Risk" students — see
+        # _predicted_at_risk_count's docstring for why this replaced a raw-
+        # marks count (distinct students with ≥1 item below 50%, which
+        # looked alarming — ~88% of the whole cohort — beside an 82% pass
+        # rate, because the two were answering unrelated questions, not
+        # actually contradicting each other). None (not 0) means nothing in
+        # this scope has been scored yet, not "nobody's at risk".
+        "at_risk_count": at_risk_count,
         "countries_count": countries,
     }
 
@@ -5584,10 +5665,14 @@ async def students_at_risk(
 # backgrounded job (the ingest-confirm auto-trigger) rather than via a
 # request-bound BackgroundTasks object. A bare asyncio.create_task(...) here
 # would risk the task being silently garbage-collected before it completes,
-# since nothing would otherwise hold a reference to it — this set is that
-# reference, discarded automatically via the done-callback once the task
-# finishes (success or failure either way).
-_SCORING_BACKGROUND_TASKS: set = set()
+# since nothing would otherwise hold a reference to it — this dict is that
+# reference, keyed by job_id so POST /api/scoring/jobs/{id}/cancel can find
+# and actually cancel a task still running in THIS process (an orphaned row
+# from a prior process — the far more common case in practice, see
+# _startup's cleanup above — has no entry here at all, so cancelling one of
+# those just updates the DB row directly). Discarded automatically via the
+# done-callback once the task finishes, for any reason.
+_SCORING_BACKGROUND_TASKS: dict[int, "asyncio.Task"] = {}
 
 
 def _launch_scoring_job(job_id: int, study_periods: list[str], subjects: Optional[list[str]] = None) -> None:
@@ -5605,8 +5690,8 @@ def _launch_scoring_job(job_id: int, study_periods: list[str], subjects: Optiona
     function returns, independent of the ingest job's own status.
     """
     task = asyncio.create_task(_run_scoring_job(job_id, study_periods, subjects))
-    _SCORING_BACKGROUND_TASKS.add(task)
-    task.add_done_callback(_SCORING_BACKGROUND_TASKS.discard)
+    _SCORING_BACKGROUND_TASKS[job_id] = task
+    task.add_done_callback(lambda t, jid=job_id: _SCORING_BACKGROUND_TASKS.pop(jid, None))
 
 
 def _scoring_job_to_dict(job: ScoringJob) -> dict:
@@ -5626,24 +5711,61 @@ def _scoring_job_to_dict(job: ScoringJob) -> dict:
     }
 
 
+_SCORING_CONCURRENCY = 4  # subjects scored in parallel per job — see _run_scoring_job
+
+# Only one ScoringJob's actual per-subject work runs at a time, system-wide —
+# see _run_scoring_job's docstring for why this exists (a capstone ingestion
+# and an attendance ingestion each auto-trigger their own job independently,
+# with no check for one already running, so uploading both back to back is
+# a completely normal workflow that used to launch two jobs concurrently,
+# competing for the same CPU cores/thread pool for no benefit).
+_SCORING_SERIAL_LOCK = asyncio.Lock()
+
+
 async def _run_scoring_job(job_id: int, study_periods: list[str], subjects: Optional[list[str]] = None) -> None:
     """Background body of a bulk risk-scoring run — same BackgroundTasks-
     after-the-response pattern _run_capstone_confirm_job uses, for the same
-    reason (opens its own DB session: the request's is long gone, and under
-    multiple gunicorn workers may not even be the same process as whatever
-    later polls this job's progress).
+    reason (opens its own DB session per unit of work below: the request's
+    is long gone, and under multiple gunicorn workers may not even be the
+    same process as whatever later polls this job's progress).
+
+    Subjects are scored _SCORING_CONCURRENCY at a time, not strictly one at
+    a time. Each subject's own per-student loop inside _compute_roster_rows
+    stays sequential (one real model+SHAP call per student, awaited one at
+    a time), but different subjects share no mutable state beyond _DATA
+    (read-only here) — each gets its own DB session — so running several
+    concurrently is safe and turns otherwise-idle CPU cores into real
+    wall-clock speedup instead of one core at a time.
+
+    Only one job's actual scoring work runs at a time SYSTEM-WIDE, via
+    _SCORING_SERIAL_LOCK — a capstone ingestion and an attendance ingestion
+    each auto-trigger their own ScoringJob independently (see both confirm
+    jobs' "Auto-trigger risk scoring" blocks), with no mutual awareness, so
+    uploading both back to back — an entirely ordinary workflow — used to
+    launch two jobs that ran concurrently, each with its own
+    _SCORING_CONCURRENCY workers, doubling CPU contention for no benefit.
+    A job waiting for its turn shows status "running" with 0 subjects
+    completed until the lock is free, rather than reporting something
+    misleadingly idle like "queued" as a distinct state — it IS running,
+    just not yet doing per-subject work. Whichever periods the second job
+    covers that the first one already reached will hit the cache-check in
+    _compute_roster_rows and finish fast rather than redoing real work.
 
     One bad subject is recorded in `result.errors` and skipped rather than
     aborting the whole run — a single reliability/data quirk in one of 129
     subjects shouldn't hide progress on the other 128. Status is "partial"
-    (not "failed") whenever at least one subject succeeded.
+    (not "failed") whenever at least one subject was actually scored (not
+    just skipped as unreliable/empty).
+
+    Cancellable via POST /api/scoring/jobs/{id}/cancel even while waiting on
+    the serial lock (asyncio.Lock supports cancelling a waiter cleanly) — a
+    CancelledError here (raised into whichever `await` was in flight)
+    propagates straight out rather than being recorded as a subject error;
+    the cancel endpoint itself is what sets the job's final "failed" status
+    and reason, so nothing further needs writing here in that case.
     """
     async with _AsyncSession() as db:
         job = await db.get(ScoringJob, job_id)
-        errors: list[dict] = []
-        students_scored = 0
-        subjects_ok = 0
-
         per_period_subjects: dict[str, list[str]] = {}
         for period in study_periods:
             if subjects is not None:
@@ -5657,35 +5779,57 @@ async def _run_scoring_job(job_id: int, study_periods: list[str], subjects: Opti
         job.subjects_total = sum(len(v) for v in per_period_subjects.values())
         await db.commit()
 
-        for period, subj_list in per_period_subjects.items():
-            for subject in subj_list:
-                try:
-                    # Same declines subject_roster() itself applies — an
-                    # unreliable subject was never scoreable to begin with.
-                    if _subject_reliability_category(subject) == "unreliable":
-                        job.subjects_completed += 1
-                        await db.commit()
-                        continue
+    work_items = [
+        (period, subject)
+        for period, subj_list in per_period_subjects.items()
+        for subject in subj_list
+    ]
+
+    errors: list[dict] = []
+    students_scored = 0
+    subjects_ok = 0
+    progress_lock = asyncio.Lock()
+    semaphore = asyncio.Semaphore(_SCORING_CONCURRENCY)
+
+    async def _score_one(period: str, subject: str) -> None:
+        nonlocal students_scored, subjects_ok
+        async with semaphore:
+            n_scored: Optional[int] = None  # None = skipped (unreliable / no data), never attempted
+            error: Optional[dict] = None
+            try:
+                # Same decline subject_roster() itself applies — an
+                # unreliable subject was never scoreable to begin with.
+                if _subject_reliability_category(subject) != "unreliable":
                     df_subj = _DATA[_DATA["SUBJECTCODE"] == subject]
                     df_period = df_subj[df_subj["STUDYPERIOD"] == period].dropna(subset=["MARKPERCENT"])
-                    if df_period.empty:
-                        job.subjects_completed += 1
-                        await db.commit()
-                        continue
-                    period_total_weight = _period_total_weight(subject, period)
-                    rows = await _compute_roster_rows(
-                        subject, period, df_period, period_total_weight, float(period), db,
-                        simulate_progress=None, use_cache=True,
-                    )
-                    students_scored += len(rows)
+                    if not df_period.empty:
+                        period_total_weight = _period_total_weight(subject, period)
+                        async with _AsyncSession() as sub_db:
+                            rows = await _compute_roster_rows(
+                                subject, period, df_period, period_total_weight, float(period), sub_db,
+                                simulate_progress=None, use_cache=True,
+                            )
+                        n_scored = len(rows)
+            except Exception as exc:
+                error = {"subject": subject, "study_period": period, "error": str(exc)[:300]}
+
+            async with progress_lock:
+                if error is not None:
+                    errors.append(error)
+                elif n_scored is not None:
+                    students_scored += n_scored
                     subjects_ok += 1
-                except Exception as exc:
-                    errors.append({"subject": subject, "study_period": period, "error": str(exc)[:300]})
+                async with _AsyncSession() as prog_db:
+                    prog_job = await prog_db.get(ScoringJob, job_id)
+                    prog_job.subjects_completed += 1
+                    prog_job.students_scored = students_scored
+                    await prog_db.commit()
 
-                job.subjects_completed += 1
-                job.students_scored = students_scored
-                await db.commit()
+    async with _SCORING_SERIAL_LOCK:
+        await asyncio.gather(*(_score_one(period, subject) for period, subject in work_items))
 
+    async with _AsyncSession() as db:
+        job = await db.get(ScoringJob, job_id)
         job.status = "success" if not errors else ("partial" if subjects_ok > 0 else "failed")
         job.result = {"errors": errors} if errors else None
         job.finished_at = datetime.now(timezone.utc)
@@ -5695,7 +5839,6 @@ async def _run_scoring_job(job_id: int, study_periods: list[str], subjects: Opti
 @app.post("/api/scoring/run", status_code=202, tags=["Subjects"])
 async def run_scoring(
     payload:           dict,
-    background_tasks:  BackgroundTasks,
     user:              dict         = Depends(require_head_of_school),
     db:                AsyncSession = Depends(get_db),
 ):
@@ -5739,7 +5882,13 @@ async def run_scoring(
     await db.commit()
     await db.refresh(job)
 
-    background_tasks.add_task(_run_scoring_job, job.id, study_periods)
+    # _launch_scoring_job rather than background_tasks.add_task — same
+    # GC-safe fire-and-forget path the auto-after-ingest trigger uses, so
+    # every scoring job (manual or automatic) is tracked in
+    # _SCORING_BACKGROUND_TASKS uniformly and can actually be cancelled by
+    # job id via POST /api/scoring/jobs/{id}/cancel below, not just an
+    # auto-triggered one.
+    _launch_scoring_job(job.id, study_periods)
     return {"job_id": job.id, "status": "running", "study_periods": study_periods}
 
 
@@ -5767,6 +5916,49 @@ async def get_scoring_job(
     job = await db.get(ScoringJob, job_id)
     if job is None:
         raise HTTPException(404, "Scoring job not found.")
+    return _scoring_job_to_dict(job)
+
+
+@app.post("/api/scoring/jobs/{job_id}/cancel", tags=["Subjects"])
+async def cancel_scoring_job(
+    job_id: int,
+    user:   dict         = Depends(require_head_of_school),
+    db:     AsyncSession = Depends(get_db),
+):
+    """Stop a scoring run that's stuck, taking too long, or simply no
+    longer wanted — clearing it also lifts POST /api/scoring/run's "already
+    running" 409 guard, which otherwise blocks any new run for as long as
+    the row says "running".
+
+    Two cases, handled differently because they're genuinely different
+    situations:
+      - A task for this job is still alive in THIS process (the common
+        live case): actually cancel it via asyncio — it stops at its next
+        `await` (typically within one student's model+SHAP call, since
+        each is a single `asyncio.to_thread` await), not necessarily
+        instantly, since a thread pool call already in flight can't be
+        force-killed. The job is marked "failed" regardless of exactly
+        where it stopped.
+      - No task found here (an orphaned row from a process that no longer
+        exists — the same situation _startup's cleanup handles at boot,
+        just discovered mid-session instead): nothing to cancel, only the
+        DB row to fix. Handled identically either way from the caller's
+        perspective.
+    """
+    job = await db.get(ScoringJob, job_id)
+    if job is None:
+        raise HTTPException(404, "Scoring job not found.")
+    if job.status != "running":
+        raise HTTPException(400, f"Job is '{job.status}', not running — nothing to cancel.")
+
+    task = _SCORING_BACKGROUND_TASKS.get(job_id)
+    if task is not None and not task.done():
+        task.cancel()
+
+    job.status = "failed"
+    job.finished_at = datetime.now(timezone.utc)
+    job.error_detail = f"Cancelled by {user['sub']}."
+    await db.commit()
     return _scoring_job_to_dict(job)
 
 

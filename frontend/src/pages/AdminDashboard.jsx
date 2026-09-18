@@ -306,7 +306,7 @@ export default function AdminDashboard() {
           delta={delta(summary?.avg_mark, summary?.avg_mark_prev)} />
         <KpiCard index={3} icon="✅" label="Institution Pass Rate" value={summary?.pass_rate} decimals={1} suffix="%" accent={COLOR.green}
           delta={delta(summary?.pass_rate, summary?.pass_rate_prev)} />
-        <KpiCard index={4} icon="⚠️" label="Total At Risk"         value={summary?.at_risk_count} sub="below 50%" warn />
+        <KpiCard index={4} icon="⚠️" label="Total At Risk"         value={summary?.at_risk_count} sub="predicted at risk" warn />
         <KpiCard index={5} icon="🌍" label="Countries"             value={summary?.countries_count} sub="represented" accent={COLOR.light} />
       </div>}
 
