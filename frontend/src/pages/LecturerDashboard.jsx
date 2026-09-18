@@ -138,7 +138,7 @@ export default function LecturerDashboard() {
           <span style={{ fontSize: 16 }}>⚠</span>
           <span>
             <strong>{atRisk} student{atRisk !== 1 ? 's' : ''}</strong> in{' '}
-            <strong>{atRiskSubj}</strong> are currently below 50%. Consider early intervention.
+            <strong>{atRiskSubj}</strong> are predicted at risk of failing. Consider early intervention.
           </span>
         </div>
       )}
@@ -225,7 +225,7 @@ export default function LecturerDashboard() {
             index={3} icon="⚠️"
             label="At Risk"
             value={summary?.at_risk_count}
-            sub="below 50%"
+            sub="predicted at risk"
             warn
           />
         </div>

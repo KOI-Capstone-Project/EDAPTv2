@@ -3265,6 +3265,66 @@ async def ingest_attendance_preview(
 # Dashboard Routes
 # ─────────────────────────────────────────────────────────────────────────────
 
+async def _predicted_at_risk_count(df: pd.DataFrame, db: AsyncSession) -> Optional[int]:
+    """Distinct students currently predicted "At Risk" or "High Risk" by the
+    real ML model, scoped to exactly the (student, subject, study_period)
+    combinations present in `df` (already role/query-filtered by the
+    caller) — the same risk_band the Students at Risk page and the chatbot
+    report, so this headline dashboard KPI can never disagree with them.
+
+    Deliberately NOT "how many students have ever scored below 50% on a
+    single assessment item" (the metric this replaced): with several years
+    of multi-subject history per student, nearly every student has one weak
+    item somewhere, which is a real but nearly meaningless number to show
+    beside a pass rate — see the git history of this function for the exact
+    incident (looked alarming: ~88% "at risk" beside an 82% pass rate,
+    which is the raw-marks metric and the ML risk_band answering two
+    unrelated questions, not a real contradiction).
+
+    Returns None (not 0) when no scoped subject/period has been scored at
+    all yet — a real "we haven't looked" gap, not "nobody's at risk".
+    """
+    if df.empty or "STUDENTID_MASKED" not in df.columns or "SUBJECTCODE" not in df.columns:
+        return None
+
+    periods  = df["STUDYPERIOD"].dropna().unique().tolist()
+    subjects = df["SUBJECTCODE"].dropna().unique().tolist()
+    if not periods or not subjects:
+        return None
+
+    scoped_keys = set(zip(df["STUDENTID_MASKED"], df["SUBJECTCODE"], df["STUDYPERIOD"]))
+
+    rows = (await db.execute(
+        select(
+            Prediction.student_id_masked, Prediction.subject_code, Prediction.study_period,
+            Prediction.risk_band, Prediction.predicted_at,
+        ).where(
+            Prediction.study_period.in_(periods),
+            Prediction.subject_code.in_(subjects),
+        )
+    )).all()
+
+    # Most recent prediction per (student, subject, period) — a re-predicted
+    # enrolment (newer model version, or a later ingestion) must count once,
+    # at its latest risk band, same dedup rule the chatbot's own risk
+    # context already applies to this same table.
+    latest: dict[tuple, tuple] = {}
+    for student, subj, period, risk_band, predicted_at in rows:
+        key = (student, subj, period)
+        if key not in scoped_keys:
+            continue
+        if key not in latest or predicted_at > latest[key][1]:
+            latest[key] = (risk_band, predicted_at)
+
+    if not latest:
+        return None  # real data in scope, but none of it has been scored yet
+
+    return len({
+        student for (student, _subj, _period), (risk_band, _predicted_at) in latest.items()
+        if risk_band in ("At Risk", "High Risk")
+    })
+
+
 @app.get("/api/dashboard/summary", tags=["Dashboard"])
 async def dashboard_summary(
     subject:    Optional[str] = Query(None),
@@ -3272,12 +3332,13 @@ async def dashboard_summary(
     year:       Optional[str] = Query(None),
     classgroup: Optional[str] = Query(None),
     user: dict = Depends(get_current_user),
+    db:   AsyncSession = Depends(get_db),
 ):
     """Return KPI summary metrics for the selected scope and role."""
     empty = {
         "total_students": 0, "total_subjects": 0, "avg_mark": 0.0,
         "avg_mark_prev": None, "pass_rate": 0.0, "pass_rate_prev": None,
-        "at_risk_count": 0, "countries_count": 0,
+        "at_risk_count": None, "countries_count": 0,
     }
     if _DATA is None or _DATA.empty:
         return empty
@@ -3286,6 +3347,8 @@ async def dashboard_summary(
     df = df.dropna(subset=["MARKPERCENT"])
     if df.empty:
         return empty
+
+    at_risk_count = await _predicted_at_risk_count(df, db)
 
     avg_mark  = _safe(df["MARKPERCENT"].mean())
     pass_rate = _safe((df["MARKPERCENT"] >= 50).mean() * 100)
@@ -3316,16 +3379,14 @@ async def dashboard_summary(
         "avg_mark_prev":   round(avg_mark_prev,  1) if avg_mark_prev  is not None else None,
         "pass_rate":       round(pass_rate,      1) if pass_rate      is not None else 0.0,
         "pass_rate_prev":  round(pass_rate_prev, 1) if pass_rate_prev is not None else None,
-        # Distinct STUDENTS with at least one mark below 50%, not a row count of
-        # failing assessment items — the dashboard shows this right next to
-        # total_students (a student count), so it must never exceed it. A raw
-        # `(MARKPERCENT < 50).sum()` counts every failing assessment across every
-        # subject/period, which is not bounded by student count at all (confirmed
-        # live: 57,710 vs. 7,926 total students, a QA-flagged impossible reading).
-        "at_risk_count": (
-            int(df.loc[df["MARKPERCENT"] < 50, "STUDENTID_MASKED"].nunique())
-            if "STUDENTID_MASKED" in df.columns else int((df["MARKPERCENT"] < 50).sum())
-        ),
+        # Real ML-predicted "At Risk"/"High Risk" students — see
+        # _predicted_at_risk_count's docstring for why this replaced a raw-
+        # marks count (distinct students with ≥1 item below 50%, which
+        # looked alarming — ~88% of the whole cohort — beside an 82% pass
+        # rate, because the two were answering unrelated questions, not
+        # actually contradicting each other). None (not 0) means nothing in
+        # this scope has been scored yet, not "nobody's at risk".
+        "at_risk_count": at_risk_count,
         "countries_count": countries,
     }
 
