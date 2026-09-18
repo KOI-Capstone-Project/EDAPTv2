@@ -4,14 +4,19 @@ All notable changes to EDAPT v2 are documented here.
 
 ---
 
-## [2026-09-18] — Scoring Job Cancel, Startup Self-Heal, and Concurrent Scoring
+## [2026-09-18] — Scoring Job Cancel, Startup Self-Heal, Concurrent Scoring, and a Real Data-Loss Near-Miss
 
 ### Added
 
 - **`POST /api/scoring/jobs/{id}/cancel`** — stops a running scoring job. Actually cancels the underlying `asyncio.Task` when it's still alive in this process (via a new job-id-keyed `_SCORING_BACKGROUND_TASKS` dict, upgraded from a plain set); either way, immediately clears `POST /api/scoring/run`'s `409` "already running" guard, which is the main reason to use it — restarting a scan of newly-ingested data without waiting for a stale or unwanted run first. Rejects (400) cancelling a job that isn't `"running"`. A "Cancel" button was added next to any running job on the Data Ingestion page's Risk Scoring tab.
 - **Startup self-heal for orphaned `ScoringJob` rows.** Found live: three rows stuck `"running"` for multiple days, left behind by earlier container kills in this dev environment, silently blocking every subsequent scoring attempt via the `409` guard with no way to clear them short of a manual DB fix. The app's own startup handler now marks any row still `"running"` as `"failed"` ("Orphaned by a backend restart") before serving traffic — such a row can never be a real, still-executing job, since the process that was running it no longer exists.
-- **Concurrent subject scoring.** `_run_scoring_job` now scores `_SCORING_CONCURRENCY` (4) subjects at a time instead of one at a time — each subject's own per-student loop stays sequential, but different subjects share no mutable state (each gets its own DB session), so this is safe and turns idle CPU cores into real wall-clock speedup. A 120-subject/~9,000-student run that previously took ~47 minutes completed dramatically faster in a live test.
-- `test_scoring_job_control.py` (3 tests) covering all three of the above.
+- **Concurrent subject scoring.** `_run_scoring_job` now scores `_SCORING_CONCURRENCY` (4) subjects at a time instead of one at a time — each subject's own per-student loop stays sequential, but different subjects share no mutable state (each gets its own DB session), so this is safe and turns idle CPU cores into real wall-clock speedup. A 939-subject-period/75,376-student run (a full historical re-ingestion touching 9 periods) completed successfully end to end under the new code.
+- `test_scoring_job_control.py` (4 tests) covering all of the above, including a dedicated test for the concurrent-jobs fix immediately below.
+
+### Fixed
+
+- **Two scoring jobs running concurrently and competing for CPU — a real, reported bug.** A capstone ingestion and an attendance ingestion each auto-trigger their own `ScoringJob` completely independently, with no check for one already running — so uploading both back to back (an entirely ordinary workflow) always launched two jobs that ran at the same time, each with its own internal concurrency, visibly confusing on the Risk Scoring tab ("why are there two running at once?"). Fixed with a new `_SCORING_SERIAL_LOCK`: only one job's actual per-subject work runs at a time system-wide; a second job still shows `"running"` immediately but doesn't start scoring until the first releases the lock, and thanks to the existing cache-check, any periods it inherits that the first job already reached finish almost instantly instead of redoing real work.
+- **A real near-miss found while testing the fix above: the test suite could delete a real admin's genuinely in-progress scoring job.** `test_ingestion_e2e.py`'s shared `_preserve_app_state()` cleanup fixture blanket-deleted every row in `scoring_jobs` on teardown — the same pattern already accepted for `ingest_jobs`/`analyze_jobs`/`pending_ingests`/`upload_batches` (harmless there, since those only ever hold short-lived bookkeeping rows). `scoring_jobs` is different: it shares the table with real, hours-long real-admin work. Confirmed live — running part of the suite deleted two real in-progress jobs out from under an actual admin session. Fixed by snapshotting `scoring_jobs` ids on fixture entry and diffing on exit, so only rows a test's own `confirm()` calls actually created are touched; the real jobs were restarted and completed successfully afterward. The other four tables' blanket-delete behavior is untouched (out of scope, lower risk).
 
 ### Changed
 
