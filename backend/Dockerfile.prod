@@ -49,6 +49,13 @@ RUN addgroup --system edapt && adduser --system --ingroup edapt edapt
 # the non-root edapt user failed with "Permission denied".
 RUN mkdir -p /shared_data && chown edapt:edapt /shared_data
 
+# The COPY steps above run as root, so everything under /app (including
+# app/ml/, where _INGEST_LOCK_PATH and the model registry files live — see
+# main.py's _acquire_ingest_lock) is root-owned. Confirmed necessary directly:
+# without this, ingestion failed as the non-root edapt user with
+# "[Errno 13] Permission denied: '/app/app/ml/.ingest.lock'".
+RUN chown -R edapt:edapt /app
+
 USER edapt
 
 EXPOSE 8000
